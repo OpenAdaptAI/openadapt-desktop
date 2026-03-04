@@ -25,24 +25,24 @@ The Python engine works as a **standalone CLI** today. A Tauri-based system tray
 # Install
 git clone https://github.com/OpenAdaptAI/openadapt-desktop.git
 cd openadapt-desktop
-uv sync --extra dev
+uv sync
 
 # Record a session
-openadapt record --task "Demo task"    # Ctrl+C to stop
+uv run openadapt record --task "Demo task"    # Ctrl+C to stop
 
 # Scrub PII, review, and upload
-openadapt scrub <CAPTURE_ID> --level basic
-openadapt approve <CAPTURE_ID>
-openadapt upload <CAPTURE_ID> --backend s3
+uv run openadapt scrub <CAPTURE_ID> --level basic
+uv run openadapt approve <CAPTURE_ID>
+uv run openadapt upload <CAPTURE_ID> --backend s3
 
 # Other commands
-openadapt list                         # List captures
-openadapt review                       # Show pending reviews
-openadapt storage                      # Show disk usage
-openadapt health                       # Show memory/disk health
-openadapt cleanup                      # Enforce storage limits
-openadapt config                       # Show current configuration
-openadapt backends                     # Show available backends
+uv run openadapt list                         # List captures
+uv run openadapt review                       # Show pending reviews
+uv run openadapt storage                      # Show disk usage
+uv run openadapt health                       # Show memory/disk health
+uv run openadapt cleanup                      # Enforce storage limits
+uv run openadapt config                       # Show current configuration
+uv run openadapt backends                     # Show available backends
 ```
 
 ## Architecture
