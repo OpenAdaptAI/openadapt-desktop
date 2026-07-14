@@ -1,17 +1,23 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicoverbruggen/tauri-v2-schema/main/schema.json",
   "productName": "OpenAdapt Desktop",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "identifier": "ai.openadapt.desktop",
   "build": {
-    "frontendDist": "../src"
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
   },
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "OpenAdapt Desktop",
-        "width": 800,
-        "height": 600,
+        "width": 1120,
+        "height": 760,
+        "minWidth": 880,
+        "minHeight": 600,
         "visible": false
       }
     ],
@@ -21,7 +27,7 @@
       "tooltip": "OpenAdapt Desktop"
     },
     "security": {
-      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'"
+      "csp": "default-src 'self'; img-src 'self' data: asset: https://asset.localhost; font-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost"
     }
   },
   "bundle": {
@@ -33,14 +39,15 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "externalBin": ["binaries/openadapt-engine"]
   },
   "plugins": {
     "updater": {
       "endpoints": [
         "https://github.com/OpenAdaptAI/openadapt-desktop/releases/latest/download/latest.json"
       ],
-      "pubkey": ""
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEY5MzM3MTQxNEJBRTJCNDYKUldSR0s2NUxRWEV6K2J6bXdxc2NYRVFqNkFFZUtrYUE4V1FqaTNVRktQU1RsSU9RR2RBWEcwVEgK"
     }
   }
 }
