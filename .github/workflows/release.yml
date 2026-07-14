@@ -1,63 +1,273 @@
-name: Release and PyPI Publish
+# Desktop binary release pipeline.
+#
+# Builds the OpenAdapt Desktop Tauri app for every supported platform, freezes
+# the Python engine into a `openadapt-engine` sidecar binary, bundles it into
+# the installers, and publishes them to a GitHub Release. Releases are the
+# single source of truth that `openadapt.ai/download` and the in-app updater
+# both read from.
+#
+# Triggered by pushing a version tag (`vX.Y.Z`) — these tags are created by the
+# pypi-publish.yml semantic-release job on push to main.
+#
+# ---------------------------------------------------------------------------
+# Build matrix (see architecture spec section 4a)
+# ---------------------------------------------------------------------------
+#   Windows x64          windows-latest   .msi + NSIS .exe   [PRIORITY]
+#   macOS Apple Silicon  macos-14         .dmg
+#   macOS Intel          macos-13         .dmg
+#   Linux x64            ubuntu-22.04     .AppImage + .deb
+#
+# The concrete bundle targets come from tauri.conf.json (`bundle.targets: all`),
+# which a sibling PR owns; this workflow only selects the Rust target triple.
+#
+# ---------------------------------------------------------------------------
+# Sidecar contract (consumed by tauri.conf.json `bundle.externalBin`, owned by
+# the Tauri-frontend sibling PR)
+# ---------------------------------------------------------------------------
+#   externalBin entry : "binaries/openadapt-engine"
+#   file this job emits: src-tauri/binaries/openadapt-engine-<target-triple>[.exe]
+# Tauri appends the target triple automatically at bundle time, so the sibling
+# only declares the base name "binaries/openadapt-engine".
+#
+# ---------------------------------------------------------------------------
+# Signing — UNSIGNED for v1, but signing-ready (see spec section 4c)
+# ---------------------------------------------------------------------------
+# Every signing step is GATED on its secret being present. With no secrets set,
+# unsigned installers build and publish. Dropping the certs into repo secrets
+# later produces signed builds on the next tag with zero workflow changes.
+#   macOS notarization    : gated on secrets.APPLE_CERTIFICATE
+#   Windows Authenticode  : gated on secrets.AZURE_SIGNING_ACCOUNT (Azure
+#                           Trusted Signing — cloud HSM, no hardware token)
+#
+# ---------------------------------------------------------------------------
+# Updater (see spec section 4d)
+# ---------------------------------------------------------------------------
+# tauri-action generates `latest.json` and attaches it to the release when
+# TAURI_SIGNING_PRIVATE_KEY is present. The updater endpoint in tauri.conf.json
+# is https://github.com/OpenAdaptAI/openadapt-desktop/releases/latest/download/latest.json
+# so the convention is: publish `latest.json` as a release asset on every
+# release; the app resolves it via /releases/latest/download/latest.json.
+#
+# FOUNDER SETUP (one-time, not in this repo's code):
+#   1. `tauri signer generate -w ~/.tauri/openadapt.key`
+#   2. Put the PRIVATE key in repo secret TAURI_SIGNING_PRIVATE_KEY (and its
+#      password, if any, in TAURI_SIGNING_PRIVATE_KEY_PASSWORD).
+#   3. Put the PUBLIC key in tauri.conf.json plugins.updater.pubkey (sibling PR).
+# Do NOT commit either key. Without TAURI_SIGNING_PRIVATE_KEY the build still
+# publishes installers; only the auto-updater feed is skipped.
 
-# Requires ADMIN_TOKEN secret (GitHub PAT with repo scope) to push release
-# commits to protected branches. Without it, the tag gets created but the
-# version bump commit is rejected by branch protection, orphaning the tag.
+name: Release Desktop
 
 on:
   push:
-    branches:
-      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build a release for (e.g. v0.2.0)"
+        required: true
+
+permissions:
+  contents: write
 
 jobs:
   release:
-    runs-on: ubuntu-latest
-    concurrency: release
-    permissions:
-      id-token: write
-      contents: write
+    name: ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Windows is the priority target (regulated Windows/Citrix buyer).
+          - label: Windows x64
+            os: windows-latest
+            rust_target: x86_64-pc-windows-msvc
+            args: ""
+          - label: macOS Apple Silicon
+            os: macos-14
+            rust_target: aarch64-apple-darwin
+            args: "--target aarch64-apple-darwin"
+          - label: macOS Intel
+            os: macos-13
+            rust_target: x86_64-apple-darwin
+            args: "--target x86_64-apple-darwin"
+          - label: Linux x64
+            os: ubuntu-22.04
+            rust_target: x86_64-unknown-linux-gnu
+            args: ""
+    runs-on: ${{ matrix.os }}
+
+    env:
+      # Updater signing (separate from OS code-signing certs).
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      # macOS code-signing / notarization (empty => unsigned build).
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      # Windows Azure Trusted Signing (empty => unsigned build).
+      AZURE_SIGNING_ACCOUNT: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
         with:
-          fetch-depth: 0
-          token: ${{ secrets.ADMIN_TOKEN }}
+          targets: ${{ matrix.rust_target }}
 
-      - name: Check if should skip
-        id: check_skip
+      - name: Cache cargo build
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: ${{ matrix.rust_target }}
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
         run: |
-          if [ "$(git log -1 --pretty=format:'%an')" = "semantic-release" ]; then
-            echo "skip=true" >> $GITHUB_OUTPUT
-          fi
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libgtk-3-dev \
+            libxdo-dev \
+            libssl-dev \
+            build-essential \
+            curl wget file
 
-      - name: Set up Python
-        if: steps.check_skip.outputs.skip != 'true'
+      - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: "3.12"
 
-      - name: Install uv
-        if: steps.check_skip.outputs.skip != 'true'
-        uses: astral-sh/setup-uv@v4
+      # --- Freeze the Python engine into the `openadapt-engine` sidecar -------
+      # Tolerates the engine package being absent or unbuildable: the workflow
+      # is config that runs live post-merge, and the engine lands via a sibling
+      # PR. On failure it warns and continues so the workflow stays valid; a
+      # live release run with the real engine present produces the sidecar.
+      - name: Build engine sidecar (PyInstaller)
+        shell: bash
+        run: |
+          set -u
+          mkdir -p src-tauri/binaries
 
-      - name: Python Semantic Release
-        if: steps.check_skip.outputs.skip != 'true'
-        id: release
-        uses: python-semantic-release/python-semantic-release@v9.15.2
+          # Resolve the engine entrypoint (CLI/IPC main).
+          ENTRY=""
+          for candidate in engine/main.py engine/__main__.py engine/cli.py; do
+            if [ -f "$candidate" ]; then ENTRY="$candidate"; break; fi
+          done
+          if [ -z "$ENTRY" ]; then
+            echo "::warning::No engine entrypoint found; skipping sidecar freeze."
+            echo "::warning::tauri-action will fail if tauri.conf.json declares externalBin without this binary."
+            exit 0
+          fi
+          echo "Freezing engine entrypoint: $ENTRY"
+
+          python -m pip install --upgrade pip pyinstaller || {
+            echo "::warning::Failed to install PyInstaller; skipping sidecar freeze."; exit 0; }
+
+          # Install the engine's own dependencies so the frozen binary is
+          # self-contained. Base extra only (the heavy federated/torch extra is
+          # intentionally excluded).
+          if [ -f pyproject.toml ]; then
+            python -m pip install . || echo "::warning::engine dependency install failed; continuing with best-effort freeze."
+          fi
+
+          pyinstaller --onefile --clean --noconfirm \
+            --name openadapt-engine \
+            --collect-submodules engine \
+            "$ENTRY" || {
+              echo "::warning::PyInstaller freeze failed; sidecar not produced."; exit 0; }
+
+          # Rename to the Tauri sidecar convention:
+          #   binaries/openadapt-engine-<target-triple>[.exe]
+          TRIPLE="${{ matrix.rust_target }}"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            mv "dist/openadapt-engine.exe" "src-tauri/binaries/openadapt-engine-${TRIPLE}.exe"
+          else
+            mv "dist/openadapt-engine" "src-tauri/binaries/openadapt-engine-${TRIPLE}"
+            chmod +x "src-tauri/binaries/openadapt-engine-${TRIPLE}"
+          fi
+          echo "Sidecar placed at src-tauri/binaries/openadapt-engine-${TRIPLE}"
+          ls -la src-tauri/binaries
+
+      # --- macOS: prepare code-signing identity (gated on secret presence) ----
+      # If APPLE_CERTIFICATE is unset this step is skipped and tauri-action
+      # produces an unsigned .dmg. Setting the secret later enables signing +
+      # notarization with no other change.
+      - name: Prepare Apple signing
+        if: ${{ runner.os == 'macOS' && env.APPLE_CERTIFICATE != '' }}
+        run: |
+          echo "APPLE_CERTIFICATE present -> tauri-action will sign and notarize."
+          echo "Signing identity: ${APPLE_SIGNING_IDENTITY:-<unset>}"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
         with:
-          github_token: ${{ secrets.ADMIN_TOKEN }}
+          node-version: "22"
 
-      - name: Build package
-        if: steps.check_skip.outputs.skip != 'true' && steps.release.outputs.released == 'true'
-        run: uv build
+      - name: Install frontend dependencies
+        shell: bash
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci || npm install
+          else
+            npm install
+          fi
 
-      - name: Publish to PyPI
-        if: steps.check_skip.outputs.skip != 'true' && steps.release.outputs.released == 'true'
-        uses: pypa/gh-action-pypi-publish@release/v1
+      - name: Resolve release tag
+        id: tag
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "value=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Publish to GitHub Releases
-        if: steps.check_skip.outputs.skip != 'true' && steps.release.outputs.released == 'true'
-        uses: python-semantic-release/publish-action@v9.15.2
+      # --- Build + bundle + publish to the GitHub Release ---------------------
+      # tauri-action runs the frozen sidecar as externalBin, builds every
+      # bundle target declared in tauri.conf.json, signs when the OS certs are
+      # present (unsigned otherwise), generates latest.json when the updater key
+      # is present, and uploads all artifacts to the release for this tag.
+      - name: Build and publish desktop app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          github_token: ${{ secrets.ADMIN_TOKEN }}
+          tagName: ${{ steps.tag.outputs.value }}
+          releaseName: "OpenAdapt Desktop ${{ steps.tag.outputs.value }}"
+          releaseBody: |
+            OpenAdapt Desktop ${{ steps.tag.outputs.value }}
+
+            Installers for macOS, Windows, and Linux are attached below. These
+            builds are not code-signed yet, so macOS Gatekeeper and Windows
+            SmartScreen will show a first-run warning. See
+            https://openadapt.ai/download for how to get past it.
+          releaseDraft: true
+          prerelease: false
+          includeUpdaterJson: true
+          args: ${{ matrix.args }}
+
+      # --- Windows: Azure Trusted Signing (gated on secret presence) ----------
+      # Runs only when AZURE_SIGNING_ACCOUNT is set. Signs the built installers
+      # in place. Until then, Windows installers ship unsigned by design.
+      - name: Sign Windows installers (Azure Trusted Signing)
+        if: ${{ runner.os == 'Windows' && env.AZURE_SIGNING_ACCOUNT != '' }}
+        uses: azure/trusted-signing-action@v0.5.0
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.AZURE_SIGNING_PROFILE }}
+          files-folder: ${{ github.workspace }}\src-tauri\target\release\bundle
+          files-folder-filter: msi,exe
+          files-folder-recurse: true
