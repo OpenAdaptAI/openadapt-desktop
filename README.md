@@ -27,11 +27,12 @@ certification, and repair live in `openadapt-flow`, not this repository.
 | Python capture CLI | Record, list, inspect, scrub, review, approve, local storage, health, and cleanup commands | Experimental; covered by tests |
 | Local review gate | Persisted states and egress checks for the legacy capture pipeline | Experimental; not the `openadapt-flow` certification system |
 | Legacy upload adapters | S3-compatible storage, Hugging Face Hub, Magic Wormhole, and federated-learning code paths | Experimental; not the current hosted workflow/break-report contract |
-| Tauri/WebView UI | Static prototype assets | Scaffold only |
+| Tauri/WebView UI | Static prototype assets and a release-mode shell binary built on Linux, macOS, and Windows CI | Compiles unsigned; commands remain scaffold-only |
 | Rust commands | Command signatures return `Not implemented` | Not integrated |
 | Python sidecar IPC | Protocol skeleton with no registered handlers | Not integrated |
 | Desktop-to-flow handoff | No record -> compile -> replay -> teach connection | Not implemented |
-| Native installers and updater | Bundle configuration exists; updater key and release path are incomplete | Not release-ready |
+| Build artifacts | Wheel/sdist, a smoke-tested PyInstaller sidecar, and an unsigned Tauri shell binary | CI artifacts only; not an integrated or signed release |
+| Native installers and updater | Bundle configuration exists; installer signing, updater signing, and release credentials are incomplete | Not release-ready |
 
 The Python and JavaScript package versions also differ (`0.2.0` and `0.1.0`).
 That is another integration gap, not evidence of two supported desktop
@@ -115,7 +116,8 @@ workflow compiler or runtime. Those remain in `openadapt-flow`.
 - No checked-in adapter hands a capture to `openadapt-flow` for compilation.
 - No teaching UI writes a governed repair back to a workflow bundle.
 - Native DMG, MSI, and Linux packages are not established release artifacts.
-- Auto-update signing and rollback are not configured as a supported channel.
+- Apple signing/notarization, Windows Authenticode, updater signing, and
+  rollback are not configured as a supported release channel.
 - The separately developed tray client expects a desktop IPC service that this
   branch does not provide.
 
