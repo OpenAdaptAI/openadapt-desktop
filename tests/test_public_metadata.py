@@ -43,6 +43,7 @@ def test_semantic_release_refreshes_lock_and_builds_before_tagging() -> None:
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
     build_command = pyproject["tool"]["semantic_release"]["build_command"]
 
+    assert "python -m ensurepip --upgrade" in build_command
     assert "uv==0.11.29" in build_command
     assert "uv lock --offline" in build_command
     assert "git add uv.lock" in build_command
