@@ -77,6 +77,7 @@ version_variables = ["engine/__init__.py:__version__"]
 commit_message = "chore: release {version}"
 major_on_zero = false
 allow_zero_version = true
+build_command = "python -m pip install --disable-pip-version-check uv==0.11.29 && uv lock --offline && git add uv.lock && uv build --wheel --sdist"
 
 [tool.semantic_release.branches.main]
 match = "main"
