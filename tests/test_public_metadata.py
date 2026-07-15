@@ -5,7 +5,7 @@ import re
 import tomllib
 from pathlib import Path
 
-from scripts.check_release_consistency import release_versions
+from scripts.check_release_consistency import release_versions, sync_lock_version
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -45,10 +45,30 @@ def test_semantic_release_refreshes_lock_and_builds_before_tagging() -> None:
 
     assert "python -m ensurepip --upgrade" in build_command
     assert "uv==0.11.29" in build_command
-    assert "uv lock --offline" in build_command
+    assert "check_release_consistency.py --sync" in build_command
     assert "git add uv.lock" in build_command
     assert "uv build --wheel --sdist" in build_command
+    assert "check_release_consistency.py --require-dist" in build_command
+    assert "uv lock" not in build_command
     assert "$PACKAGE_NAME" not in build_command
+
+
+def test_release_lock_sync_updates_only_editable_root_version(tmp_path: Path) -> None:
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "openadapt-desktop"\nversion = "0.3.0"\n'
+    )
+    (tmp_path / "engine/__init__.py").write_text('__version__ = "0.3.0"\n')
+    (tmp_path / "uv.lock").write_text(
+        'version = 1\n\n[[package]]\nname = "openadapt-desktop"\n'
+        'version = "0.2.0"\nsource = { editable = "." }\n'
+        '\n[[package]]\nname = "dependency"\nversion = "1.2.3"\n'
+    )
+
+    assert sync_lock_version(tmp_path) == "0.3.0"
+    lock = (tmp_path / "uv.lock").read_text()
+    assert 'name = "openadapt-desktop"\nversion = "0.3.0"' in lock
+    assert 'name = "dependency"\nversion = "1.2.3"' in lock
 
 
 def test_release_workflow_uses_matching_pinned_actions() -> None:

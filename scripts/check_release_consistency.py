@@ -8,6 +8,11 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+LOCK_PACKAGE_PATTERN = re.compile(
+    r'(?P<prefix>\[\[package\]\]\nname = "openadapt-desktop"\nversion = ")'
+    r'[^\"]+(?P<suffix>"\nsource = \{ editable = "\." \})',
+    flags=re.MULTILINE,
+)
 
 
 def _match(pattern: str, text: str, source: str) -> str:
@@ -17,10 +22,10 @@ def _match(pattern: str, text: str, source: str) -> str:
     return match.group(1)
 
 
-def release_versions() -> dict[str, str]:
-    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    package_init = (ROOT / "engine/__init__.py").read_text(encoding="utf-8")
-    lock = (ROOT / "uv.lock").read_text(encoding="utf-8")
+def release_versions(root: Path = ROOT) -> dict[str, str]:
+    pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
+    package_init = (root / "engine/__init__.py").read_text(encoding="utf-8")
+    lock = (root / "uv.lock").read_text(encoding="utf-8")
 
     return {
         "pyproject.toml": _match(
@@ -40,10 +45,42 @@ def release_versions() -> dict[str, str]:
     }
 
 
+def sync_lock_version(root: Path = ROOT) -> str:
+    versions = release_versions(root)
+    source_versions = {
+        versions["pyproject.toml"],
+        versions["engine/__init__.py"],
+    }
+    if len(source_versions) != 1:
+        raise ValueError(f"release source versions differ: {versions}")
+    version = source_versions.pop()
+
+    lock_path = root / "uv.lock"
+    lock = lock_path.read_text(encoding="utf-8")
+    updated, replacements = LOCK_PACKAGE_PATTERN.subn(
+        rf"\g<prefix>{version}\g<suffix>", lock
+    )
+    if replacements != 1:
+        raise ValueError(
+            "expected exactly one editable openadapt-desktop package in uv.lock, "
+            f"found {replacements}"
+        )
+    lock_path.write_text(updated, encoding="utf-8")
+
+    synchronized = release_versions(root)
+    if len(set(synchronized.values())) != 1:
+        raise ValueError(f"release versions differ after lock sync: {synchronized}")
+    return version
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--sync", action="store_true")
     parser.add_argument("--require-dist", action="store_true")
     args = parser.parse_args()
+
+    if args.sync:
+        sync_lock_version()
 
     versions = release_versions()
     unique_versions = set(versions.values())
