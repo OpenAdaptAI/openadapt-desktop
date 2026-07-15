@@ -14,6 +14,7 @@ in-tree against the identical contract.
 
 from __future__ import annotations
 
+import os
 import tempfile
 import zipfile
 from pathlib import Path
@@ -50,6 +51,9 @@ def zip_dir(src_dir: Path, dest: Path | None = None) -> Path:
     src_dir = Path(src_dir)
     if dest is None:
         fd, tmp = tempfile.mkstemp(suffix=".zip", prefix=f"{src_dir.name}_")
+        # Close the handle mkstemp opened before touching the path -- on Windows
+        # an open fd holds a lock, so unlink/reopen raises WinError 32.
+        os.close(fd)
         Path(tmp).unlink(missing_ok=True)
         dest = Path(tmp)
     with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as zf:
