@@ -5,6 +5,8 @@ import re
 import tomllib
 from pathlib import Path
 
+from scripts.check_release_consistency import release_versions
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -30,6 +32,35 @@ def test_semantic_release_preserves_pre_one_versions() -> None:
 
     assert release["major_on_zero"] is False
     assert release["allow_zero_version"] is True
+
+
+def test_release_versions_are_synchronized() -> None:
+    versions = release_versions()
+    assert len(set(versions.values())) == 1, versions
+
+
+def test_semantic_release_refreshes_lock_and_builds_before_tagging() -> None:
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    build_command = pyproject["tool"]["semantic_release"]["build_command"]
+
+    assert "uv==0.11.29" in build_command
+    assert "uv lock --offline" in build_command
+    assert "git add uv.lock" in build_command
+    assert "uv build --wheel --sdist" in build_command
+    assert "$PACKAGE_NAME" not in build_command
+
+
+def test_release_workflow_uses_matching_pinned_actions() -> None:
+    workflow = (ROOT / ".github/workflows/release.yml").read_text()
+    uses = re.findall(r"^\s*uses:\s+\S+@([^\s#]+)", workflow, flags=re.MULTILINE)
+
+    assert uses
+    assert all(re.fullmatch(r"[0-9a-f]{40}", revision) for revision in uses)
+    assert "# v10.6.1" in workflow
+    assert "# v9.15.2" not in workflow
+    assert "token: ${{ secrets.ADMIN_TOKEN }}" in workflow
+    assert workflow.count("github_token: ${{ secrets.ADMIN_TOKEN }}") == 2
+    assert "- name: Build package" not in workflow
 
 
 def test_readme_local_links_exist() -> None:
