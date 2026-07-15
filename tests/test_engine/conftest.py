@@ -23,9 +23,15 @@ class FakeKeyring:
         del self._store[(service, account)]
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def fake_keyring(monkeypatch) -> FakeKeyring:
-    """Patch the auth store to use an in-memory keyring backend."""
+    """Patch the auth store to use an in-memory keyring backend.
+
+    Autouse (review 2.2 P0-1): no engine test may silently reach the real OS
+    keychain -- on a headless CI box that raises ``NoKeyringError`` and reddened
+    every OS job. Tests that assert on stored credentials request this fixture
+    by name to grab the in-memory backend; the rest just get isolation for free.
+    """
     fake = FakeKeyring()
     monkeypatch.setattr("engine.auth.store._keyring", lambda: fake)
     # Ensure no ambient ingest token leaks in from the environment.

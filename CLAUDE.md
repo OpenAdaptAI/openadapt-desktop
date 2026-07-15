@@ -83,6 +83,9 @@ uv run ruff check engine/ tests/     # lint
 | `engine/backends/hosted_ingest.py` | `HostedIngestBackend` -> `POST /api/ingest` (bearer) |
 | `engine/hosted.py` | `push` (zip -> ingest) + `report_break` (`/api/runs/ingest-report`) |
 | `engine/flow_bridge.py` | Wraps the `openadapt-flow` CLI (record/compile/replay/run/teach) |
+| `engine/dispatch.py` | Shared command dispatcher (frontend `engine.ts` CMD names -> engine actions) used by BOTH local wires |
+| `engine/ipc.py` | Tauri stdin/stdout JSON-lines wire -> `EngineDispatcher` |
+| `engine/socket_server.py` | Tray loopback TCP server + `~/.openadapt/desktop_ipc.json` discovery file (spec 3d) |
 
 ## Dependencies
 
