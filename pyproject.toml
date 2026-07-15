@@ -75,6 +75,7 @@ version_toml = ["pyproject.toml:project.version"]
 version_variables = ["engine/__init__.py:__version__"]
 commit_message = "chore: release {version}"
 major_on_zero = false
+allow_zero_version = true
 
 [tool.semantic_release.branches.main]
 match = "main"

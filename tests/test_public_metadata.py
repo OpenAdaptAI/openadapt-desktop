@@ -24,6 +24,14 @@ def test_public_metadata_identifies_experimental_supporting_surface() -> None:
     }
 
 
+def test_semantic_release_preserves_pre_one_versions() -> None:
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    release = pyproject["tool"]["semantic_release"]
+
+    assert release["major_on_zero"] is False
+    assert release["allow_zero_version"] is True
+
+
 def test_readme_local_links_exist() -> None:
     readme = (ROOT / "README.md").read_text()
     links = re.findall(r"\[[^]]*\]\(([^)]+)\)", readme)
