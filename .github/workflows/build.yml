@@ -33,7 +33,7 @@ jobs:
         run: uv build --wheel --sdist
 
       - name: Upload Python distributions
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: python-distribution
           path: dist/openadapt_desktop-*
@@ -69,7 +69,7 @@ jobs:
         run: uv run python scripts/verify_build_artifact.py sidecar
 
       - name: Upload sidecar executable
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: python-sidecar-${{ runner.os }}-${{ runner.arch }}
           path: dist/openadapt-engine*
@@ -222,7 +222,7 @@ jobs:
             --manifest dist/native/SHA256SUMS-${{ matrix.platform }}-${{ matrix.architecture }}
 
       - name: Upload Experimental native installers
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: native-${{ matrix.platform }}-${{ matrix.architecture }}
           path: dist/native/*
