@@ -38,13 +38,5 @@
       "timestampUrl": "http://timestamp.digicert.com",
       "tsp": true
     }
-  },
-  "plugins": {
-    "updater": {
-      "endpoints": [
-        "https://github.com/OpenAdaptAI/openadapt-desktop/releases/latest/download/latest.json"
-      ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEY5MzM3MTQxNEJBRTJCNDYKUldSR0s2NUxRWEV6K2J6bXdxc2NYRVFqNkFFZUtrYUE4V1FqaTNVRktQU1RsSU9RR2RBWEcwVEgK"
-    }
   }
 }
