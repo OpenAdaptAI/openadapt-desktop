@@ -93,7 +93,11 @@ impl SidecarInner {
         let (tx, rx) = oneshot::channel();
         self.pending.lock().unwrap().insert(id.clone(), tx);
 
-        let payload = SidecarCommand { id: id.clone(), cmd, params };
+        let payload = SidecarCommand {
+            id: id.clone(),
+            cmd,
+            params,
+        };
         let mut line = serde_json::to_string(&payload).map_err(|e| e.to_string())?;
         line.push('\n');
 

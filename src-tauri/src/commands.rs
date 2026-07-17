@@ -63,7 +63,9 @@ pub fn open_external(url: String) -> Result<(), String> {
     #[cfg(all(unix, not(target_os = "macos")))]
     let result = std::process::Command::new("xdg-open").arg(&url).spawn();
 
-    result.map(|_| ()).map_err(|e| format!("failed to open URL: {e}"))
+    result
+        .map(|_| ())
+        .map_err(|e| format!("failed to open URL: {e}"))
 }
 
 // --------------------------------------------------------------------------
@@ -71,7 +73,11 @@ pub fn open_external(url: String) -> Result<(), String> {
 // These mirror DESIGN.md Appendix B and keep the originally-declared surface.
 // --------------------------------------------------------------------------
 
-async fn forward(state: &State<'_, SidecarHandle>, cmd: &str, params: Value) -> Result<Value, String> {
+async fn forward(
+    state: &State<'_, SidecarHandle>,
+    cmd: &str,
+    params: Value,
+) -> Result<Value, String> {
     state.0.send_command(cmd, params).await
 }
 
@@ -126,7 +132,12 @@ pub async fn upload_capture(
     capture_id: String,
     backend: String,
 ) -> Result<Value, String> {
-    forward(&state, "upload_capture", json!({ "capture_id": capture_id, "backend": backend })).await
+    forward(
+        &state,
+        "upload_capture",
+        json!({ "capture_id": capture_id, "backend": backend }),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -134,7 +145,12 @@ pub async fn delete_capture(
     state: State<'_, SidecarHandle>,
     capture_id: String,
 ) -> Result<Value, String> {
-    forward(&state, "delete_capture", json!({ "capture_id": capture_id })).await
+    forward(
+        &state,
+        "delete_capture",
+        json!({ "capture_id": capture_id }),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -143,7 +159,12 @@ pub async fn scrub_capture(
     capture_id: String,
     level: Option<String>,
 ) -> Result<Value, String> {
-    forward(&state, "scrub_capture", json!({ "capture_id": capture_id, "level": level })).await
+    forward(
+        &state,
+        "scrub_capture",
+        json!({ "capture_id": capture_id, "level": level }),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -151,7 +172,12 @@ pub async fn approve_review(
     state: State<'_, SidecarHandle>,
     capture_id: String,
 ) -> Result<Value, String> {
-    forward(&state, "approve_review", json!({ "capture_id": capture_id })).await
+    forward(
+        &state,
+        "approve_review",
+        json!({ "capture_id": capture_id }),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -159,7 +185,12 @@ pub async fn dismiss_review(
     state: State<'_, SidecarHandle>,
     capture_id: String,
 ) -> Result<Value, String> {
-    forward(&state, "dismiss_review", json!({ "capture_id": capture_id })).await
+    forward(
+        &state,
+        "dismiss_review",
+        json!({ "capture_id": capture_id }),
+    )
+    .await
 }
 
 #[tauri::command]

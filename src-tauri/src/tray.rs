@@ -26,7 +26,11 @@ pub fn setup_tray(app: &App) -> Result<(), Box<dyn std::error::Error>> {
 
     TrayIconBuilder::with_id("openadapt-desktop-tray")
         .tooltip("OpenAdapt Desktop")
-        .icon(app.default_window_icon().cloned().ok_or("missing default window icon")?)
+        .icon(
+            app.default_window_icon()
+                .cloned()
+                .ok_or("missing default window icon")?,
+        )
         .menu(&menu)
         .show_menu_on_left_click(true)
         .on_menu_event(|app, event| match event.id.as_ref() {
