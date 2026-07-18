@@ -19,7 +19,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Engine version to build native installers for (X.Y.Z; a leading v is stripped)"
+        description: "Current engine version to build installers for (X.Y.Z; a leading v is stripped)"
         required: true
         type: string
 
@@ -84,6 +84,54 @@ jobs:
             echo "exists=false" >> "${GITHUB_OUTPUT}"
           fi
 
+      - name: Require exact engine-release application sources
+        if: steps.guard.outputs.exists == 'false'
+        env:
+          NATIVE_VERSION: ${{ steps.version.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          engine_commit="$(
+            git rev-parse --verify "refs/tags/v${NATIVE_VERSION}^{commit}"
+          )" || {
+            echo "error: matching engine tag v${NATIVE_VERSION} does not exist" >&2
+            exit 1
+          }
+          if ! git merge-base --is-ancestor "${engine_commit}" HEAD; then
+            echo "error: v${NATIVE_VERSION} is not an ancestor of current main" >&2
+            exit 1
+          fi
+          EXPECTED_VERSION="${NATIVE_VERSION}" python - <<'PY'
+          import os
+
+          from scripts.check_release_consistency import release_versions
+
+          expected = os.environ["EXPECTED_VERSION"]
+          versions = release_versions()
+          if set(versions.values()) != {expected}:
+              raise SystemExit(
+                  f"current engine sources do not match {expected}: {versions}"
+              )
+          PY
+          protected_paths=(
+            engine
+            src
+            src-tauri/src
+            pyproject.toml
+            uv.lock
+            package.json
+            package-lock.json
+            src-tauri/Cargo.toml
+            src-tauri/Cargo.lock
+            src-tauri/tauri.conf.json
+          )
+          if ! git diff --quiet "${engine_commit}..HEAD" -- "${protected_paths[@]}"; then
+            echo "error: application sources advanced after v${NATIVE_VERSION};" >&2
+            echo "refusing to publish newer code under an older native tag" >&2
+            git diff --name-only "${engine_commit}..HEAD" -- "${protected_paths[@]}" >&2
+            exit 1
+          fi
+
       - name: Sync native version sources and lockfiles
         if: steps.guard.outputs.exists == 'false'
         env:
@@ -103,7 +151,65 @@ jobs:
             src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json
           if ! git diff --cached --quiet; then
             git commit -m "chore(native): sync native installer version to ${NATIVE_VERSION}"
-            git push origin HEAD:main
+            git tag "${NATIVE_TAG}"
+            # Keep main and its matching immutable tag all-or-nothing. A
+            # transient failure must not strand an untagged version-sync
+            # commit that a retry would have to reinterpret.
+            git push --atomic origin HEAD:main "refs/tags/${NATIVE_TAG}"
+          else
+            git tag "${NATIVE_TAG}"
+            git push origin "refs/tags/${NATIVE_TAG}"
           fi
-          git tag "${NATIVE_TAG}"
-          git push origin "refs/tags/${NATIVE_TAG}"
+
+  supersede-published-native:
+    name: Mark older Experimental prereleases superseded
+    # Keep the last published installer valid while its replacement is still a
+    # draft. This job runs only after a marked native prerelease is published
+    # and therefore publicly available.
+    if: >-
+      github.event_name == 'release' &&
+      startsWith(github.event.release.tag_name, 'desktop-v') &&
+      github.event.release.prerelease &&
+      !github.event.release.draft &&
+      contains(github.event.release.body, '<!-- installer-release -->')
+    runs-on: ubuntu-22.04
+    environment: native-release
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+
+      # Edits release notes only. Never deletes releases or assets: removal
+      # stays a human decision made outside CI.
+      - name: Prepend a superseded notice to older native prereleases
+        env:
+          NEWER_TAG: ${{ github.event.release.tag_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate \
+            --jq '.[] | select(.draft == false and .prerelease == true)
+                  | select(.tag_name | startswith("desktop-v")) | .tag_name' \
+            > native-tags.txt
+          while IFS= read -r tag; do
+            if [ -z "${tag}" ] || [ "${tag}" = "${NEWER_TAG}" ]; then
+              continue
+            fi
+            gh release view "${tag}" --json body --jq .body > candidate-notes.md
+            result="$(python scripts/native_release.py supersede-notes \
+              --newer-tag "${NEWER_TAG}" \
+              --candidate-tag "${tag}" \
+              --notes-file candidate-notes.md \
+              --output superseded-notes.md \
+              --repo "${GITHUB_REPOSITORY}")"
+            echo "${tag}: ${result}"
+            if [ "${result}" = "update" ]; then
+              gh release edit "${tag}" --notes-file superseded-notes.md
+            fi
+          done < native-tags.txt

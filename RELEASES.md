@@ -34,10 +34,14 @@ were pushed by hand. Two workflows now keep it fresh:
 
 1. **Native Installer Freshness** (`.github/workflows/native-freshness.yml`):
    when an engine release is published (or on manual `workflow_dispatch` with a
-   version), it synchronizes the native version sources (`package.json`,
+   current engine version), it first verifies that the matching engine tag is
+   an ancestor of `main` and that the application sources have not advanced.
+   It then synchronizes the native version sources (`package.json`,
    `package-lock.json`, `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`,
    `src-tauri/tauri.conf.json`) to the engine version, commits to `main`, and
-   pushes the matching `desktop-vX.Y.Z` tag. It never builds anything itself.
+   pushes the matching `desktop-vX.Y.Z` tag. It never builds anything itself
+   and refuses a historical backfill that would label newer application code
+   with an older version.
 2. **Experimental Native Release** (`.github/workflows/native-release.yml`):
    unchanged build semantics — the tag push triggers the fail-closed signing
    preflight, the platform build matrix, install/uninstall smoke tests,
@@ -50,12 +54,13 @@ As a result every engine release `vX.Y.Z` gets a matching native prerelease
 
 ## Supersession
 
-After a native prerelease is drafted, older published `desktop-v*` prereleases
+After a native prerelease is published, older published `desktop-v*` prereleases
 are edited to carry a prominent "Superseded by `desktop-vX.Y.Z` — do not use"
 notice at the top of their notes (machine marker:
-`<!-- openadapt-superseded-by: desktop-vX.Y.Z -->`). The notice may briefly
-point at a draft until the maintainer publishes it. CI never deletes releases
-or assets; superseded assets are retained for provenance and any deletion is a
+`<!-- openadapt-superseded-by: desktop-vX.Y.Z -->`). The previous published
+installer remains valid while its replacement is a draft, so the notice always
+points at a publicly available replacement. CI never deletes releases or
+assets; superseded assets are retained for provenance and any deletion is a
 human decision.
 
 ## Machine-readable selection rule (download pages)

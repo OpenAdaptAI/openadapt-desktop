@@ -89,6 +89,33 @@ def test_freshness_workflow_syncs_engine_releases_into_the_native_lane() -> None
     # Reuses the guarded version sync and stays idempotent per tag.
     assert "native_release.py set-version" in freshness
     assert "git ls-remote --exit-code --tags origin" in freshness
+    # An absent historical tag may not label newer application code with an
+    # older engine version.
+    provenance_gate = freshness.split(
+        "- name: Require exact engine-release application sources", 1
+    )[1].split("- name: Sync native version sources and lockfiles", 1)[0]
+    assert "refs/tags/v${NATIVE_VERSION}^{commit}" in provenance_gate
+    assert "git merge-base --is-ancestor" in provenance_gate
+    assert "release_versions" in provenance_gate
+    assert 'git diff --quiet "${engine_commit}..HEAD"' in provenance_gate
+    for protected_path in (
+        "engine",
+        "src",
+        "src-tauri/src",
+        "pyproject.toml",
+        "uv.lock",
+        "package.json",
+        "package-lock.json",
+        "src-tauri/Cargo.toml",
+        "src-tauri/Cargo.lock",
+        "src-tauri/tauri.conf.json",
+    ):
+        assert protected_path in provenance_gate
+    publish_step = freshness.split(
+        "- name: Commit the sync, tag desktop-v*, and push", 1
+    )[1].split("  supersede-published-native:", 1)[0]
+    assert 'git push --atomic origin HEAD:main "refs/tags/${NATIVE_TAG}"' in publish_step
+    assert publish_step.count("git push origin") == 1
     # No builds here: the existing native release workflow owns the matrix,
     # signing preflight, checksums, and attestation.
     assert "tauri build" not in freshness
@@ -98,15 +125,22 @@ def test_freshness_workflow_syncs_engine_releases_into_the_native_lane() -> None
 
 def test_supersession_edits_notes_only_and_never_deletes() -> None:
     release = (ROOT / ".github/workflows/native-release.yml").read_text()
+    freshness = (ROOT / ".github/workflows/native-freshness.yml").read_text()
 
-    assert "  supersede:" in release
-    supersede_job = release.split("  supersede:", 1)[1]
-    assert "needs: publish-draft" in supersede_job
+    # Draft creation never invalidates the currently published installer.
+    assert "openadapt-superseded-by" not in release
+    assert "  supersede-published-native:" in freshness
+    supersede_job = freshness.split("  supersede-published-native:", 1)[1]
+    assert "github.event_name == 'release'" in supersede_job
+    assert "github.event.release.prerelease" in supersede_job
+    assert "!github.event.release.draft" in supersede_job
+    assert "contains(github.event.release.body, '<!-- installer-release -->')" in supersede_job
     assert "environment: native-release" in supersede_job
+    assert "permissions:\n      contents: write" in supersede_job
     assert "native_release.py supersede-notes" in supersede_job
     assert "gh release edit" in supersede_job
-    assert "gh release delete" not in release
-    assert "delete-asset" not in release
+    assert "gh release delete" not in release + freshness
+    assert "delete-asset" not in release + freshness
     assert "--clobber" not in supersede_job
 
 
