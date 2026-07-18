@@ -505,3 +505,46 @@ jobs:
               --notes-file docs/EXPERIMENTAL_NATIVE_INSTALLERS.md
           fi
           gh release upload "${GITHUB_REF_NAME}" release-assets/* --clobber
+
+  supersede:
+    name: Mark older Experimental prereleases superseded
+    needs: publish-draft
+    runs-on: ubuntu-22.04
+    environment: native-release
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+
+      # Edits release notes only. Never deletes releases or assets: removal
+      # stays a human decision made outside CI.
+      - name: Prepend a superseded notice to older native prereleases
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate \
+            --jq '.[] | select(.draft == false and .prerelease == true)
+                  | select(.tag_name | startswith("desktop-v")) | .tag_name' \
+            > native-tags.txt
+          while IFS= read -r tag; do
+            if [ -z "${tag}" ] || [ "${tag}" = "${GITHUB_REF_NAME}" ]; then
+              continue
+            fi
+            gh release view "${tag}" --json body --jq .body > candidate-notes.md
+            result="$(python scripts/native_release.py supersede-notes \
+              --newer-tag "${GITHUB_REF_NAME}" \
+              --candidate-tag "${tag}" \
+              --notes-file candidate-notes.md \
+              --output superseded-notes.md \
+              --repo "${GITHUB_REPOSITORY}")"
+            echo "${tag}: ${result}"
+            if [ "${result}" = "update" ]; then
+              gh release edit "${tag}" --notes-file superseded-notes.md
+            fi
+          done < native-tags.txt

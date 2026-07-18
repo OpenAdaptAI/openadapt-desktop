@@ -1,0 +1,109 @@
+name: Native Installer Freshness
+
+# Keeps the Experimental native-installer lane in lockstep with the engine
+# release lane. When semantic-release publishes an engine release (v*), this
+# workflow synchronizes the native version sources to the same X.Y.Z and pushes
+# the matching desktop-vX.Y.Z tag. The existing Experimental Native Release
+# workflow then builds, smoke-tests, checksums, attests, and drafts the
+# prerelease exactly as before — no signing, checksum, or provenance gate is
+# bypassed here.
+#
+# ADMIN_TOKEN (PAT with repo scope) is required for two reasons: main is
+# protected, and refs pushed with the default GITHUB_TOKEN do not trigger
+# downstream workflows, so the desktop-v* tag must be pushed with a PAT for
+# the native release workflow to fire.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Engine version to build native installers for (X.Y.Z; a leading v is stripped)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: native-freshness
+  cancel-in-progress: false
+
+jobs:
+  sync-native-version:
+    name: Sync native version and push desktop tag
+    runs-on: ubuntu-22.04
+    # Engine releases only: never re-trigger on desktop-v* prereleases (their
+    # tags do not start with a bare "v") or on drafts.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (startsWith(github.event.release.tag_name, 'v') &&
+       !github.event.release.prerelease &&
+       !github.event.release.draft)
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.ADMIN_TOKEN }}
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Resolve target native version
+        id: version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            version="${INPUT_VERSION#v}"
+          else
+            version="${RELEASE_TAG#v}"
+          fi
+          if ! printf '%s' "${version}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "error: refusing non X.Y.Z version: ${version}" >&2
+            exit 1
+          fi
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "tag=desktop-v${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Skip when the native tag already exists
+        id: guard
+        env:
+          NATIVE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --tags origin "refs/tags/${NATIVE_TAG}" >/dev/null; then
+            echo "exists=true" >> "${GITHUB_OUTPUT}"
+            echo "${NATIVE_TAG} already exists; nothing to do."
+          else
+            echo "exists=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Sync native version sources and lockfiles
+        if: steps.guard.outputs.exists == 'false'
+        env:
+          NATIVE_VERSION: ${{ steps.version.outputs.version }}
+        run: python scripts/native_release.py set-version "${NATIVE_VERSION}"
+
+      - name: Commit the sync, tag desktop-v*, and push
+        if: steps.guard.outputs.exists == 'false'
+        env:
+          NATIVE_VERSION: ${{ steps.version.outputs.version }}
+          NATIVE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json \
+            src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(native): sync native installer version to ${NATIVE_VERSION}"
+            git push origin HEAD:main
+          fi
+          git tag "${NATIVE_TAG}"
+          git push origin "refs/tags/${NATIVE_TAG}"
