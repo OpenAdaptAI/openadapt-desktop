@@ -142,6 +142,57 @@ def store_credential(c: Credential) -> None:
         )
 
 
+def secure_store_available() -> bool:
+    """Return whether a real, unlocked OS credential backend is available.
+
+    Browser pairing consumes a one-use server secret.  Unlike the ordinary
+    headless auth path, it must refuse *before* claiming that secret when the
+    resulting credential cannot be persisted securely.
+    """
+    kr = _keyring()
+    if kr is None:
+        return False
+    try:
+        backend = kr.get_keyring()
+        priority = getattr(backend, "priority", 0)
+        return bool(priority and priority > 0)
+    except Exception:
+        return False
+
+
+def store_credential_secure(c: Credential) -> bool:
+    """Atomically persist ``c`` for one-click pairing, or clean up and fail.
+
+    All three entries must be writable and readable: the raw token consumed by
+    the tray, the companion credential metadata, and the active-host pointer.
+    No plaintext fallback is permitted.
+    """
+    kr = _keyring()
+    if kr is None:
+        return False
+
+    host = c["host"]
+    accounts = (host, host + _CRED_SUFFIX, _ACTIVE_HOST_ACCOUNT)
+    values = (c["token"], json.dumps(c), host)
+    previous = tuple(_kr_get(kr, account) for account in accounts)
+
+    def rollback() -> None:
+        for account, value in zip(accounts, previous):
+            if value is None:
+                _kr_delete(kr, account)
+            else:
+                _kr_set(kr, account, value)
+
+    if not all(_kr_set(kr, account, value) for account, value in zip(accounts, values)):
+        rollback()
+        return False
+
+    if any(_kr_get(kr, account) != value for account, value in zip(accounts, values)):
+        rollback()
+        return False
+    return True
+
+
 def load_credential(host: str) -> Credential | None:
     """Load a stored credential for ``host``, or None if absent/unreadable.
 

@@ -147,7 +147,10 @@ def test_supersession_edits_notes_only_and_never_deletes() -> None:
 def test_updater_feed_is_disabled_until_signing_key_lifecycle_exists() -> None:
     config = json.loads((ROOT / "src-tauri/tauri.conf.json").read_text())
 
-    assert "plugins" not in config
+    assert config["plugins"] == {
+        "deep-link": {"desktop": {"schemes": ["openadapt"]}}
+    }
+    assert "updater" not in config["plugins"]
     assert config["bundle"]["targets"] == ["dmg", "msi", "nsis", "deb", "appimage"]
     assert config["bundle"]["macOS"]["signingIdentity"] == "-"
     assert config["bundle"]["windows"]["tsp"] is True
