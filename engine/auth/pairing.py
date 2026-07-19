@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 import socket
-from typing import Any
+from typing import Any, Literal, NoReturn, cast
 from urllib.parse import parse_qs, urlparse
 from uuid import UUID
 
@@ -19,9 +19,14 @@ import httpx
 from engine.auth.provider import Credential
 from engine.auth.store import (
     DEFAULT_HOST,
-    clear_credential,
+    clear_pairing_stage,
+    commit_pairing_stage,
+    load_pairing_stage,
+    mark_pairing_stage,
+    restore_pairing_stage,
     secure_store_available,
-    store_credential_secure,
+    snapshot_pairing_canonical,
+    stage_pairing_credential,
 )
 
 PAIRING_SECRET_RE = re.compile(r"^oap_[A-Za-z0-9_-]{43}$")
@@ -125,14 +130,232 @@ def _safe_device_name() -> str:
     return value or "this computer"
 
 
+def _abort_claim(host: str, pairing_id: str, token: str) -> bool:
+    """Revoke the exact claim, returning true only for acknowledged rollback."""
+    try:
+        response = httpx.post(
+            f"{host}/api/local-bridge/pairings/abort",
+            json={"pairing_id": pairing_id},
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=API_TIMEOUT_S,
+            follow_redirects=False,
+        )
+    except httpx.HTTPError:
+        return False
+    try:
+        revoked = response.json().get("revoked") is True
+    except (AttributeError, TypeError, ValueError):
+        revoked = False
+    # In particular, 409 can mean confirmation won a race. It must never
+    # authorize restoring an old local token over a possibly confirmed one.
+    return response.status_code == 200 and revoked
+
+
+def _stage_identity(stage: dict) -> tuple[str, str, str, str, Credential]:
+    """Validate all network- and keychain-relevant fields in a recovery stage."""
+    pairing_id = stage.get("pairing_id")
+    device_name = stage.get("device_name")
+    state = stage.get("state")
+    credential = stage.get("credential")
+    try:
+        canonical_pairing_id = (
+            str(UUID(pairing_id)) if isinstance(pairing_id, str) else None
+        )
+    except ValueError:
+        canonical_pairing_id = None
+    if (
+        stage.get("version") != 1
+        or not isinstance(pairing_id, str)
+        or canonical_pairing_id != pairing_id
+        or not isinstance(device_name, str)
+        or not 1 <= len(device_name) <= 80
+        or state not in {
+            "claimed",
+            "canonical_written",
+            "confirm_ambiguous",
+            "abort_acknowledged",
+        }
+        or not isinstance(credential, dict)
+        or set(credential)
+        != {"kind", "token", "refresh_token", "org_id", "host", "expires_at"}
+        or credential.get("kind") != "ingest_token"
+        or credential.get("refresh_token") is not None
+        or credential.get("org_id") is not None
+        or credential.get("expires_at") is not None
+        or not isinstance(credential.get("token"), str)
+        or not INGEST_TOKEN_RE.fullmatch(credential["token"])
+        or not isinstance(credential.get("host"), str)
+    ):
+        raise PairingError(
+            "Desktop found an invalid pairing recovery record in the keychain"
+        )
+    host = credential["host"]
+    destination = (
+        "openadapt-managed"
+        if _origin(host) == _origin(DEFAULT_HOST)
+        else "local"
+    )
+    if _validate_destination(host, destination) != host:
+        raise PairingError(
+            "Desktop found an invalid pairing recovery record in the keychain"
+        )
+    return pairing_id, host, credential["token"], state, cast(Credential, credential)
+
+
+def _paired_result(host: str, device_name: str) -> dict[str, Any]:
+    return {
+        "authenticated": True,
+        "kind": "ingest_token",
+        "host": host,
+        "org_id": None,
+        "paired": True,
+        "token_storage": "keyring",
+        "device_name": device_name,
+        "settings_url": f"{host}/dashboard/settings/ingest",
+    }
+
+
+ConfirmationState = Literal["confirmed", "definitive_failure", "ambiguous"]
+
+
+def _confirm_claim(
+    host: str,
+    pairing_id: str,
+    token: str,
+) -> tuple[ConfirmationState, int | None]:
+    """Use Cloud's idempotent/current-state confirmation to resolve one retry."""
+    status: int | None = None
+    for _ in range(2):
+        try:
+            response = httpx.post(
+                f"{host}/api/local-bridge/pairings/confirm",
+                json={"pairing_id": pairing_id},
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=API_TIMEOUT_S,
+                follow_redirects=False,
+            )
+        except httpx.HTTPError:
+            continue
+        status = response.status_code
+        if status >= 500:
+            continue
+        try:
+            connected = response.json().get("connected") is True
+        except (AttributeError, TypeError, ValueError):
+            connected = False
+        if 200 <= status < 300 and connected:
+            return "confirmed", status
+        if 400 <= status < 500:
+            return "definitive_failure", status
+        # A malformed success or unexpected redirect does not prove whether
+        # the idempotent server transition committed; retry/current-read it.
+    return "ambiguous", status
+
+
+def _fail_staged_pairing(stage: dict, message: str) -> NoReturn:
+    pairing_id, host, token, _, _ = _stage_identity(stage)
+    if _abort_claim(host, pairing_id, token):
+        mark_pairing_stage(pairing_id, "abort_acknowledged")
+        restored = restore_pairing_stage(pairing_id)
+        if restored:
+            clear_pairing_stage(pairing_id)
+            raise PairingError(f"{message} Your previous Desktop connection is unchanged.")
+        raise PairingError(
+            f"{message} Cloud rolled back the new claim, but Desktop could not "
+            "restore the prior keychain state. Recovery evidence was retained."
+        )
+    raise PairingError(
+        f"{message} Cloud did not acknowledge rollback, so Desktop preserved "
+        "the staged token and current keychain state for safe recovery."
+    )
+
+
+def _finish_staged_pairing(stage: dict) -> dict[str, Any]:
+    pairing_id, host, token, state, _ = _stage_identity(stage)
+    device_name = cast(str, stage["device_name"])
+    if state == "abort_acknowledged":
+        if restore_pairing_stage(pairing_id) and clear_pairing_stage(pairing_id):
+            raise PairingError(
+                "Desktop safely rolled back an interrupted connection. "
+                "Create a new connection from Cloud settings."
+            )
+        raise PairingError(
+            "Desktop could not finish restoring an interrupted connection; "
+            "recovery evidence remains in the keychain."
+        )
+
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        validation = httpx.get(
+            f"{host}/api/needs-attention/count",
+            headers=headers,
+            timeout=API_TIMEOUT_S,
+            follow_redirects=False,
+        )
+    except httpx.HTTPError:
+        _fail_staged_pairing(stage, "Cloud could not verify the new credential.")
+    if not 200 <= validation.status_code < 300:
+        _fail_staged_pairing(
+            stage,
+            f"Cloud could not verify the new credential ({validation.status_code}).",
+        )
+
+    if not commit_pairing_stage(pairing_id):
+        _fail_staged_pairing(
+            stage,
+            "Desktop could not atomically write the new credential to the keychain.",
+        )
+
+    confirmation, status = _confirm_claim(host, pairing_id, token)
+    if confirmation == "confirmed":
+        # A crash before this deletion is safe: recovery re-validates the
+        # canonical token and idempotently confirms/current-reads the same pair.
+        clear_pairing_stage(pairing_id)
+        return _paired_result(host, device_name)
+    if confirmation == "ambiguous":
+        mark_pairing_stage(pairing_id, "confirm_ambiguous")
+        raise PairingError(
+            "The new credential is stored and working, but Cloud confirmation "
+            "is still uncertain. Desktop kept recovery state and will retry "
+            "the same idempotent confirmation."
+        )
+    _fail_staged_pairing(
+        stage,
+        f"Cloud refused to confirm the new connection ({status}).",
+    )
+    raise AssertionError("unreachable")
+
+
+def recover_pending_pairing() -> dict[str, Any] | None:
+    """Resume an exact durable pairing stage after a process interruption."""
+    try:
+        stage = load_pairing_stage()
+    except RuntimeError as exc:
+        raise PairingError(
+            "Desktop could not read pairing recovery state from the keychain"
+        ) from exc
+    if stage is None:
+        return None
+    return _finish_staged_pairing(stage)
+
+
 def connect_uri(uri: str) -> dict[str, Any]:
-    """Claim, store, verify, and confirm one exact Desktop pairing URI."""
+    """Claim, stage, verify, commit, and confirm one Desktop pairing URI."""
     request = parse_connect_uri(uri)
     host = request["host"]
     if not secure_store_available():
         raise PairingError(
             "Secure pairing needs an unlocked operating-system keychain. "
             "Unlock it, then create a new connection from Cloud settings."
+        )
+
+    recovered = recover_pending_pairing()
+    if recovered is not None:
+        return recovered
+    previous = snapshot_pairing_canonical(host)
+    if previous is None:
+        raise PairingError(
+            "Desktop could not safely snapshot the current keychain connection"
         )
 
     device_name = _safe_device_name()
@@ -166,64 +389,26 @@ def connect_uri(uri: str) -> dict[str, Any]:
         "host": host,
         "expires_at": None,
     }
-    if not store_credential_secure(credential):
+    if not stage_pairing_credential(
+        pairing_id,
+        credential,
+        previous,
+        device_name,
+    ):
+        _abort_claim(host, pairing_id, token)
         raise PairingError(
-            "The pairing was claimed, but the operating-system keychain refused "
-            "the credential. No plaintext copy was written. Revoke this connection "
-            "in Cloud settings before trying again."
+            "Desktop could not durably stage the new credential. "
+            "Your previous Desktop connection is unchanged."
         )
-
-    headers = {"Authorization": f"Bearer {token}"}
     try:
-        validation = httpx.get(
-            f"{host}/api/needs-attention/count",
-            headers=headers,
-            timeout=API_TIMEOUT_S,
-            follow_redirects=False,
-        )
-    except httpx.HTTPError as exc:
+        stage = load_pairing_stage()
+    except RuntimeError as exc:
         raise PairingError(
-            "The credential is stored, but Cloud could not verify the connection. "
-            "Revoke it in Cloud settings before trying again."
+            "Desktop staged the credential but could not read it back; "
+            "the prior connection remains available for recovery."
         ) from exc
-    if validation.status_code == 401:
-        clear_credential(host)
+    if stage is None:
         raise PairingError(
-            "Cloud rejected the paired credential, so Desktop removed it from the keychain"
+            "Desktop could not recover the newly staged credential from the keychain"
         )
-    if validation.status_code >= 400:
-        raise PairingError(
-            f"The credential is stored, but verification failed ({validation.status_code})"
-        )
-
-    try:
-        confirmation = httpx.post(
-            f"{host}/api/local-bridge/pairings/confirm",
-            json={"pairing_id": pairing_id},
-            headers=headers,
-            timeout=API_TIMEOUT_S,
-            follow_redirects=False,
-        )
-    except httpx.HTTPError as exc:
-        raise PairingError(
-            "The credential is stored and usable, but Cloud could not confirm the connection"
-        ) from exc
-    try:
-        confirmed = confirmation.json().get("connected") is True
-    except (TypeError, ValueError):
-        confirmed = False
-    if confirmation.status_code >= 400 or not confirmed:
-        raise PairingError(
-            f"The credential is usable, but confirmation failed ({confirmation.status_code})"
-        )
-
-    return {
-        "authenticated": True,
-        "kind": "ingest_token",
-        "host": host,
-        "org_id": None,
-        "paired": True,
-        "token_storage": "keyring",
-        "device_name": device_name,
-        "settings_url": f"{host}/dashboard/settings/ingest",
-    }
+    return _finish_staged_pairing(stage)

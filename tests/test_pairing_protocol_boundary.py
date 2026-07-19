@@ -29,6 +29,7 @@ def test_single_instance_precedes_deep_link_and_handoff_is_fixed() -> None:
 
 def test_python_pairing_action_has_no_shell_or_navigation_escape_hatch() -> None:
     pairing = (ROOT / "engine/auth/pairing.py").read_text()
+    store = (ROOT / "engine/auth/store.py").read_text()
     dispatch = (ROOT / "engine/dispatch.py").read_text()
     assert '"connect_uri": self.connect_uri' in dispatch
     assert "subprocess" not in pairing
@@ -36,3 +37,9 @@ def test_python_pairing_action_has_no_shell_or_navigation_escape_hatch() -> None
     assert "webbrowser" not in pairing
     assert "os.system" not in pairing
     assert "follow_redirects=False" in pairing
+    assert '_PAIRING_STAGE_ACCOUNT = "__pairing_stage__"' in store
+    assert "stage_pairing_credential" in store
+    assert "set_password" in store
+    assert "write_text" not in pairing + store
+    assert "open(" not in pairing + store
+    assert "logger." not in pairing
