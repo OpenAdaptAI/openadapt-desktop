@@ -204,6 +204,9 @@ class EngineDispatcher:
             # config / settings
             "get_config": self.get_config,
             "set_config": self.set_config,
+            # effective policy (fail-closed; Tier-1 user / Tier-2 org / Tier-3 safety)
+            "get_effective_policy": self.get_effective_policy,
+            "refresh_policy": self.refresh_policy,
             # OS permissions
             "check_permissions": self.check_permissions,
             # review / egress gate
@@ -754,6 +757,56 @@ class EngineDispatcher:
             path.write_text(_dumps_toml(data))
         except Exception as exc:
             logger.warning("Could not persist config key {k}: {e}", k=key, e=exc)
+
+    # ------------------------------------------------------- effective policy
+
+    def get_effective_policy(self, **params: Any) -> dict:
+        """Return the org's effective policy, always fail-closed on safety.
+
+        Resolves via :func:`engine.policy.resolve_effective_policy` (network ->
+        cache -> fully-safe default). NEVER raises to the caller: any unexpected
+        error still yields the fail-closed default so the settings screen and any
+        run gate can rely on a fully-populated, safest-value ``safety`` block.
+
+        The result carries ``is_admin``/``role`` (the cloud is the only source of
+        admin status -- the engine has ``org_id`` but no role concept) so the
+        frontend can decide which Tier-2/Tier-3 cards are read-only.
+        """
+        from engine import policy as policy_mod
+
+        try:
+            return policy_mod.resolve_effective_policy(self.config.hosted_host)
+        except Exception as exc:  # defensive: resolver shouldn't raise, but never crash
+            logger.warning("get_effective_policy fell back to fail-closed: {e}", e=exc)
+            return policy_mod.harden_safety(
+                {
+                    "user": {},
+                    "org": {},
+                    "is_admin": False,
+                    "role": "member",
+                    "policy_version": None,
+                    "source": "fail-closed-default",
+                }
+            )
+
+    def refresh_policy(self, **params: Any) -> dict:
+        """Force a network fetch of the effective policy, refreshing the cache.
+
+        On network failure this still returns a usable, hardened policy (cache or
+        the fail-closed default) via :func:`get_effective_policy` -- ``refresh``
+        is a hint to skip any staleness, not a promise the network is up.
+        """
+        from engine import policy as policy_mod
+
+        try:
+            hardened = policy_mod.harden_safety(
+                policy_mod.fetch_effective_policy(self.config.hosted_host)
+            )
+            hardened["source"] = "network"
+            return hardened
+        except policy_mod.PolicyFetchError as exc:
+            logger.warning("refresh_policy fetch failed ({e}); resolving fail-closed", e=exc)
+            return self.get_effective_policy()
 
     # ------------------------------------------------------- permissions
 
