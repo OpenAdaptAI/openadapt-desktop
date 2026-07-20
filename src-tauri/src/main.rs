@@ -35,6 +35,7 @@ fn main() {
             commands::approve_review,
             commands::dismiss_review,
             commands::get_pending_reviews,
+            commands::get_program_graph,
         ])
         .run(tauri::generate_context!())
         .expect("error while running openadapt-desktop");
