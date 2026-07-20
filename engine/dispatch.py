@@ -498,7 +498,7 @@ class EngineDispatcher:
         """Map one flow ``results`` entry onto a frontend ``RunStep`` dict."""
         intent = str(r.get("intent") or "")
         action, _, rest = intent.partition(" ")
-        target = rest.strip().strip("'\"") or "—"
+        target = rest.strip().strip("'\"") or "-"
         sid = r.get("step_id")
         if sid is not None and sid == halt_state:
             state = "halted"
