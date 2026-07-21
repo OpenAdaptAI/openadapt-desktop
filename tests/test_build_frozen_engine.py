@@ -57,6 +57,8 @@ def test_missing_onnxruntime_notice_fails_closed(tmp_path: Path) -> None:
 
 
 def test_windows_frozen_inventory_member_paths_are_normalized() -> None:
-    windows_inventory = "'third_party\\rapidocr\\LICENSE'\n"
+    windows_inventory = repr("third_party\\rapidocr\\LICENSE") + "\n"
 
-    assert "third_party/rapidocr/LICENSE" in verify.normalized_inventory(windows_inventory)
+    normalized = verify.normalized_inventory(windows_inventory)
+    assert "third_party/rapidocr/LICENSE" in normalized
+    assert "//" not in normalized

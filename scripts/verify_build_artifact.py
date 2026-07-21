@@ -30,7 +30,10 @@ REQUIRED_FROZEN_NOTICES = (
 def normalized_inventory(value: str) -> str:
     """Use one member separator for PyInstaller inventories on every OS."""
 
-    return value.replace("\\", "/")
+    # archive_viewer prints member names with ``repr``. A Windows path therefore
+    # contains two literal backslashes in stdout; collapse the whole separator
+    # run rather than converting each one into a separate slash.
+    return re.sub(r"[\\/]+", "/", value)
 
 
 def artifact_path(kind: str) -> Path:
