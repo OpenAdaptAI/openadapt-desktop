@@ -15,8 +15,6 @@ import os
 import sys
 from pathlib import Path
 
-import PyInstaller.__main__
-
 ROOT = Path(__file__).resolve().parents[1]
 
 # Defense in depth.  Static analysis of the product CLI should not pull these
@@ -30,12 +28,15 @@ EXCLUDED_MODULES = (
 )
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--distpath", default="dist")
-    parser.add_argument("--workpath", default="build")
-    parser.add_argument("--specpath", default=".")
-    args = parser.parse_args()
+def build_command(
+    *,
+    distpath: str = "dist",
+    workpath: str = "build",
+    specpath: str = ".",
+    signing_identity: str = "",
+    platform: str = sys.platform,
+) -> list[str]:
+    """Return the deterministic PyInstaller command without importing it."""
 
     command = [
         "--clean",
@@ -44,11 +45,11 @@ def main() -> int:
         "--name",
         "openadapt-engine",
         "--distpath",
-        str(Path(args.distpath)),
+        str(Path(distpath)),
         "--workpath",
-        str(Path(args.workpath)),
+        str(Path(workpath)),
         "--specpath",
-        str(Path(args.specpath)),
+        str(Path(specpath)),
         "--hidden-import",
         "openadapt_flow.__main__",
         "--collect-data",
@@ -66,10 +67,28 @@ def main() -> int:
     # packages deliberately omit hardened runtime via tauri.adhoc.conf.json;
     # passing "-" here would create hardened, identity-less libraries that
     # macOS library validation refuses to load.
-    signing_identity = os.environ.get("APPLE_SIGNING_IDENTITY", "").strip()
-    if sys.platform == "darwin" and signing_identity and signing_identity != "-":
+    signing_identity = signing_identity.strip()
+    if platform == "darwin" and signing_identity and signing_identity != "-":
         command.extend(("--codesign-identity", signing_identity))
     command.append(str(ROOT / "engine" / "__main__.py"))
+    return command
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--distpath", default="dist")
+    parser.add_argument("--workpath", default="build")
+    parser.add_argument("--specpath", default=".")
+    args = parser.parse_args()
+
+    import PyInstaller.__main__
+
+    command = build_command(
+        distpath=args.distpath,
+        workpath=args.workpath,
+        specpath=args.specpath,
+        signing_identity=os.environ.get("APPLE_SIGNING_IDENTITY", ""),
+    )
     PyInstaller.__main__.run(command)
     return 0
 
