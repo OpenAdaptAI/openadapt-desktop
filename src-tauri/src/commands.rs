@@ -143,3 +143,22 @@ pub async fn get_pending_reviews() -> Result<Vec<CaptureInfo>, String> {
     // TODO: Send get_pending_reviews command to Python sidecar
     Err("Not implemented".into())
 }
+
+/// Get the compiled-program graph spec for a capture/bundle.
+///
+/// Forwards to the Python sidecar's `get_program_graph` handler, which builds
+/// the shared `ProgramGraphSpec` (see `engine/ipc.py`) from a compiled bundle
+/// via `openadapt_flow.visualize.build_program_graph`. The `data` is an
+/// arbitrary JSON object (the spec) passed through untouched.
+///
+/// Like the other commands here, the sidecar is not yet spawned/wired, so this
+/// returns the same not-implemented shape as its siblings. The `program.html`
+/// view treats that (or any engine error / not-available response) as a cue to
+/// fall back to the bundled sample spec, so the view still renders.
+#[tauri::command]
+pub async fn get_program_graph(bundle_id: Option<String>) -> Result<serde_json::Value, String> {
+    // TODO: Send get_program_graph command to Python sidecar and return its
+    // `data` payload (the ProgramGraphSpec).
+    let _ = bundle_id;
+    Err("Not implemented".into())
+}

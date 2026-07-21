@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<!-- data-theme="dark" pins the shared renderer to dark so it matches the
+     always-dark app chrome (the renderer is otherwise prefers-color-scheme aware). -->
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OpenAdapt Desktop - Compiled Program</title>
+  <!-- Vendored shared renderer styles (local file; allowed by CSP 'self'). -->
+  <link rel="stylesheet" href="vendor/program_graph.css" />
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      margin: 0;
+      padding: 20px;
+      background: #1a1a2e;
+      color: #eee;
+    }
+    h1 { font-size: 1.5rem; margin: 0 0 4px; }
+    .lead { color: #aaa; font-size: 0.9rem; margin: 0 0 16px; }
+    .banner {
+      padding: 8px 12px;
+      border-radius: 8px;
+      margin: 0 0 16px;
+      font-size: 0.85rem;
+      background: #333;
+      border: 1px solid #444;
+    }
+    .banner.sample { background: #2a2410; border-color: #9a6a00; color: #f2cd6b; }
+    .banner.live { background: #10241a; border-color: #197a3d; color: #7ee2a8; }
+    /* The renderer paints its own themed surface; give it room to breathe. */
+    #program-graph { margin-top: 4px; }
+    .empty { color: #aaa; font-size: 0.9rem; }
+    a.back { color: #e94560; text-decoration: none; }
+  </style>
+</head>
+<body>
+  <h1>Compiled Program</h1>
+  <p class="lead">The steps, identity gates, and halt points the compiler produced for this workflow.</p>
+
+  <div id="banner" class="banner">Loading compiled program.</div>
+
+  <div id="program-graph">
+    <p class="empty">Loading.</p>
+  </div>
+
+  <p style="margin-top: 20px;"><a class="back" href="index.html">Back</a></p>
+
+  <!-- Vendored shared renderer (local file; allowed by CSP 'self'). -->
+  <script src="vendor/program_graph.js"></script>
+  <script>
+    // Decide whether a value from the engine is a renderable program-graph spec.
+    // A not-available response (e.g. {available: false, reason: "..."}) or an
+    // empty payload is not renderable, so we fall back to the bundled sample.
+    function isRenderableSpec(data) {
+      return !!(data && Array.isArray(data.nodes) && data.nodes.length > 0);
+    }
+
+    async function fetchSampleSpec() {
+      // Bundled fixture so the view renders in a fresh checkout with no engine.
+      const resp = await fetch("program-sample.json");
+      if (!resp.ok) throw new Error("sample spec not found");
+      return resp.json();
+    }
+
+    async function loadSpec() {
+      // Prefer the live compiled program from the Python engine over IPC.
+      const tauri = window.__TAURI__;
+      if (tauri && tauri.core && typeof tauri.core.invoke === "function") {
+        try {
+          const data = await tauri.core.invoke("get_program_graph", {});
+          if (isRenderableSpec(data)) {
+            return { spec: data, live: true };
+          }
+          // Reachable but nothing to show yet (engine returned not-available):
+          // fall through to the bundled sample.
+        } catch (err) {
+          // Engine unavailable or command not implemented: fall through.
+          console.log("get_program_graph unavailable, using sample:", err);
+        }
+      }
+      const spec = await fetchSampleSpec();
+      return { spec, live: false };
+    }
+
+    async function main() {
+      const banner = document.getElementById("banner");
+      const container = document.getElementById("program-graph");
+      try {
+        const { spec, live } = await loadSpec();
+        container.innerHTML = "";
+        window.OpenAdaptProgramGraph.render(spec, container);
+        if (live) {
+          banner.className = "banner live";
+          banner.textContent = "Showing the live compiled program from the engine.";
+        } else {
+          banner.className = "banner sample";
+          banner.textContent = "Showing a sample compiled program.";
+        }
+      } catch (err) {
+        banner.className = "banner";
+        banner.textContent = "Could not load a compiled program.";
+        container.innerHTML = "";
+        const p = document.createElement("p");
+        p.className = "empty";
+        p.textContent = "No compiled program is available yet.";
+        container.appendChild(p);
+        console.log("failed to render program graph:", err);
+      }
+    }
+
+    main();
+  </script>
+</body>
+</html>

@@ -48,6 +48,9 @@
     <button class="btn btn-secondary" onclick="openReview()">
       Review Uploads
     </button>
+    <button class="btn btn-secondary" onclick="openProgram()">
+      View Compiled Program
+    </button>
   </div>
 
   <h2>Recent Captures</h2>
@@ -72,6 +75,10 @@
     async function openReview() {
       // TODO: Open review panel via Tauri
       window.location.href = "review.html";
+    }
+
+    async function openProgram() {
+      window.location.href = "program.html";
     }
 
     async function refreshStatus() {

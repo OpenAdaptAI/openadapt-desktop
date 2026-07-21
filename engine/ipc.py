@@ -52,7 +52,60 @@ class IPCHandler:
         # - approve_review, dismiss_review, get_review_status, get_pending_reviews
         # - upload_capture, delete_capture
         # - get_active_backends, get_egress_destinations
-        pass
+        #
+        # Only get_program_graph is wired so far; the rest remain TODO stubs on
+        # the Rust side and are dispatched here as they are implemented.
+        self._handlers["get_program_graph"] = self._handle_get_program_graph
+
+    def _handle_get_program_graph(
+        self,
+        bundle_id: str | None = None,
+        bundle_dir: str | None = None,
+        **_: Any,
+    ) -> dict:
+        """Build the shared ProgramGraphSpec for a compiled bundle.
+
+        The spec is the framework-agnostic JSON that the three OpenAdapt
+        surfaces (flow CLI, this desktop view, cloud) all render. When
+        openadapt-flow is importable and a bundle path is resolvable, this
+        returns ``build_program_graph(Workflow.load(...)).model_dump()``.
+
+        openadapt-flow is not currently a dependency of the desktop engine, so
+        in that case this returns a structured not-available response (rather
+        than a fabricated graph). The desktop ``program.html`` view treats that
+        response as a cue to fall back to its bundled sample spec.
+
+        Args:
+            bundle_id: Identifier of a compiled bundle to resolve on disk.
+            bundle_dir: Explicit path to a compiled bundle directory.
+
+        Returns:
+            The ProgramGraphSpec as a dict, or a ``{"available": False,
+            "reason": ...}`` response when no program can be built here.
+        """
+        try:
+            from openadapt_flow import Workflow
+            from openadapt_flow.visualize import build_program_graph
+        except Exception:
+            return {
+                "available": False,
+                "reason": (
+                    "openadapt-flow is not installed in the desktop engine, so no "
+                    "compiled program can be built here yet. Wiring this to a real "
+                    "compiled bundle is the remaining step."
+                ),
+            }
+
+        # openadapt-flow is available: build the real spec. Resolving a
+        # bundle_id to an on-disk bundle path is the remaining wiring step.
+        target = bundle_dir or bundle_id
+        if not target:
+            return {
+                "available": False,
+                "reason": "no compiled bundle was specified to build a program from.",
+            }
+        workflow = Workflow.load(target)
+        return build_program_graph(workflow).model_dump()
 
     def run(self) -> None:
         """Start the IPC message loop. Blocks until stdin is closed."""
