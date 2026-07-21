@@ -1,0 +1,78 @@
+#!/usr/bin/env python3
+"""Build the self-contained Desktop engine + pinned Flow runtime.
+
+The product runtime is frozen into the same executable as the Desktop engine,
+then invoked in a separate process mode.  Deliberately do not use
+``--collect-all openadapt_flow``: the public Flow wheel also carries research
+and evaluation modules that are neither needed by Desktop nor permitted across
+the open-core crown-jewel artifact boundary.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from pathlib import Path
+
+import PyInstaller.__main__
+
+ROOT = Path(__file__).resolve().parents[1]
+
+# Defense in depth.  Static analysis of the product CLI should not pull these
+# modules in, and the artifact audit independently refuses them if it ever does.
+EXCLUDED_MODULES = (
+    "openadapt_flow.benchmark",
+    "openadapt_flow.validation.adversary_corpus",
+    "openadapt_flow.validation.adversary_corpus_v2",
+    "openadapt_flow.validation.adversary_corpus_v3",
+    "openadapt_flow.validation.identity_roc",
+)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--distpath", default="dist")
+    parser.add_argument("--workpath", default="build")
+    parser.add_argument("--specpath", default=".")
+    args = parser.parse_args()
+
+    command = [
+        "--clean",
+        "--noconfirm",
+        "--onefile",
+        "--name",
+        "openadapt-engine",
+        "--distpath",
+        str(Path(args.distpath)),
+        "--workpath",
+        str(Path(args.workpath)),
+        "--specpath",
+        str(Path(args.specpath)),
+        "--hidden-import",
+        "openadapt_flow.__main__",
+        "--collect-data",
+        "openadapt_flow",
+        "--collect-data",
+        "rapidocr_onnxruntime",
+        "--copy-metadata",
+        "openadapt-flow",
+    ]
+    for module in EXCLUDED_MODULES:
+        command.extend(("--exclude-module", module))
+    # A Developer ID build must sign the binaries *inside* PyInstaller's
+    # one-file archive with the same identity Tauri later applies to the
+    # launcher. Post-processing cannot reach those embedded binaries. Ad-hoc
+    # packages deliberately omit hardened runtime via tauri.adhoc.conf.json;
+    # passing "-" here would create hardened, identity-less libraries that
+    # macOS library validation refuses to load.
+    signing_identity = os.environ.get("APPLE_SIGNING_IDENTITY", "").strip()
+    if sys.platform == "darwin" and signing_identity and signing_identity != "-":
+        command.extend(("--codesign-identity", signing_identity))
+    command.append(str(ROOT / "engine" / "__main__.py"))
+    PyInstaller.__main__.run(command)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

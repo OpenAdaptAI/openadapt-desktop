@@ -29,6 +29,12 @@ set is *partially* configured. You can therefore add one platform at a time.
   `codesign`/`spctl`/`stapler` on macOS, `Get-AuthenticodeSignature` on Windows.
   Signed builds add signature verification; unsigned builds keep today's checks.
   Signing is **not** yet a hard release gate, because the secrets do not exist.
+- The macOS engine is a PyInstaller one-file sidecar. Developer ID jobs pass
+  `APPLE_SIGNING_IDENTITY` into both PyInstaller and Tauri so the embedded
+  Python libraries and final launcher share one Team ID under hardened runtime.
+  Identity-less prereleases use `tauri.adhoc.conf.json` without hardened
+  runtime. The installed-app smoke executes bundled Flow after Tauri's final
+  signing pass; a bundle that is signed but cannot load its engine fails.
 
 All secrets below live in the protected **`native-release`** GitHub Actions
 environment (Settings → Environments → `native-release` → *Environment secrets*),

@@ -156,7 +156,14 @@ def test_updater_feed_is_disabled_until_signing_key_lifecycle_exists() -> None:
     }
     assert "updater" not in config["plugins"]
     assert config["bundle"]["targets"] == ["dmg", "msi", "nsis", "deb", "appimage"]
-    assert config["bundle"]["macOS"]["signingIdentity"] == "-"
+    # Target releases inherit APPLE_SIGNING_IDENTITY and keep hardened runtime.
+    # The explicit ad-hoc overlay is only for unsigned experimental artifacts.
+    assert "signingIdentity" not in config["bundle"]["macOS"]
+    adhoc = json.loads((ROOT / "src-tauri/tauri.adhoc.conf.json").read_text())
+    assert adhoc["bundle"]["macOS"] == {
+        "signingIdentity": "-",
+        "hardenedRuntime": False,
+    }
     assert config["bundle"]["windows"]["tsp"] is True
 
     # With no `plugins.updater` config, Tauri hands the updater plugin JSON
@@ -348,12 +355,14 @@ def test_stage_artifacts_renames_and_labels_experimental(
     assert metadata["lifecycle"] == "Experimental"
     assert metadata["surface"] == "installed desktop pairing and authoring companion"
     assert metadata["verification_scope"] == (
-        "cross-platform install/uninstall, bundled sidecar, and protocol-handler packaging"
+        "cross-platform install/uninstall, self-contained Flow runtime, "
+        "browser provision, and protocol-handler packaging"
     )
     assert metadata["limitations"] == [
         (
-            "openadapt-flow is not bundled; compile, replay, run, and teach require "
-            "a separately installed openadapt-flow on PATH."
+            "The first browser workflow downloads the Chromium revision pinned by the "
+            "bundled Playwright runtime unless PLAYWRIGHT_BROWSERS_PATH points at an "
+            "approved offline prebundle."
         ),
         "Installer verification does not replace qualification of a complete real workflow.",
     ]

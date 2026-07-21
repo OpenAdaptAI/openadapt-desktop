@@ -32,6 +32,9 @@ jobs:
       - name: Build wheel and source distribution
         run: uv build --wheel --sdist
 
+      - name: Inspect the built Python archives
+        run: uv run python scripts/verify_build_artifact.py python-distribution
+
       - name: Upload Python distributions
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -61,12 +64,13 @@ jobs:
         run: uv sync --locked --extra build
 
       - name: Build platform-native sidecar
-        run: >-
-          uv run pyinstaller --clean --noconfirm --onefile
-          --name openadapt-engine engine/__main__.py
+        run: uv run python scripts/build_frozen_engine.py
 
       - name: Smoke-test sidecar executable
         run: uv run python scripts/verify_build_artifact.py sidecar
+
+      - name: Prove frozen browser record, compile, and replay
+        run: uv run python scripts/smoke_test_frozen_flow.py
 
       - name: Upload sidecar executable
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -150,8 +154,8 @@ jobs:
           set -euo pipefail
           python -m pip install --disable-pip-version-check uv==0.11.29
           uv sync --locked --extra build
-          uv run pyinstaller --clean --noconfirm --onefile \
-            --name openadapt-engine engine/__main__.py
+          uv run python scripts/build_frozen_engine.py
+          uv run python scripts/verify_build_artifact.py sidecar
           mkdir -p src-tauri/binaries
           ext=""
           if [ "${RUNNER_OS}" = "Windows" ]; then ext=".exe"; fi
@@ -166,6 +170,7 @@ jobs:
           npm run tauri build --
           --bundles ${{ matrix.bundles }}
           --target ${{ matrix.target }}
+          --config src-tauri/tauri.adhoc.conf.json
 
       - name: Smoke-test macOS DMG install, launch, and uninstall
         if: runner.os == 'macOS'

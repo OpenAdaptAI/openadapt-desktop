@@ -109,13 +109,16 @@ jobs:
         run: npm ci --ignore-scripts
 
       - name: Build engine sidecar for Tauri externalBin
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ steps.signing.outputs.mode == 'developer-id-notarized' && secrets.APPLE_SIGNING_IDENTITY || '' }}
         shell: bash
         run: |
           set -euo pipefail
           python -m pip install --disable-pip-version-check uv==0.11.29
           uv sync --locked --extra build
-          uv run pyinstaller --clean --noconfirm --onefile \
-            --name openadapt-engine engine/__main__.py
+          uv run python scripts/build_frozen_engine.py
+          uv run python scripts/verify_build_artifact.py sidecar
+          uv run python scripts/smoke_test_frozen_flow.py
           mkdir -p src-tauri/binaries
           cp dist/openadapt-engine \
             "src-tauri/binaries/openadapt-engine-${{ matrix.target }}"
@@ -140,6 +143,7 @@ jobs:
           npm run tauri build --
           --bundles dmg
           --target ${{ matrix.target }}
+          --config src-tauri/tauri.adhoc.conf.json
 
       - name: Smoke-test DMG install, signature policy, launch, and uninstall
         shell: bash
@@ -274,8 +278,9 @@ jobs:
           set -euo pipefail
           python -m pip install --disable-pip-version-check uv==0.11.29
           uv sync --locked --extra build
-          uv run pyinstaller --clean --noconfirm --onefile \
-            --name openadapt-engine engine/__main__.py
+          uv run python scripts/build_frozen_engine.py
+          uv run python scripts/verify_build_artifact.py sidecar
+          uv run python scripts/smoke_test_frozen_flow.py
           mkdir -p src-tauri/binaries
           cp dist/openadapt-engine.exe \
             src-tauri/binaries/openadapt-engine-x86_64-pc-windows-msvc.exe
@@ -412,8 +417,9 @@ jobs:
           set -euo pipefail
           python -m pip install --disable-pip-version-check uv==0.11.29
           uv sync --locked --extra build
-          uv run pyinstaller --clean --noconfirm --onefile \
-            --name openadapt-engine engine/__main__.py
+          uv run python scripts/build_frozen_engine.py
+          uv run python scripts/verify_build_artifact.py sidecar
+          uv run python scripts/smoke_test_frozen_flow.py
           mkdir -p src-tauri/binaries
           cp dist/openadapt-engine \
             src-tauri/binaries/openadapt-engine-x86_64-unknown-linux-gnu

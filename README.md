@@ -40,15 +40,17 @@ OpenAdapt Desktop is two cooperating processes:
 - A **Python engine sidecar** it drives over a JSON-lines stdin/stdout IPC.
 
 The engine owns consent, operating-system permissions, recording and review,
-hosted authentication and push, and a `FlowBridge` that shells out to
-`openadapt-flow` for compile, replay, run, and teach. The shell also runs a
+hosted authentication and push, and a `FlowBridge` that runs the exact
+`openadapt-flow` version embedded in the signed sidecar for compile, replay,
+run, and teach. The shell also runs a
 token-authenticated loopback socket server so the separately developed
 [`openadapt-tray`](https://github.com/OpenAdaptAI/openadapt-tray) companion can
 mirror status and send local commands.
 
-It is integrated but Experimental: end-to-end tests mock the capture and flow
-boundaries, the frozen sidecar binary is produced only by CI, and no supported
-signed release exists yet.
+The native CI matrix freezes the canonical Flow runtime into the engine,
+performs a real browser record -> compile -> replay lifecycle on every target
+operating system, then installs, launches, and uninstalls each package. Apple
+Developer ID/notarization and Windows Authenticode remain credential-gated.
 
 ### The cockpit
 
@@ -79,15 +81,15 @@ sidecar binary is built only in CI.
 | Rust commands | Generic `engine_invoke` bridge plus typed commands, sidecar spawn/watchdog/shutdown, and event re-emission to the WebView | Experimental; compiled and bundled in CI |
 | Python sidecar IPC | JSON-lines handler backed by a shared `EngineDispatcher` (recording, compile/replay/run/teach, auth, sync/push, review, config) | Experimental; unit and e2e tests with mocked boundaries |
 | Tray IPC socket server | Token-authenticated loopback TCP server plus a `~/.openadapt/desktop_ipc.json` discovery file for `openadapt-tray` | Experimental; not yet validated end to end against the shipped tray |
-| Desktop-to-flow handoff | `FlowBridge` shells out to the `openadapt-flow` CLI for compile, replay, run, and teach | Experimental; requires a separately installed `openadapt-flow` on `PATH` (not bundled) |
+| Desktop-to-flow handoff | `FlowBridge` launches the pinned Flow runtime embedded in the frozen sidecar as an isolated subprocess | Self-contained; no separate Python or Flow installation |
 | Hosted auth and push | Browser-PKCE and paste-token sign-in, keychain-stored credential, bundle push, and halted-run break reports to the hosted control plane | Experimental |
-| Build artifacts | Wheel/sdist, a PyInstaller sidecar, and Experimental DMG/MSI/NSIS/DEB/AppImage native jobs | Native jobs structurally install/uninstall and label every platform, architecture, and signing state |
+| Build artifacts | Wheel/sdist, a self-contained PyInstaller engine+Flow runtime, and DMG/MSI/NSIS/DEB/AppImage native jobs | Native jobs prove the frozen browser lifecycle, structurally install/uninstall, and label every platform, architecture, and signing state |
 | Native installers | Distinct `desktop-v*` draft-prerelease workflow with final-byte checksums and GitHub provenance, auto-triggered at each engine release | Experimental packaging evidence only; unsigned or ad-hoc-signed |
 | Code signing and updater | Apple Developer ID/notarization and Windows Authenticode are credential-gated and fail closed on partial configuration; the updater feed is disabled | In progress; not a supported release channel |
 
-The PyInstaller `openadapt-engine` freeze and external code signing are the two
-remaining pieces before an integrated, signed desktop release. They are in
-progress; do not read a native prerelease as a shipping signed installer.
+The self-contained `openadapt-engine` freeze is implemented. External code
+signing/notarization and the signed updater-key lifecycle remain before a
+generally available native release.
 
 ## Use OpenAdapt today
 
@@ -113,13 +115,14 @@ not a setup failure.
 
 ### Engine and cockpit from source
 
-The Python engine and its CLI run from a plain checkout. Compile, replay, run,
-and teach delegate to a separately installed `openadapt-flow`.
+The Python engine and its CLI run from a plain checkout. Source development
+resolves Flow from the locked build extra; native packages embed the exact
+runtime and never depend on a system Python or `PATH` executable.
 
 ```bash
 git clone https://github.com/OpenAdaptAI/openadapt-desktop.git
 cd openadapt-desktop
-uv sync --extra dev
+uv sync --extra dev --extra build
 
 uv run openadapt-desktop doctor
 uv run openadapt-desktop list
@@ -147,10 +150,16 @@ channel, separate from the engine's `vX.Y.Z` PyPI/GitHub releases. The native
 version is synchronized to each engine release by CI, so a native prerelease
 mirrors the engine version it was built from. A native prerelease is packaging
 evidence, and it is not a separate supported desktop release. They are unsigned
-or ad-hoc-signed
-Experimental artifacts: their filenames carry the platform, architecture, and
+or ad-hoc-signed Experimental artifacts: their filenames carry the platform, architecture, and
 signing state, and CI installs, launches, and uninstalls each one on clean
 runners. Packaging structure is not workflow qualification.
+
+On macOS, the ad-hoc lane uses an explicit non-hardened overlay because an
+identity-less hardened launcher cannot load PyInstaller's identity-less embedded
+libraries. Developer ID builds keep hardened runtime and pass the same Apple
+identity into PyInstaller and Tauri. The installed-app smoke executes bundled
+Flow after the final signing pass, so a structurally valid but unloadable app
+cannot be released.
 
 - Which release to download, and the two-lane policy, are in
   [RELEASES.md](RELEASES.md).
@@ -174,9 +183,10 @@ Desktop authoring/teaching cockpit (Tauri + React)
         | local IPC (JSON lines over sidecar stdio; token-authenticated
         | loopback socket for the tray)
         v
-Python engine sidecar (capture, review, auth, sync, FlowBridge)
+Frozen Python engine sidecar (capture, review, auth, sync, FlowBridge,
+                              pinned openadapt-flow runtime)
         |
-        | openadapt-flow CLI on PATH
+        | isolated subprocess mode in the same signed executable
         v
 openadapt-flow
   record -> compile -> lint/certify -> replay -> halt/repair/teach
@@ -190,13 +200,14 @@ compiler or runtime. Those remain in `openadapt-flow`.
 
 ## Known gaps
 
-- `openadapt-flow` is not bundled with the frozen sidecar. Compile, replay,
-  run, and teach require a separately installed `openadapt-flow` on `PATH` and
-  fail with an explicit error without it.
-- End-to-end tests mock the capture and flow boundaries. No CI job drives the
-  built UI against a real engine performing a real
-  record -> compile -> replay -> teach loop, so integration is code-complete
-  but not product-validated.
+- The first browser workflow downloads the Chromium revision pinned by the
+  bundled Playwright runtime into `~/.openadapt/browser-runtime`. The app shows
+  setup progress and a retryable failure; no workflow action starts until the
+  browser is ready. Air-gapped packages set `PLAYWRIGHT_BROWSERS_PATH` to a
+  version-matched prebundle.
+- CI proves the frozen binary's browser record -> compile -> replay loop on
+  Windows, macOS, and Linux. UI event contracts are automated, while broader
+  real-application qualification remains workflow-specific.
 - The frozen `openadapt-engine` sidecar binary is produced only by CI. A plain
   dev checkout runs the shell in frontend-only mode.
 - Native packages are Experimental and unsigned or ad-hoc-signed; structural
@@ -217,7 +228,7 @@ The Python engine exposes these Experimental commands:
 | `openadapt-desktop list` / `info` | Inspect capture metadata |
 | `openadapt-desktop scrub` | Run configured PII scrubbing |
 | `openadapt-desktop review` / `approve` / `dismiss` | Operate the local review state machine |
-| `openadapt-desktop compile` / `replay` / `run` | Invoke a separately installed `openadapt-flow` on a capture or bundle |
+| `openadapt-desktop compile` / `replay` / `run` | Invoke the bundled, pinned `openadapt-flow` runtime on a capture or bundle |
 | `openadapt-desktop login` / `push` / `report-break` | Authenticate to the hosted control plane, push a bundle, report a halted run |
 | `openadapt-desktop storage` / `health` / `cleanup` | Inspect and maintain local storage |
 | `openadapt-desktop backends` / `upload` | Inspect or invoke legacy upload adapters |

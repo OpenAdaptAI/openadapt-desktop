@@ -208,12 +208,14 @@ def stage_artifacts(
         "source_commit": os.environ.get("GITHUB_SHA", "local"),
         "artifacts": artifact_names,
         "verification_scope": (
-            "cross-platform install/uninstall, bundled sidecar, and protocol-handler packaging"
+            "cross-platform install/uninstall, self-contained Flow runtime, "
+            "browser provision, and protocol-handler packaging"
         ),
         "limitations": [
             (
-                "openadapt-flow is not bundled; compile, replay, run, and teach require "
-                "a separately installed openadapt-flow on PATH."
+                "The first browser workflow downloads the Chromium revision pinned by the "
+                "bundled Playwright runtime unless PLAYWRIGHT_BROWSERS_PATH points at an "
+                "approved offline prebundle."
             ),
             "Installer verification does not replace qualification of a complete real workflow.",
         ],
