@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,6 +28,34 @@ EXCLUDED_MODULES = (
     "openadapt_flow.validation.identity_roc",
 )
 
+RAPIDOCR_NOTICE_DIR = ROOT / "third_party" / "rapidocr"
+
+
+def notice_data(
+    onnxruntime_dir: Path | None = None,
+) -> tuple[tuple[Path, str], ...]:
+    """Return third-party notices that must accompany the frozen runtime."""
+
+    if onnxruntime_dir is None:
+        try:
+            installed = distribution("onnxruntime")
+        except PackageNotFoundError as exc:  # pragma: no cover - build environment guard
+            raise RuntimeError(
+                "onnxruntime is required to build the frozen Desktop runtime"
+            ) from exc
+        onnxruntime_dir = Path(installed.locate_file("onnxruntime"))
+
+    data = (
+        (onnxruntime_dir / "LICENSE", "third_party/onnxruntime"),
+        (onnxruntime_dir / "ThirdPartyNotices.txt", "third_party/onnxruntime"),
+        (RAPIDOCR_NOTICE_DIR / "LICENSE", "third_party/rapidocr"),
+        (RAPIDOCR_NOTICE_DIR / "NOTICE", "third_party/rapidocr"),
+    )
+    missing = [str(source) for source, _ in data if not source.is_file()]
+    if missing:
+        raise RuntimeError("required third-party notice files are missing: " + ", ".join(missing))
+    return data
+
 
 def build_command(
     *,
@@ -35,6 +64,7 @@ def build_command(
     specpath: str = ".",
     signing_identity: str = "",
     platform: str = sys.platform,
+    onnxruntime_dir: Path | None = None,
 ) -> list[str]:
     """Return the deterministic PyInstaller command without importing it."""
 
@@ -59,6 +89,8 @@ def build_command(
         "--copy-metadata",
         "openadapt-flow",
     ]
+    for source, destination in notice_data(onnxruntime_dir):
+        command.extend(("--add-data", f"{source}:{destination}"))
     for module in EXCLUDED_MODULES:
         command.extend(("--exclude-module", module))
     # A Developer ID build must sign the binaries *inside* PyInstaller's

@@ -161,6 +161,11 @@ identity into PyInstaller and Tauri. The installed-app smoke executes bundled
 Flow after the final signing pass, so a structurally valid but unloadable app
 cannot be released.
 
+Third-party licenses and notices for the native runtime are embedded beside
+the components they cover and verified against the actual frozen archive. The
+pinned sources, hashes, and modification status are recorded in
+[`third_party/README.md`](third_party/README.md).
+
 - Which release to download, and the two-lane policy, are in
   [RELEASES.md](RELEASES.md).
 - Artifact names, verification scope, and provenance are in

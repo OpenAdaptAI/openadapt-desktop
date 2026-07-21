@@ -19,6 +19,13 @@ FORBIDDEN_FROZEN_MEMBERS = re.compile(
     re.IGNORECASE,
 )
 
+REQUIRED_FROZEN_NOTICES = (
+    "third_party/onnxruntime/LICENSE",
+    "third_party/onnxruntime/ThirdPartyNotices.txt",
+    "third_party/rapidocr/LICENSE",
+    "third_party/rapidocr/NOTICE",
+)
+
 
 def artifact_path(kind: str) -> Path:
     suffix = ".exe" if sys.platform == "win32" else ""
@@ -129,6 +136,14 @@ def main() -> int:
             parser.error(
                 "frozen sidecar crossed the AGPL/private-corpus boundary: "
                 + "; ".join(forbidden[:20])
+            )
+        missing_notices = [
+            member for member in REQUIRED_FROZEN_NOTICES if member not in inventory.stdout
+        ]
+        if missing_notices:
+            parser.error(
+                "frozen sidecar omitted required third-party notices: "
+                + "; ".join(missing_notices)
             )
 
     print(f"Verified {args.kind} artifact: {artifact} ({artifact.stat().st_size} bytes)")
