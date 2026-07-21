@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from scripts import build_frozen_engine as build
+from scripts import verify_build_artifact as verify
 
 
 def _build_command(identity: str, tmp_path: Path) -> list[str]:
@@ -53,3 +54,9 @@ def test_missing_onnxruntime_notice_fails_closed(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="ThirdPartyNotices.txt"):
         build.notice_data(tmp_path)
+
+
+def test_windows_frozen_inventory_member_paths_are_normalized() -> None:
+    windows_inventory = "'third_party\\rapidocr\\LICENSE'\n"
+
+    assert "third_party/rapidocr/LICENSE" in verify.normalized_inventory(windows_inventory)

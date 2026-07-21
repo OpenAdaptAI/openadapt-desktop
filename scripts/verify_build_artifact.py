@@ -27,6 +27,12 @@ REQUIRED_FROZEN_NOTICES = (
 )
 
 
+def normalized_inventory(value: str) -> str:
+    """Use one member separator for PyInstaller inventories on every OS."""
+
+    return value.replace("\\", "/")
+
+
 def artifact_path(kind: str) -> Path:
     suffix = ".exe" if sys.platform == "win32" else ""
     if kind == "sidecar":
@@ -127,9 +133,10 @@ def main() -> int:
         )
         if inventory.returncode != 0:
             parser.error(f"could not inventory frozen sidecar: {inventory.stderr[-1000:]}")
+        inventory_text = normalized_inventory(inventory.stdout)
         forbidden = sorted(
             line.strip()
-            for line in inventory.stdout.splitlines()
+            for line in inventory_text.splitlines()
             if FORBIDDEN_FROZEN_MEMBERS.search(line)
         )
         if forbidden:
@@ -138,7 +145,7 @@ def main() -> int:
                 + "; ".join(forbidden[:20])
             )
         missing_notices = [
-            member for member in REQUIRED_FROZEN_NOTICES if member not in inventory.stdout
+            member for member in REQUIRED_FROZEN_NOTICES if member not in inventory_text
         ]
         if missing_notices:
             parser.error(
