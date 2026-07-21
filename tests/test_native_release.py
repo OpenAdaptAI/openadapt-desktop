@@ -36,7 +36,7 @@ def test_node_dependencies_are_locked_for_cross_platform_tauri_builds() -> None:
     assert lock["packages"]["node_modules/@tauri-apps/api"]["version"] == "2.11.1"
 
 
-def test_native_workflows_are_pinned_and_preserve_experimental_boundary() -> None:
+def test_native_workflows_are_pinned_and_preserve_beta_boundary() -> None:
     build = (ROOT / ".github/workflows/build.yml").read_text()
     release = (ROOT / ".github/workflows/native-release.yml").read_text()
     uses = re.findall(r"^\s*uses:\s+\S+@([^\s#]+)", build + release, flags=re.MULTILINE)
@@ -57,7 +57,7 @@ def test_native_workflows_are_pinned_and_preserve_experimental_boundary() -> Non
     assert "contents: write" in release
     assert "--draft" in release and "--prerelease" in release
     assert "ADMIN_TOKEN" not in release
-    assert "Experimental" in release
+    assert "Beta" in release
     publish_job = release.split("  publish-draft:", 1)[1]
     assert "actions/setup-python@" in publish_job
     assert 'python-version: "3.12"' in publish_job
@@ -157,7 +157,7 @@ def test_updater_feed_is_disabled_until_signing_key_lifecycle_exists() -> None:
     assert "updater" not in config["plugins"]
     assert config["bundle"]["targets"] == ["dmg", "msi", "nsis", "deb", "appimage"]
     # Target releases inherit APPLE_SIGNING_IDENTITY and keep hardened runtime.
-    # The explicit ad-hoc overlay is only for unsigned experimental artifacts.
+    # The explicit ad-hoc overlay is only for unsigned beta artifacts.
     assert "signingIdentity" not in config["bundle"]["macOS"]
     adhoc = json.loads((ROOT / "src-tauri/tauri.adhoc.conf.json").read_text())
     assert adhoc["bundle"]["macOS"] == {
@@ -277,7 +277,7 @@ def test_native_tag_tuple_orders_versions_and_rejects_foreign_tags() -> None:
 
 
 def test_superseded_notes_prepends_marker_and_preserves_body() -> None:
-    body = "<!-- installer-release -->\n\n# Experimental Native Installers\n\nDetails.\n"
+    body = "<!-- installer-release -->\n\n# Beta Native Installers\n\nDetails.\n"
 
     updated = superseded_notes(body, "desktop-v0.5.0", "OpenAdaptAI/openadapt-desktop")
 
@@ -322,7 +322,7 @@ def test_superseded_notes_is_idempotent_and_upgrades_to_newer_pointer() -> None:
         ),
     ],
 )
-def test_stage_artifacts_renames_and_labels_experimental(
+def test_stage_artifacts_renames_and_labels_beta(
     tmp_path: Path,
     platform: str,
     signing: str,
@@ -346,13 +346,13 @@ def test_stage_artifacts_renames_and_labels_experimental(
     asset_names = [path.name for path in staged if path.suffix != ".json"]
     assert len(asset_names) == len(expected_suffixes)
     current_version = native_version()
-    assert all(f"Experimental-v{current_version}" in name for name in asset_names)
+    assert all(f"Beta-v{current_version}" in name for name in asset_names)
     assert all(any(name.endswith(suffix) for name in asset_names) for suffix in expected_suffixes)
 
     metadata_path = next(path for path in staged if path.suffix == ".json")
     metadata = json.loads(metadata_path.read_text())
     assert metadata["native_version"] == current_version
-    assert metadata["lifecycle"] == "Experimental"
+    assert metadata["lifecycle"] == "Beta"
     assert metadata["surface"] == "installed desktop pairing and authoring companion"
     assert metadata["verification_scope"] == (
         "cross-platform install/uninstall, self-contained Flow runtime, "

@@ -4,11 +4,11 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-> **Lifecycle: Experimental supporting surface.** OpenAdapt Desktop is the
+> **Lifecycle: Beta supporting surface.** OpenAdapt Desktop is the
 > local authoring and teaching cockpit for OpenAdapt. The canonical compiler and
 > governed runtime live in
 > [`openadapt-flow`](https://github.com/OpenAdaptAI/openadapt-flow). This
-> repository builds unsigned or ad-hoc-signed Experimental prereleases; it is not
+> repository builds unsigned or ad-hoc-signed Beta prereleases; it is not
 > yet a signed, generally available desktop product.
 
 ## What OpenAdapt is
@@ -75,16 +75,16 @@ sidecar binary is built only in CI.
 
 | Area | Checked-out implementation | Status |
 | --- | --- | --- |
-| Python capture CLI | Record, list, inspect, scrub, review, approve, local storage, health, and cleanup commands | Experimental; covered by tests |
-| Local review gate | Persisted states and egress checks for the capture pipeline | Experimental; not the `openadapt-flow` certification system |
-| Tauri/React cockpit | Login, onboarding, workflows, record/review, watch-run, teach, and settings calling the engine through Tauri commands | Experimental; renders an engine-offline state when the sidecar binary is absent |
-| Rust commands | Generic `engine_invoke` bridge plus typed commands, sidecar spawn/watchdog/shutdown, and event re-emission to the WebView | Experimental; compiled and bundled in CI |
-| Python sidecar IPC | JSON-lines handler backed by a shared `EngineDispatcher` (recording, compile/replay/run/teach, auth, sync/push, review, config) | Experimental; unit and e2e tests with mocked boundaries |
-| Tray IPC socket server | Token-authenticated loopback TCP server plus a `~/.openadapt/desktop_ipc.json` discovery file for `openadapt-tray` | Experimental; not yet validated end to end against the shipped tray |
+| Python capture CLI | Record, list, inspect, scrub, review, approve, local storage, health, and cleanup commands | Beta; covered by tests |
+| Local review gate | Persisted states and egress checks for the capture pipeline | Beta; not the `openadapt-flow` certification system |
+| Tauri/React cockpit | Login, onboarding, workflows, record/review, watch-run, teach, and settings calling the engine through Tauri commands | Beta; renders an engine-offline state when the sidecar binary is absent |
+| Rust commands | Generic `engine_invoke` bridge plus typed commands, sidecar spawn/watchdog/shutdown, and event re-emission to the WebView | Beta; compiled and bundled in CI |
+| Python sidecar IPC | JSON-lines handler backed by a shared `EngineDispatcher` (recording, compile/replay/run/teach, auth, sync/push, review, config) | Beta; unit and e2e tests with mocked boundaries |
+| Tray IPC socket server | Token-authenticated loopback TCP server plus a `~/.openadapt/desktop_ipc.json` discovery file for `openadapt-tray` | Beta; not yet validated end to end against the shipped tray |
 | Desktop-to-flow handoff | `FlowBridge` launches the pinned Flow runtime embedded in the frozen sidecar as an isolated subprocess | Self-contained; no separate Python or Flow installation |
-| Hosted auth and push | Browser-PKCE and paste-token sign-in, keychain-stored credential, bundle push, and halted-run break reports to the hosted control plane | Experimental |
+| Hosted auth and push | Browser-PKCE and paste-token sign-in, keychain-stored credential, bundle push, and halted-run break reports to the hosted control plane | Beta |
 | Build artifacts | Wheel/sdist, a self-contained PyInstaller engine+Flow runtime, and DMG/MSI/NSIS/DEB/AppImage native jobs | Native jobs prove the frozen browser lifecycle, structurally install/uninstall, and label every platform, architecture, and signing state |
-| Native installers | Distinct `desktop-v*` draft-prerelease workflow with final-byte checksums and GitHub provenance, auto-triggered at each engine release | Experimental packaging evidence only; unsigned or ad-hoc-signed |
+| Native installers | Distinct `desktop-v*` draft-prerelease workflow with final-byte checksums and GitHub provenance, auto-triggered at each engine release | Beta distribution lane; signing state is encoded in every filename and workflow qualification remains specific |
 | Code signing and updater | Apple Developer ID/notarization and Windows Authenticode are credential-gated and fail closed on partial configuration; the updater feed is disabled | In progress; not a supported release channel |
 
 The self-contained `openadapt-engine` freeze is implemented. External code
@@ -143,14 +143,14 @@ To work on the shell and frontend you also need Rust, Node.js, and the Tauri
 CLI. A dev shell runs frontend-only and shows the engine as offline until a
 frozen sidecar binary from CI is present.
 
-### Experimental native installers
+### Native installers (Beta)
 
 Native packages are published under a distinct `desktop-vX.Y.Z` prerelease
 channel, separate from the engine's `vX.Y.Z` PyPI/GitHub releases. The native
 version is synchronized to each engine release by CI, so a native prerelease
 mirrors the engine version it was built from. A native prerelease is packaging
 evidence, and it is not a separate supported desktop release. They are unsigned
-or ad-hoc-signed Experimental artifacts: their filenames carry the platform, architecture, and
+or ad-hoc-signed Beta artifacts: their filenames carry the platform, architecture, and
 signing state, and CI installs, launches, and uninstalls each one on clean
 runners. Packaging structure is not workflow qualification.
 
@@ -169,7 +169,7 @@ pinned sources, hashes, and modification status are recorded in
 - Which release to download, and the two-lane policy, are in
   [RELEASES.md](RELEASES.md).
 - Artifact names, verification scope, and provenance are in
-  [Experimental Native Installers](docs/EXPERIMENTAL_NATIVE_INSTALLERS.md).
+  [Beta Native Installers](docs/EXPERIMENTAL_NATIVE_INSTALLERS.md).
 - The signing activation runbook (what to buy, which secrets to add, and what
   each surface may then truthfully claim) is in
   [docs/CODE_SIGNING.md](docs/CODE_SIGNING.md).
@@ -215,7 +215,7 @@ compiler or runtime. Those remain in `openadapt-flow`.
   real-application qualification remains workflow-specific.
 - The frozen `openadapt-engine` sidecar binary is produced only by CI. A plain
   dev checkout runs the shell in frontend-only mode.
-- Native packages are Experimental and unsigned or ad-hoc-signed; structural
+- Native packages are Beta and unsigned or ad-hoc-signed; structural
   install/uninstall success is not evidence of a validated workflow.
 - Apple Developer ID/notarization and Windows Authenticode are credential-gated
   and fail closed on partial configuration; the updater and rollback remain
@@ -225,7 +225,7 @@ compiler or runtime. Those remain in `openadapt-flow`.
 
 ## CLI surface
 
-The Python engine exposes these Experimental commands:
+The Python engine exposes these Beta commands:
 
 | Command | Purpose |
 | --- | --- |

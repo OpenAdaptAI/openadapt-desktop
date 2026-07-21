@@ -1,7 +1,7 @@
 # Code Signing Runbook (founder activation)
 
 This is the step-by-step guide to move OpenAdapt Desktop installers from
-**Experimental / unsigned** to **signed and trusted**. It lists exactly what to
+**Beta / unsigned** to **signed and trusted**. It lists exactly what to
 buy, which secrets to add, and what each public surface may then truthfully say.
 
 Nothing here changes how the app is built until the secrets exist. The release
@@ -18,7 +18,7 @@ set is *partially* configured. You can therefore add one platform at a time.
   - `method` — *how* a signed Windows artifact is produced (`pfx` vs
     `trusted-signing`); `pfx`/`adhoc`/`unsigned` otherwise.
 - The `mode` is baked into every artifact **filename**:
-  `OpenAdapt-Desktop-Experimental-v<version>-<os>-<arch>-<signing>.<ext>`.
+  `OpenAdapt-Desktop-Beta-v<version>-<os>-<arch>-<signing>.<ext>`.
   This is the honesty mechanism — a download page or trust center can read the
   filename token and never overstate maturity. When you configure macOS
   Developer ID, the macOS asset name flips from `-adhoc-` to
@@ -186,9 +186,9 @@ release has actually built. The artifact filename token is the source of truth.
 
 | Surface | With no secrets (today) | After macOS Developer ID | After Windows Authenticode | After Linux GPG |
 | --- | --- | --- | --- | --- |
-| /download page | "Experimental. macOS builds are ad-hoc signed; Windows/Linux are unsigned." | "**Signed and notarized by Apple** on macOS — opens without a Gatekeeper override." | "**Signed with a trusted Authenticode certificate** on Windows — no SmartScreen 'unknown publisher' warning." | "Linux packages are **GPG-signed**; verify against our published key." |
+| /download page | "Beta. macOS builds are ad-hoc signed; Windows/Linux are unsigned." | "**Signed and notarized by Apple** on macOS — opens without a Gatekeeper override." | "**Signed with a trusted Authenticode certificate** on Windows — no SmartScreen 'unknown publisher' warning." | "Linux packages are **GPG-signed**; verify against our published key." |
 | Trust center | "Ad-hoc/unsigned; verify via `SHA256SUMS` + GitHub attestation." | Add: "macOS DMGs pass Apple notarization (`spctl` accepted, ticket stapled)." | Add: "Windows installers carry a valid, timestamped Authenticode signature." | Add: "Linux packages carry a detached GPG signature; fingerprint published." |
-| README honesty note | "Native packages remain Experimental and unsigned." | Update the note per platform as each lands. |  |  |
+| README honesty note | "Native packages remain Beta and unsigned." | Update the note per platform as each lands. |  |  |
 
 The README honesty note and `docs/EXPERIMENTAL_NATIVE_INSTALLERS.md` both point
 here; update their per-platform wording when each platform's first **signed**
@@ -201,7 +201,7 @@ name — only the human-readable claim wording changes.
 ```bash
 # Bytes match the attested manifest
 sha256sum -c SHA256SUMS
-gh attestation verify OpenAdapt-Desktop-Experimental-* --repo OpenAdaptAI/openadapt-desktop
+gh attestation verify OpenAdapt-Desktop-Beta-* --repo OpenAdaptAI/openadapt-desktop
 
 # macOS: notarization accepted + ticket stapled
 spctl --assess --type open --context context:primary-signature -v <asset>.dmg

@@ -80,7 +80,7 @@ jobs:
           if-no-files-found: error
 
   native-installers:
-    name: Experimental installer (${{ matrix.label }})
+    name: Native installer (${{ matrix.label }})
     strategy:
       fail-fast: false
       matrix:
@@ -233,7 +233,7 @@ jobs:
             --expected-architecture x86_64 \
             --launch-seconds 20
 
-      - name: Stage accurately labelled Experimental artifacts
+      - name: Stage accurately labelled native artifacts
         run: >-
           python scripts/native_release.py stage
           --bundle-root src-tauri/target/${{ matrix.target }}/release/bundle
@@ -252,7 +252,7 @@ jobs:
             --directory dist/native \
             --manifest dist/native/SHA256SUMS-${{ matrix.platform }}-${{ matrix.architecture }}
 
-      - name: Upload Experimental native installers
+      - name: Upload native installers
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: native-${{ matrix.platform }}-${{ matrix.architecture }}
