@@ -55,7 +55,7 @@ def _normalize_flow_auto_scrub_capability() -> None:
 
     Desktop includes ``openadapt-privacy`` for its local review pipeline, but
     its heavyweight Presidio/spaCy extra is intentionally optional.  Merely
-    importing the provider makes Flow 1.19 think the capability is ready; the
+    importing the provider makes Flow think the capability is ready; the
     first scrub then crashes.  In ``auto`` mode only, treat an incomplete extra
     exactly like an absent extra (local plaintext, as Flow documents).  Explicit
     ``SCRUB=on`` is never changed and therefore still fails closed.

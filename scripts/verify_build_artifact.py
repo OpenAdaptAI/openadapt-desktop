@@ -8,6 +8,7 @@ import re
 import subprocess
 import sys
 import tarfile
+import tomllib
 import zipfile
 from pathlib import Path
 
@@ -25,6 +26,21 @@ REQUIRED_FROZEN_NOTICES = (
     "third_party/rapidocr/LICENSE",
     "third_party/rapidocr/NOTICE",
 )
+
+
+def bundled_flow_banner(root: Path = ROOT) -> str:
+    """Return the CLI version banner for the exact configured Flow build pin."""
+
+    pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    dependencies = pyproject["project"]["optional-dependencies"]["build"]
+    pins = [
+        dependency.removeprefix("openadapt-flow==")
+        for dependency in dependencies
+        if dependency.startswith("openadapt-flow==")
+    ]
+    if len(pins) != 1 or not re.fullmatch(r"\d+\.\d+\.\d+", pins[0]):
+        raise ValueError(f"expected one exact openadapt-flow build pin, found: {pins}")
+    return f"openadapt-flow {pins[0]}"
 
 
 def normalized_inventory(value: str) -> str:
@@ -108,7 +124,7 @@ def main() -> int:
             check=False,
         )
         flow_output = flow.stdout + flow.stderr
-        if flow.returncode != 0 or "openadapt-flow 1.19.0" not in flow_output:
+        if flow.returncode != 0 or bundled_flow_banner(args.root) not in flow_output:
             parser.error(
                 "bundled Flow runtime smoke test failed with exit "
                 f"{flow.returncode}: {flow_output[-1000:]}"
