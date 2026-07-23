@@ -142,6 +142,58 @@ class TestRecordingController:
         assert state["status"] == "failed"
         assert "writer did not stop" in state["error"]
 
+    def test_registration_failure_stops_recorder_and_rolls_back_state(
+        self, tmp_data_dir: Path, monkeypatch
+    ) -> None:
+        """Startup remains transactional through local index registration."""
+
+        calls: dict[str, bool] = {}
+
+        class TrackedRecorder:
+            event_count = 0
+            is_recording = False
+
+            def __init__(self, capture_dir: str, task_description: str = "") -> None:
+                pass
+
+            def __enter__(self):
+                self.is_recording = True
+                return self
+
+            def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+                calls["exited"] = True
+                self.is_recording = False
+
+            def wait_for_ready(self, timeout: float = 60) -> bool:
+                return True
+
+            def stop(self) -> None:
+                calls["stopped"] = True
+                self.is_recording = False
+
+        class FailingStorageManager:
+            def register_capture(self, capture_id: str, capture_dir: Path) -> None:
+                raise RuntimeError("index unavailable")
+
+        monkeypatch.setattr(
+            "engine.controller._load_capture_recorder", lambda: TrackedRecorder
+        )
+        controller = RecordingController(
+            captures_dir=tmp_data_dir / "captures",
+            storage_manager=FailingStorageManager(),
+        )
+
+        with pytest.raises(RuntimeError, match="Could not start native recording"):
+            controller.start()
+
+        assert calls == {"stopped": True, "exited": True}
+        assert controller.state == RecordingState.IDLE
+        assert controller.current_capture_id is None
+        capture_dir = next((tmp_data_dir / "captures").iterdir())
+        state = json.loads((capture_dir / "state.json").read_text())
+        assert state["status"] == "failed"
+        assert "index unavailable" in state["error"]
+
     def test_stop_returns_metadata(self, tmp_data_dir: Path) -> None:
         """Stopping a recording should return capture metadata."""
         controller = RecordingController(captures_dir=tmp_data_dir / "captures")

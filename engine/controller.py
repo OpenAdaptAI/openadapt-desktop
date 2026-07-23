@@ -161,40 +161,46 @@ class RecordingController:
         state_path.write_text(json.dumps(state, indent=2))
 
         recorder = None
-        entered = False
         try:
             Recorder = _load_capture_recorder()
             recorder = Recorder(str(capture_dir), task_description=task_description)
             recorder.__enter__()
-            entered = True
             if not recorder.wait_for_ready(timeout=60):
                 raise RuntimeError("OpenAdapt Capture did not become ready within 60 seconds")
             if not recorder.is_recording:
                 raise RuntimeError("OpenAdapt Capture stopped before recording became ready")
+
+            self._recorder = recorder
+            self._current_capture_id = capture_id
+            self._capture_dir = capture_dir
+            self._started_at = started_at
+            self.state = RecordingState.RECORDING
+            state["status"] = "recording"
+            state_path.write_text(json.dumps(state, indent=2))
+
+            if self._storage_manager:
+                self._storage_manager.register_capture(capture_id, capture_dir)
         except Exception as exc:
-            if entered and recorder is not None:
+            if recorder is not None:
                 try:
                     recorder.stop()
+                except Exception:
+                    logger.exception("Recorder stop failed after start error")
+                try:
                     recorder.__exit__(type(exc), exc, exc.__traceback__)
                 except Exception:
-                    logger.exception("Recorder cleanup failed after start error")
+                    logger.exception("Recorder exit failed after start error")
             state.update({"status": "failed", "failed_at": _now_iso(), "error": str(exc)})
-            state_path.write_text(json.dumps(state, indent=2))
+            try:
+                state_path.write_text(json.dumps(state, indent=2))
+            except Exception:
+                logger.exception("Could not persist failed recording state")
+            self._current_capture_id = None
+            self._capture_dir = None
+            self._started_at = None
             self._recorder = None
             self.state = RecordingState.IDLE
             raise RuntimeError(f"Could not start native recording: {exc}") from exc
-
-        self._recorder = recorder
-        self._current_capture_id = capture_id
-        self._capture_dir = capture_dir
-        self._started_at = started_at
-        self.state = RecordingState.RECORDING
-        state["status"] = "recording"
-        state_path.write_text(json.dumps(state, indent=2))
-
-        # Register in DB if storage_manager available
-        if self._storage_manager:
-            self._storage_manager.register_capture(capture_id, capture_dir)
 
         return capture_id
 
