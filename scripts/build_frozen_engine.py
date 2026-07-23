@@ -12,9 +12,15 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import sys
 from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
+
+try:
+    from scripts.frozen_notices import NOTICE_BUNDLE_MEMBER, prepare_notice_bundle
+except ModuleNotFoundError:  # pragma: no cover - direct ``python scripts/...`` use
+    from frozen_notices import NOTICE_BUNDLE_MEMBER, prepare_notice_bundle
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -65,6 +71,7 @@ def build_command(
     signing_identity: str = "",
     platform: str = sys.platform,
     onnxruntime_dir: Path | None = None,
+    notice_bundle: Path | None = None,
 ) -> list[str]:
     """Return the deterministic PyInstaller command without importing it."""
 
@@ -91,6 +98,8 @@ def build_command(
     ]
     for source, destination in notice_data(onnxruntime_dir):
         command.extend(("--add-data", f"{source}:{destination}"))
+    notice_bundle = notice_bundle or (ROOT / ".build-frozen-notices")
+    command.extend(("--add-data", f"{notice_bundle}:{NOTICE_BUNDLE_MEMBER}"))
     for module in EXCLUDED_MODULES:
         command.extend(("--exclude-module", module))
     # A Developer ID build must sign the binaries *inside* PyInstaller's
@@ -115,13 +124,23 @@ def main() -> int:
 
     import PyInstaller.__main__
 
-    command = build_command(
-        distpath=args.distpath,
-        workpath=args.workpath,
-        specpath=args.specpath,
-        signing_identity=os.environ.get("APPLE_SIGNING_IDENTITY", ""),
+    workpath = Path(args.workpath)
+    notice_bundle_path = workpath.parent / f".{workpath.name}-frozen-notices"
+    notice_bundle = prepare_notice_bundle(
+        notice_bundle_path,
+        root_license=ROOT / "LICENSE",
     )
-    PyInstaller.__main__.run(command)
+    try:
+        command = build_command(
+            distpath=args.distpath,
+            workpath=args.workpath,
+            specpath=args.specpath,
+            signing_identity=os.environ.get("APPLE_SIGNING_IDENTITY", ""),
+            notice_bundle=notice_bundle,
+        )
+        PyInstaller.__main__.run(command)
+    finally:
+        shutil.rmtree(notice_bundle_path, ignore_errors=True)
     return 0
 
 
