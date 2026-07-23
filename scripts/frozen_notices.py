@@ -22,9 +22,26 @@ from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import canonicalize_name
 
 ROOT_DISTRIBUTION = "openadapt-desktop"
-ROOT_EXTRAS = frozenset({"build"})
+FROZEN_RUNTIME_ROOTS = ("openadapt-desktop", "openadapt-flow")
+BUILD_EXTRA = frozenset({"build"})
 NOTICE_BUNDLE_MEMBER = "third_party/python"
 NOTICE_INVENTORY_NAME = "NOTICE-INVENTORY.json"
+
+# PyInstaller itself is a build tool and must not be classified as an ordinary
+# frozen runtime package. Its compiled bootloader and loader files are,
+# however, embedded in every executable under the upstream Bootloader
+# Exception. Pin the reviewed upstream notice bytes so an upgrade requires an
+# explicit release-boundary review instead of silently inheriting new terms.
+PYINSTALLER_DISTRIBUTION = "pyinstaller"
+PYINSTALLER_VERSION = "6.21.0"
+PYINSTALLER_NOTICE_SHA256 = "dcf75fdb959db1e3b41c0f8505069d2ece781b5ec6b3d0a4d30975cfc6580245"
+PYINSTALLER_NOTICE_MEMBER = f"{NOTICE_BUNDLE_MEMBER}/build-components/pyinstaller/COPYING.txt"
+PYINSTALLER_EXCEPTION_MARKERS = (
+    "The PyInstaller licensing terms",
+    "Bootloader Exception",
+    "unlimited permission to link or embed compiled bootloader",
+    "./PyInstaller/loader",
+)
 
 # These packages may be used as separately distributed optional components, but
 # they must not be copied into OpenAdapt's permissively licensed one-file
@@ -84,7 +101,7 @@ def license_evidence(dist) -> list[str]:
 def dependency_closure(
     *,
     root_name: str = ROOT_DISTRIBUTION,
-    root_extras: Iterable[str] = ROOT_EXTRAS,
+    root_extras: Iterable[str] = (),
     distribution_getter: Callable[[str], object] = distribution,
 ) -> dict[str, object]:
     """Resolve the installed dependency closure for the selected root extras."""
@@ -130,6 +147,36 @@ def dependency_closure(
     return dict(sorted(resolved.items()))
 
 
+def frozen_runtime_closure(
+    *,
+    distribution_getter: Callable[[str], object] = distribution,
+) -> dict[str, object]:
+    """Resolve packages that execute in the sidecar, excluding build tooling.
+
+    Flow is a deliberately frozen payload selected from Desktop's ``build``
+    extra, but PyInstaller and its packaging dependencies are not. Resolve the
+    two actual runtime roots without extras instead of treating every member of
+    ``Desktop[build]`` as redistributed Python runtime code.
+    """
+
+    resolved: dict[str, object] = {}
+    for root_name in FROZEN_RUNTIME_ROOTS:
+        closure = dependency_closure(
+            root_name=root_name,
+            root_extras=(),
+            distribution_getter=distribution_getter,
+        )
+        for name, dist in closure.items():
+            prior = resolved.get(name)
+            if prior is not None and str(prior.version) != str(dist.version):
+                raise RuntimeError(
+                    f"frozen dependency version conflict for {name}: "
+                    f"{prior.version} != {dist.version}"
+                )
+            resolved[name] = dist
+    return dict(sorted(resolved.items()))
+
+
 def _notice_sources(dist) -> list[tuple[str, Path]]:
     sources: list[tuple[str, Path]] = []
     for member in dist.files or ():
@@ -161,16 +208,130 @@ def _reject_copyleft(closure: dict[str, object]) -> None:
             )
 
 
+def _top_level_imports(dist) -> tuple[str, ...]:
+    """Return import roots supplied by a wheel, for artifact exclusion checks."""
+
+    roots: set[str] = set()
+    for member in dist.files or ():
+        top_level = str(member).replace("\\", "/").split("/", 1)[0]
+        if top_level.endswith(".py"):
+            top_level = top_level[:-3]
+        if top_level.isidentifier():
+            roots.add(top_level)
+    if not roots:
+        raise RuntimeError(
+            f"build-only distribution {_declared_name(dist)} has no auditable import roots"
+        )
+    return tuple(sorted(roots))
+
+
+def _build_only_packages(
+    runtime_closure: dict[str, object],
+    *,
+    build_closure: dict[str, object] | None = None,
+) -> list[dict[str, object]]:
+    """Describe build-only imports that the final archive must not contain."""
+
+    if build_closure is None:
+        build_closure = dependency_closure(
+            root_name=ROOT_DISTRIBUTION,
+            root_extras=BUILD_EXTRA,
+        )
+    packages: list[dict[str, object]] = []
+    for name in sorted(set(build_closure) - set(runtime_closure)):
+        dist = build_closure[name]
+        packages.append(
+            {
+                "name": _declared_name(dist),
+                "version": str(dist.version),
+                "archive_import_roots": list(_top_level_imports(dist)),
+            }
+        )
+    if PYINSTALLER_DISTRIBUTION not in {package["name"] for package in packages}:
+        raise RuntimeError("PyInstaller was not isolated as a build-only distribution")
+    return packages
+
+
+def _stage_pyinstaller_bootloader_notice(
+    output: Path,
+    *,
+    pyinstaller_dist=None,
+) -> dict[str, object]:
+    """Stage the exact reviewed license exception for the embedded bootloader."""
+
+    if pyinstaller_dist is None:
+        pyinstaller_dist = distribution(PYINSTALLER_DISTRIBUTION)
+    declared_name = _declared_name(pyinstaller_dist)
+    if declared_name != PYINSTALLER_DISTRIBUTION:
+        raise RuntimeError(
+            "PyInstaller distribution name drift: "
+            f"expected {PYINSTALLER_DISTRIBUTION}, got {declared_name}"
+        )
+    if str(pyinstaller_dist.version) != PYINSTALLER_VERSION:
+        raise RuntimeError(
+            "PyInstaller version requires a new bootloader license review: "
+            f"expected {PYINSTALLER_VERSION}, got {pyinstaller_dist.version}"
+        )
+
+    candidates = [
+        (member, source)
+        for member, source in _notice_sources(pyinstaller_dist)
+        if member.replace("\\", "/").endswith("/licenses/COPYING.txt")
+    ]
+    if len(candidates) != 1:
+        raise RuntimeError(
+            "expected one PyInstaller licenses/COPYING.txt, "
+            f"found {[member for member, _ in candidates]}"
+        )
+    source_member, source = candidates[0]
+    payload = source.read_bytes()
+    digest = hashlib.sha256(payload).hexdigest()
+    if digest != PYINSTALLER_NOTICE_SHA256:
+        raise RuntimeError(
+            "PyInstaller bootloader notice bytes require review: "
+            f"expected {PYINSTALLER_NOTICE_SHA256}, got {digest}"
+        )
+    try:
+        notice_text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise RuntimeError("PyInstaller bootloader notice is not UTF-8") from exc
+    missing_markers = [
+        marker for marker in PYINSTALLER_EXCEPTION_MARKERS if marker not in notice_text
+    ]
+    if missing_markers:
+        raise RuntimeError(
+            "PyInstaller notice omitted Bootloader Exception terms: " + "; ".join(missing_markers)
+        )
+
+    destination = output / "build-components" / "pyinstaller" / "COPYING.txt"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(payload)
+    return {
+        "name": "pyinstaller-bootloader",
+        "source_distribution": PYINSTALLER_DISTRIBUTION,
+        "source_version": PYINSTALLER_VERSION,
+        "license_scope": "GPL-2.0-or-later WITH PyInstaller-Bootloader-exception",
+        "source_member": source_member,
+        "bundled_member": PYINSTALLER_NOTICE_MEMBER,
+        "sha256": digest,
+        "bytes": len(payload),
+        "required_markers": list(PYINSTALLER_EXCEPTION_MARKERS),
+    }
+
+
 def prepare_notice_bundle(
     output: Path,
     *,
     root_license: Path,
     closure: dict[str, object] | None = None,
+    build_closure: dict[str, object] | None = None,
+    pyinstaller_dist=None,
     required_notice_tokens: dict[str, tuple[str, ...]] = REQUIRED_NOTICE_TOKENS,
 ) -> Path:
     """Stage closure notices and a deterministic, hash-bound JSON inventory."""
 
-    closure = closure or dependency_closure()
+    if closure is None:
+        closure = frozen_runtime_closure()
     _reject_copyleft(closure)
     if output.exists():
         shutil.rmtree(output)
@@ -242,11 +403,21 @@ def prepare_notice_bundle(
             if not any(token.lower() in member for member in notice_members):
                 raise RuntimeError(f"{required_name} did not provide required {token} notice")
 
+    embedded_build_components = [
+        _stage_pyinstaller_bootloader_notice(
+            output,
+            pyinstaller_dist=pyinstaller_dist,
+        )
+    ]
     inventory = {
-        "schema_version": 1,
-        "root_distribution": ROOT_DISTRIBUTION,
-        "root_extras": sorted(ROOT_EXTRAS),
+        "schema_version": 2,
+        "runtime_roots": list(FROZEN_RUNTIME_ROOTS),
         "packages": packages,
+        "build_only_packages": _build_only_packages(
+            closure,
+            build_closure=build_closure,
+        ),
+        "embedded_build_components": embedded_build_components,
     }
     (output / NOTICE_INVENTORY_NAME).write_text(
         json.dumps(inventory, indent=2, sort_keys=True) + "\n",
