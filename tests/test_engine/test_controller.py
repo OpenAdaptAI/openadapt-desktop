@@ -34,9 +34,7 @@ class TestRecordingController:
         assert (dirs[0] / "meta.json").exists()
         assert (dirs[0] / "state.json").exists()
 
-    def test_start_uses_capture_runtime_contract(
-        self, tmp_data_dir: Path, monkeypatch
-    ) -> None:
+    def test_start_uses_capture_runtime_contract(self, tmp_data_dir: Path, monkeypatch) -> None:
         """Desktop must use Capture's real context-manager constructor contract."""
 
         calls: dict[str, object] = {}
@@ -65,9 +63,7 @@ class TestRecordingController:
             def stop(self) -> None:
                 calls["stopped"] = True
 
-        monkeypatch.setattr(
-            "engine.controller._load_capture_recorder", lambda: ContractRecorder
-        )
+        monkeypatch.setattr("engine.controller._load_capture_recorder", lambda: ContractRecorder)
         controller = RecordingController(captures_dir=tmp_data_dir / "captures")
 
         controller.start(task_description="Claims intake")
@@ -127,9 +123,7 @@ class TestRecordingController:
             def stop(self) -> None:
                 raise RuntimeError("writer did not stop")
 
-        monkeypatch.setattr(
-            "engine.controller._load_capture_recorder", lambda: BrokenStopRecorder
-        )
+        monkeypatch.setattr("engine.controller._load_capture_recorder", lambda: BrokenStopRecorder)
         controller = RecordingController(captures_dir=tmp_data_dir / "captures")
         controller.start()
 
@@ -175,9 +169,7 @@ class TestRecordingController:
             def register_capture(self, capture_id: str, capture_dir: Path) -> None:
                 raise RuntimeError("index unavailable")
 
-        monkeypatch.setattr(
-            "engine.controller._load_capture_recorder", lambda: TrackedRecorder
-        )
+        monkeypatch.setattr("engine.controller._load_capture_recorder", lambda: TrackedRecorder)
         controller = RecordingController(
             captures_dir=tmp_data_dir / "captures",
             storage_manager=FailingStorageManager(),
@@ -193,6 +185,37 @@ class TestRecordingController:
         state = json.loads((capture_dir / "state.json").read_text())
         assert state["status"] == "failed"
         assert "index unavailable" in state["error"]
+
+    def test_finalization_failure_resets_controller_and_is_not_completed(
+        self, tmp_data_dir: Path
+    ) -> None:
+        """A local-index failure cannot wedge or falsely complete a stopped run."""
+
+        class FailingDB:
+            def update_capture(self, capture_id: str, **fields: object) -> None:
+                raise RuntimeError("index update failed")
+
+        class StorageManager:
+            db = FailingDB()
+
+            def register_capture(self, capture_id: str, capture_dir: Path) -> None:
+                pass
+
+        controller = RecordingController(
+            captures_dir=tmp_data_dir / "captures",
+            storage_manager=StorageManager(),
+        )
+        controller.start()
+
+        with pytest.raises(RuntimeError, match="Could not finalize native recording"):
+            controller.stop()
+
+        assert controller.state == RecordingState.IDLE
+        assert controller.current_capture_id is None
+        capture_dir = next((tmp_data_dir / "captures").iterdir())
+        state = json.loads((capture_dir / "state.json").read_text())
+        assert state["status"] == "failed"
+        assert "index update failed" in state["error"]
 
     def test_stop_returns_metadata(self, tmp_data_dir: Path) -> None:
         """Stopping a recording should return capture metadata."""
