@@ -7,6 +7,11 @@ SOURCE_SHA256="${SOURCE_SHA256:-464beb5e7bf0c311e68b45ae2f04e9cc2af88851abb40822
 TARGET_TRIPLE="${TARGET_TRIPLE:?TARGET_TRIPLE is required}"
 SOURCE_ARCHIVE="${SOURCE_ARCHIVE:?SOURCE_ARCHIVE is required}"
 OUTPUT_DIR="${OUTPUT_DIR:?OUTPUT_DIR is required}"
+if command -v python3 >/dev/null 2>&1; then
+  python_cmd="python3"
+else
+  python_cmd="python"
+fi
 
 workspace="$(pwd)"
 work_root="${RUNNER_TEMP:-/tmp}/openadapt-ffmpeg-${TARGET_TRIPLE}"
@@ -17,7 +22,7 @@ build_id="ffmpeg-${FFMPEG_VERSION}-${RUNTIME_REVISION}-${TARGET_TRIPLE}"
 archive="${OUTPUT_DIR}/openadapt-${build_id}.zip"
 manifest_entry="${OUTPUT_DIR}/${build_id}.manifest-entry.json"
 
-python - "${SOURCE_ARCHIVE}" "${SOURCE_SHA256}" <<'PY'
+"${python_cmd}" - "${SOURCE_ARCHIVE}" "${SOURCE_SHA256}" <<'PY'
 import hashlib
 import pathlib
 import sys
@@ -193,7 +198,7 @@ compiler="$("${CC:-cc}" --version 2>&1 | head -n 1 || true)"
 export TARGET_TRIPLE FFMPEG_VERSION RUNTIME_REVISION SOURCE_SHA256 GITHUB_SHA GITHUB_RUN_ID
 export GITHUB_SERVER_URL GITHUB_REPOSITORY GITHUB_WORKFLOW_REF compiler hardware_encoder
 export zlib_package
-python - "${bundle_dir}" <<'PY'
+"${python_cmd}" - "${bundle_dir}" <<'PY'
 import json
 import os
 import pathlib
@@ -229,7 +234,7 @@ PY
 
 smoke_dir="${build_root}/smoke"
 mkdir -p "${smoke_dir}"
-python - "${smoke_dir}" <<'PY'
+"${python_cmd}" - "${smoke_dir}" <<'PY'
 import binascii
 import json
 import pathlib
@@ -277,7 +282,7 @@ done | "${ffmpeg_bin}" -hide_banner -loglevel error -nostdin \
   -i "${smoke_dir}/raw-input.mp4" -vf 'select=eq(n\\,0)' -frames:v 1 \
   -f image2pipe -vcodec png -y "${smoke_dir}/decoded.png"
 
-python - "${smoke_dir}" <<'PY'
+"${python_cmd}" - "${smoke_dir}" <<'PY'
 import json
 import pathlib
 import sys
@@ -305,7 +310,7 @@ if [[ -n "${hardware_encoder}" ]]; then
 fi
 
 cd "${workspace}"
-python scripts/package_ffmpeg_runtime.py \
+"${python_cmd}" scripts/package_ffmpeg_runtime.py \
   --bundle-dir "${bundle_dir}" \
   --output "${archive}" \
   --target "${TARGET_TRIPLE}" \

@@ -30,13 +30,16 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist/ffmpeg-source
-          curl --fail --show-error --silent --location \
+          curl --fail --show-error --silent --location --retry 5 \
+            --retry-all-errors --connect-timeout 20 --max-time 300 \
             "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz" \
             --output "dist/ffmpeg-source/ffmpeg-${FFMPEG_VERSION}.tar.xz"
-          curl --fail --show-error --silent --location \
+          curl --fail --show-error --silent --location --retry 5 \
+            --retry-all-errors --connect-timeout 20 --max-time 300 \
             "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz.asc" \
             --output "dist/ffmpeg-source/ffmpeg-${FFMPEG_VERSION}.tar.xz.asc"
-          curl --fail --show-error --silent --location \
+          curl --fail --show-error --silent --location --retry 5 \
+            --retry-all-errors --connect-timeout 20 --max-time 300 \
             https://ffmpeg.org/ffmpeg-devel.asc \
             --output dist/ffmpeg-source/ffmpeg-devel.asc
 
