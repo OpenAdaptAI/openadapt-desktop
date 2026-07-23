@@ -38,6 +38,22 @@ if TYPE_CHECKING:
     from engine.storage_manager import StorageManager
 
 
+def _load_capture_recorder():
+    """Load the native recorder or fail before claiming a recording started."""
+
+    try:
+        from openadapt_capture import Recorder
+    except ImportError as exc:
+        raise RuntimeError(
+            "OpenAdapt Capture could not be imported; reinstall OpenAdapt Desktop"
+        ) from exc
+    if Recorder is None:
+        raise RuntimeError(
+            "OpenAdapt Capture's native recorder is unavailable on this system"
+        )
+    return Recorder
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -140,26 +156,41 @@ class RecordingController:
         }
         (capture_dir / "meta.json").write_text(json.dumps(meta, indent=2))
 
-        # Write state.json
-        state = {"status": "recording", "started_at": started_at, "capture_id": capture_id}
-        (capture_dir / "state.json").write_text(json.dumps(state, indent=2))
+        state_path = capture_dir / "state.json"
+        state = {"status": "starting", "started_at": started_at, "capture_id": capture_id}
+        state_path.write_text(json.dumps(state, indent=2))
 
-        # Try to start openadapt-capture Recorder
+        recorder = None
+        entered = False
         try:
-            from openadapt_capture import Recorder
-            self._recorder = Recorder(output_dir=str(capture_dir))
-            self._recorder.start()
-        except ImportError:
-            # openadapt-capture not installed -- record metadata only
+            Recorder = _load_capture_recorder()
+            recorder = Recorder(str(capture_dir), task_description=task_description)
+            recorder.__enter__()
+            entered = True
+            if not recorder.wait_for_ready(timeout=60):
+                raise RuntimeError("OpenAdapt Capture did not become ready within 60 seconds")
+            if not recorder.is_recording:
+                raise RuntimeError("OpenAdapt Capture stopped before recording became ready")
+        except Exception as exc:
+            if entered and recorder is not None:
+                try:
+                    recorder.stop()
+                    recorder.__exit__(type(exc), exc, exc.__traceback__)
+                except Exception:
+                    logger.exception("Recorder cleanup failed after start error")
+            state.update({"status": "failed", "failed_at": _now_iso(), "error": str(exc)})
+            state_path.write_text(json.dumps(state, indent=2))
             self._recorder = None
-        except Exception:
-            # Recorder failed (e.g., no display) -- still track the session
-            self._recorder = None
+            self.state = RecordingState.IDLE
+            raise RuntimeError(f"Could not start native recording: {exc}") from exc
 
+        self._recorder = recorder
         self._current_capture_id = capture_id
         self._capture_dir = capture_dir
         self._started_at = started_at
         self.state = RecordingState.RECORDING
+        state["status"] = "recording"
+        state_path.write_text(json.dumps(state, indent=2))
 
         # Register in DB if storage_manager available
         if self._storage_manager:
@@ -182,13 +213,34 @@ class RecordingController:
         stopped_at = _now_iso()
         event_count = 0
 
-        # Stop the recorder
-        if self._recorder is not None:
+        recorder = self._recorder
+        if recorder is None:
+            raise RuntimeError("Recording state is active but the native recorder is missing")
+
+        try:
+            recorder.stop()
+            recorder.__exit__(None, None, None)
+            event_count = getattr(recorder, "event_count", 0) or 0
+        except Exception as exc:
             try:
-                self._recorder.stop()
-                event_count = getattr(self._recorder, "event_count", 0) or 0
+                recorder.__exit__(type(exc), exc, exc.__traceback__)
             except Exception:
-                pass
+                logger.exception("Recorder cleanup failed after stop error")
+            if self._capture_dir:
+                state = {
+                    "status": "failed",
+                    "started_at": self._started_at,
+                    "failed_at": _now_iso(),
+                    "capture_id": self._current_capture_id,
+                    "error": str(exc),
+                }
+                (self._capture_dir / "state.json").write_text(json.dumps(state, indent=2))
+            self._current_capture_id = None
+            self._capture_dir = None
+            self._started_at = None
+            self._recorder = None
+            self.state = RecordingState.IDLE
+            raise RuntimeError(f"Could not stop native recording cleanly: {exc}") from exc
 
         # Calculate duration
         duration = 0.0

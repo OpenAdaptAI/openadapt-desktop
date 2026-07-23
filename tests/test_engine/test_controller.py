@@ -34,6 +34,114 @@ class TestRecordingController:
         assert (dirs[0] / "meta.json").exists()
         assert (dirs[0] / "state.json").exists()
 
+    def test_start_uses_capture_runtime_contract(
+        self, tmp_data_dir: Path, monkeypatch
+    ) -> None:
+        """Desktop must use Capture's real context-manager constructor contract."""
+
+        calls: dict[str, object] = {}
+
+        class ContractRecorder:
+            event_count = 0
+            is_recording = False
+
+            def __init__(self, capture_dir: str, task_description: str = "") -> None:
+                calls["capture_dir"] = capture_dir
+                calls["task_description"] = task_description
+
+            def __enter__(self):
+                self.is_recording = True
+                calls["entered"] = True
+                return self
+
+            def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+                self.is_recording = False
+                calls["exited"] = True
+
+            def wait_for_ready(self, timeout: float = 60) -> bool:
+                calls["timeout"] = timeout
+                return True
+
+            def stop(self) -> None:
+                calls["stopped"] = True
+
+        monkeypatch.setattr(
+            "engine.controller._load_capture_recorder", lambda: ContractRecorder
+        )
+        controller = RecordingController(captures_dir=tmp_data_dir / "captures")
+
+        controller.start(task_description="Claims intake")
+        controller.stop()
+
+        assert Path(str(calls["capture_dir"])).parent == tmp_data_dir / "captures"
+        assert calls["task_description"] == "Claims intake"
+        assert calls["entered"] is True
+        assert calls["timeout"] == 60
+        assert calls["stopped"] is True
+        assert calls["exited"] is True
+
+    def test_start_failure_is_explicit_and_not_recording(
+        self, tmp_data_dir: Path, monkeypatch
+    ) -> None:
+        """A missing native recorder must never become a metadata-only success."""
+
+        def unavailable():
+            raise RuntimeError("native recorder unavailable")
+
+        monkeypatch.setattr("engine.controller._load_capture_recorder", unavailable)
+        controller = RecordingController(captures_dir=tmp_data_dir / "captures")
+
+        with pytest.raises(RuntimeError, match="Could not start native recording"):
+            controller.start()
+
+        assert controller.state == RecordingState.IDLE
+        assert not controller.is_recording
+        assert controller.current_capture_id is None
+        capture_dir = next((tmp_data_dir / "captures").iterdir())
+        state = json.loads((capture_dir / "state.json").read_text())
+        assert state["status"] == "failed"
+        assert "native recorder unavailable" in state["error"]
+
+    def test_stop_failure_is_explicit_and_not_completed(
+        self, tmp_data_dir: Path, monkeypatch
+    ) -> None:
+        """A recorder shutdown failure must not produce completed metadata."""
+
+        class BrokenStopRecorder:
+            event_count = 0
+            is_recording = False
+
+            def __init__(self, capture_dir: str, task_description: str = "") -> None:
+                pass
+
+            def __enter__(self):
+                self.is_recording = True
+                return self
+
+            def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+                self.is_recording = False
+
+            def wait_for_ready(self, timeout: float = 60) -> bool:
+                return True
+
+            def stop(self) -> None:
+                raise RuntimeError("writer did not stop")
+
+        monkeypatch.setattr(
+            "engine.controller._load_capture_recorder", lambda: BrokenStopRecorder
+        )
+        controller = RecordingController(captures_dir=tmp_data_dir / "captures")
+        controller.start()
+
+        with pytest.raises(RuntimeError, match="Could not stop native recording cleanly"):
+            controller.stop()
+
+        assert controller.state == RecordingState.IDLE
+        capture_dir = next((tmp_data_dir / "captures").iterdir())
+        state = json.loads((capture_dir / "state.json").read_text())
+        assert state["status"] == "failed"
+        assert "writer did not stop" in state["error"]
+
     def test_stop_returns_metadata(self, tmp_data_dir: Path) -> None:
         """Stopping a recording should return capture metadata."""
         controller = RecordingController(captures_dir=tmp_data_dir / "captures")
