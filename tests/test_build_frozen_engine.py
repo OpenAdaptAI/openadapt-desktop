@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
+import tarfile
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -57,6 +61,36 @@ def test_missing_onnxruntime_notice_fails_closed(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="ThirdPartyNotices.txt"):
         build.notice_data(tmp_path)
+
+
+def test_python_distribution_guard_runs_without_build_extra(tmp_path: Path) -> None:
+    """The recovery publication guard must not require Packaging/PyInstaller."""
+
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    with zipfile.ZipFile(dist / "openadapt_desktop-0.8.0-py3-none-any.whl", "w") as archive:
+        archive.writestr("openadapt_desktop/__init__.py", "")
+    with tarfile.open(dist / "openadapt_desktop-0.8.0.tar.gz", "w:gz") as archive:
+        payload = tmp_path / "__init__.py"
+        payload.write_text("")
+        archive.add(payload, arcname="openadapt_desktop-0.8.0/openadapt_desktop/__init__.py")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-S",
+            str(verify.ROOT / "scripts" / "verify_build_artifact.py"),
+            "python-distribution",
+            "--root",
+            str(tmp_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.count("Verified Python distribution:") == 2
 
 
 def test_windows_frozen_inventory_member_paths_are_normalized() -> None:

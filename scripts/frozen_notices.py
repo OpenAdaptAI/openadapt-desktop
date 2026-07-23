@@ -17,10 +17,6 @@ from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
 from typing import Callable, Iterable
 
-from packaging.markers import default_environment
-from packaging.requirements import InvalidRequirement, Requirement
-from packaging.utils import canonicalize_name
-
 ROOT_DISTRIBUTION = "openadapt-desktop"
 FROZEN_RUNTIME_ROOTS = ("openadapt-desktop", "openadapt-flow")
 BUILD_EXTRA = frozenset({"build"})
@@ -76,6 +72,12 @@ FIRST_PARTY_MIT_FALLBACK = frozenset(
 )
 
 
+def _canonicalize_name(name: str) -> str:
+    """Normalize a distribution name without importing build-only tooling."""
+
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
 def _metadata_values(metadata, key: str) -> list[str]:
     values = metadata.get_all(key) if hasattr(metadata, "get_all") else None
     if values:
@@ -106,6 +108,14 @@ def dependency_closure(
 ) -> dict[str, object]:
     """Resolve the installed dependency closure for the selected root extras."""
 
+    try:
+        from packaging.markers import default_environment
+        from packaging.requirements import InvalidRequirement, Requirement
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "the build extra is required to resolve the frozen dependency closure"
+        ) from exc
+
     environment = default_environment()
     pending: deque[tuple[str, frozenset[str]]] = deque([(root_name, frozenset(root_extras))])
     resolved: dict[str, object] = {}
@@ -113,7 +123,7 @@ def dependency_closure(
 
     while pending:
         requested_name, requested_extras = pending.popleft()
-        canonical_name = canonicalize_name(requested_name)
+        canonical_name = _canonicalize_name(requested_name)
         try:
             dist = resolved.get(canonical_name) or distribution_getter(requested_name)
         except PackageNotFoundError as exc:
@@ -193,7 +203,7 @@ def _declared_name(dist) -> str:
     name = dist.metadata.get("Name")
     if not name:
         raise RuntimeError("installed distribution metadata is missing Name")
-    return canonicalize_name(str(name))
+    return _canonicalize_name(str(name))
 
 
 def _reject_copyleft(closure: dict[str, object]) -> None:
