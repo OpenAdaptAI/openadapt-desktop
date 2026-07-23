@@ -253,6 +253,17 @@ class EngineDispatcher:
         controller = self.services.controller
         if controller.is_recording:
             return self._status_dict(controller)
+        if sys.platform == "darwin" and not _mac_preflight_input_monitoring():
+            # Starting a capture is the explicit user action where macOS may
+            # present its Input Monitoring consent prompt. Passive permission
+            # checks must remain prompt-free.
+            if not _mac_request_input_monitoring():
+                message = (
+                    "Input Monitoring permission is required to record keyboard "
+                    "and mouse input. Grant it in System Settings, then try again."
+                )
+                self.emit("recording_error", {"error": message})
+                raise PermissionError(message)
         task = params.get("purpose") or params.get("task") or params.get("name") or ""
         capture_id = controller.start(task_description=str(task))
         self.services.audit.log("recording_started", capture_id=capture_id)
@@ -823,17 +834,27 @@ class EngineDispatcher:
     # ------------------------------------------------------- permissions
 
     def check_permissions(self, **params: Any) -> dict:
-        """Return a best-effort :class:`PermissionStatus`.
+        """Return the prompt-free :class:`PermissionStatus`.
 
-        On macOS the capture/accessibility perms are the #1 silent-failure mode;
-        we detect them when ``pyobjc``/``openadapt-capture`` expose a preflight,
-        else report ``True`` (non-mac platforms don't gate on these).
+        macOS capture needs Screen Recording, Accessibility, and Input
+        Monitoring. This check never requests access. Input Monitoring fails
+        closed if its preflight API is unavailable; non-mac platforms do not
+        use these macOS permissions and report all three as granted.
         """
         if sys.platform != "darwin":
-            return {"screen_recording": True, "accessibility": True}
+            return {
+                "screen_recording": True,
+                "accessibility": True,
+                "input_monitoring": True,
+            }
         screen = _mac_preflight_screen()
         access = _mac_preflight_accessibility()
-        return {"screen_recording": screen, "accessibility": access}
+        input_monitoring = _mac_preflight_input_monitoring()
+        return {
+            "screen_recording": screen,
+            "accessibility": access,
+            "input_monitoring": input_monitoring,
+        }
 
     # ------------------------------------------------------- review / egress
 
@@ -966,3 +987,25 @@ def _mac_preflight_accessibility() -> bool:  # pragma: no cover - platform-speci
         return bool(AXIsProcessTrusted())
     except Exception:
         return True
+
+
+def _mac_preflight_input_monitoring() -> bool:  # pragma: no cover - platform-specific
+    """Check Input Monitoring without presenting the system consent prompt."""
+    try:
+        from Quartz import CGPreflightListenEventAccess
+
+        return bool(CGPreflightListenEventAccess())
+    except Exception as exc:
+        logger.warning("Input Monitoring preflight unavailable: {e}", e=exc)
+        return False
+
+
+def _mac_request_input_monitoring() -> bool:  # pragma: no cover - platform-specific
+    """Request Input Monitoring after an explicit capture-start action."""
+    try:
+        from Quartz import CGRequestListenEventAccess
+
+        return bool(CGRequestListenEventAccess())
+    except Exception as exc:
+        logger.warning("Input Monitoring request unavailable: {e}", e=exc)
+        return False

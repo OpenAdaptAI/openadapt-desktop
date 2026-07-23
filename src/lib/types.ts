@@ -80,6 +80,7 @@ export interface NeedsAttention {
 export interface PermissionStatus {
   screen_recording: boolean;
   accessibility: boolean;
+  input_monitoring: boolean;
 }
 
 // Runner lane (EXPERIMENTAL — outbound dispatch loop, spec §2).

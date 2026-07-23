@@ -1,6 +1,6 @@
 // First-run onboarding (spec §5): empty-state hero "Record your first workflow",
-// OS permission gate (screen recording + accessibility), and the honest
-// "get past the OS warning" copy. Mirrors the cloud seamless flow.
+// OS permission gate and the honest "get past the OS warning" copy. Mirrors
+// the cloud seamless flow.
 import { useEffect, useState } from "react";
 import { CMD, engineTry, openExternal } from "../lib/engine";
 import type { PermissionStatus } from "../lib/types";
@@ -15,11 +15,14 @@ const SCREEN_PANE =
   "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture";
 const AX_PANE =
   "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility";
+const INPUT_PANE =
+  "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent";
 
 export function Onboarding({ onStart }: { onStart: () => void }) {
   const [perms, setPerms] = useState<PermissionStatus>({
     screen_recording: false,
     accessibility: false,
+    input_monitoring: false,
   });
   const [checked, setChecked] = useState(false);
 
@@ -27,7 +30,11 @@ export function Onboarding({ onStart }: { onStart: () => void }) {
     const p = await engineTry<PermissionStatus>(
       CMD.CHECK_PERMISSIONS,
       {},
-      { screen_recording: false, accessibility: false },
+      {
+        screen_recording: false,
+        accessibility: false,
+        input_monitoring: false,
+      },
     );
     setPerms(p);
     setChecked(true);
@@ -37,7 +44,11 @@ export function Onboarding({ onStart }: { onStart: () => void }) {
     void refresh();
   }, []);
 
-  const ready = perms.screen_recording && perms.accessibility;
+  const ready =
+    !MAC ||
+    (perms.screen_recording &&
+      perms.accessibility &&
+      perms.input_monitoring);
 
   return (
     <div className="content">
@@ -90,6 +101,16 @@ export function Onboarding({ onStart }: { onStart: () => void }) {
                 <span className="spacer" />
                 <span>Accessibility</span>
                 <Button size="sm" onClick={() => openExternal(AX_PANE)}>
+                  Open pane
+                </Button>
+              </div>
+              <div className="row">
+                <Pill tone={perms.input_monitoring ? "ok" : "warn"}>
+                  {perms.input_monitoring ? "granted" : "needed"}
+                </Pill>
+                <span className="spacer" />
+                <span>Input Monitoring</span>
+                <Button size="sm" onClick={() => openExternal(INPUT_PANE)}>
                   Open pane
                 </Button>
               </div>
