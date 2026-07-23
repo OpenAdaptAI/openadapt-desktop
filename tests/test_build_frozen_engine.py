@@ -76,7 +76,22 @@ def test_frozen_inventory_rejects_copyleft_module_names() -> None:
     assert verify.FORBIDDEN_FROZEN_MEMBERS.search("'pynput.keyboard._darwin'")
 
 
-def test_frozen_notice_inventory_binds_concrete_archive_bytes() -> None:
+def test_frozen_notice_inventory_binds_concrete_archive_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bootloader_notice = b"reviewed test Bootloader Exception notice\n"
+    import hashlib
+
+    monkeypatch.setattr(
+        verify,
+        "PYINSTALLER_NOTICE_SHA256",
+        hashlib.sha256(bootloader_notice).hexdigest(),
+    )
+    monkeypatch.setattr(
+        verify,
+        "PYINSTALLER_EXCEPTION_MARKERS",
+        ("Bootloader Exception",),
+    )
     payloads = {
         "third_party/python/openadapt-desktop/001-LICENSE": b"desktop MIT\n",
         "third_party/python/openadapt-capture/001-LICENSE": b"capture MIT\n",
@@ -87,6 +102,7 @@ def test_frozen_notice_inventory_binds_concrete_archive_bytes() -> None:
         "third_party/python/pympler/001-LICENSE": b"Apache\n",
         "third_party/python/pympler/002-NOTICE": b"Pympler notice\n",
         "third_party/python/sqlalchemy/001-LICENSE": b"sqlalchemy MIT\n",
+        verify.PYINSTALLER_NOTICE_MEMBER: bootloader_notice,
     }
     packages = []
     for name in verify.REQUIRED_NOTICE_TOKENS:
@@ -110,19 +126,60 @@ def test_frozen_notice_inventory_binds_concrete_archive_bytes() -> None:
                 "notices": notices,
             }
         )
-    inventory = json.dumps({"schema_version": 1, "packages": packages}).encode()
+    inventory = json.dumps(
+        {
+            "schema_version": 2,
+            "runtime_roots": list(verify.FROZEN_RUNTIME_ROOTS),
+            "packages": packages,
+            "build_only_packages": [
+                {
+                    "name": verify.PYINSTALLER_DISTRIBUTION,
+                    "version": verify.PYINSTALLER_VERSION,
+                    "archive_import_roots": ["PyInstaller"],
+                }
+            ],
+            "embedded_build_components": [
+                {
+                    "name": "pyinstaller-bootloader",
+                    "source_distribution": verify.PYINSTALLER_DISTRIBUTION,
+                    "source_version": verify.PYINSTALLER_VERSION,
+                    "license_scope": ("GPL-2.0-or-later WITH PyInstaller-Bootloader-exception"),
+                    "source_member": ("pyinstaller-6.21.0.dist-info/licenses/COPYING.txt"),
+                    "bundled_member": verify.PYINSTALLER_NOTICE_MEMBER,
+                    "sha256": hashlib.sha256(bootloader_notice).hexdigest(),
+                    "bytes": len(bootloader_notice),
+                    "required_markers": ["Bootloader Exception"],
+                }
+            ],
+        }
+    ).encode()
 
-    verify.validate_frozen_notice_inventory(
+    build_only_roots = verify.validate_frozen_notice_inventory(
         inventory,
         members=set(payloads),
         extract_member=payloads.__getitem__,
+    )
+    assert build_only_roots == ("PyInstaller",)
+
+
+def test_frozen_archive_rejects_build_only_python_modules() -> None:
+    with pytest.raises(ValueError, match="build-only Python modules"):
+        verify.reject_frozen_build_only_imports(
+            modules={"openadapt_flow", "PyInstaller.building.api"},
+            import_roots=("PyInstaller", "altgraph"),
+        )
+
+    verify.reject_frozen_build_only_imports(
+        modules={"openadapt_flow", "pyimod02_importers", "pyi_rth_pkgutil"},
+        import_roots=("PyInstaller", "altgraph"),
     )
 
 
 def test_frozen_notice_inventory_rejects_copyleft_metadata() -> None:
     inventory = json.dumps(
         {
-            "schema_version": 1,
+            "schema_version": 2,
+            "runtime_roots": list(verify.FROZEN_RUNTIME_ROOTS),
             "packages": [
                 {
                     "name": "oa-atomacos",
@@ -145,7 +202,8 @@ def test_frozen_notice_inventory_rejects_copyleft_metadata() -> None:
 def test_frozen_notice_inventory_rejects_metadata_only_package() -> None:
     inventory = json.dumps(
         {
-            "schema_version": 1,
+            "schema_version": 2,
+            "runtime_roots": list(verify.FROZEN_RUNTIME_ROOTS),
             "packages": [
                 {
                     "name": "metadata-only",

@@ -18,16 +18,28 @@ try:
     from scripts.frozen_notices import (
         COPYLEFT_LICENSE_RE,
         FORBIDDEN_FROZEN_DISTRIBUTIONS,
+        FROZEN_RUNTIME_ROOTS,
         NOTICE_BUNDLE_MEMBER,
         NOTICE_INVENTORY_NAME,
+        PYINSTALLER_DISTRIBUTION,
+        PYINSTALLER_EXCEPTION_MARKERS,
+        PYINSTALLER_NOTICE_MEMBER,
+        PYINSTALLER_NOTICE_SHA256,
+        PYINSTALLER_VERSION,
         REQUIRED_NOTICE_TOKENS,
     )
 except ModuleNotFoundError:  # pragma: no cover - direct ``python scripts/...`` use
     from frozen_notices import (
         COPYLEFT_LICENSE_RE,
         FORBIDDEN_FROZEN_DISTRIBUTIONS,
+        FROZEN_RUNTIME_ROOTS,
         NOTICE_BUNDLE_MEMBER,
         NOTICE_INVENTORY_NAME,
+        PYINSTALLER_DISTRIBUTION,
+        PYINSTALLER_EXCEPTION_MARKERS,
+        PYINSTALLER_NOTICE_MEMBER,
+        PYINSTALLER_NOTICE_SHA256,
+        PYINSTALLER_VERSION,
         REQUIRED_NOTICE_TOKENS,
     )
 
@@ -89,15 +101,17 @@ def validate_frozen_notice_inventory(
     *,
     members: set[str],
     extract_member,
-) -> None:
+) -> tuple[str, ...]:
     """Validate the generated notice inventory against exact archive bytes."""
 
     try:
         inventory = json.loads(inventory_payload)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError("frozen notice inventory is not valid UTF-8 JSON") from exc
-    if inventory.get("schema_version") != 1:
+    if inventory.get("schema_version") != 2:
         raise ValueError("frozen notice inventory has an unsupported schema")
+    if inventory.get("runtime_roots") != list(FROZEN_RUNTIME_ROOTS):
+        raise ValueError("frozen notice inventory has unexpected runtime roots")
     packages = inventory.get("packages")
     if not isinstance(packages, list) or not packages:
         raise ValueError("frozen notice inventory has no packages")
@@ -144,6 +158,119 @@ def validate_frozen_notice_inventory(
             if not any(token.lower() in member for member in notice_members):
                 raise ValueError(f"{required_name} is missing required {token} notice")
 
+    build_only_packages = inventory.get("build_only_packages")
+    if not isinstance(build_only_packages, list) or not build_only_packages:
+        raise ValueError("frozen notice inventory has no build-only package boundary")
+    build_only_import_roots: set[str] = set()
+    build_only_names: set[str] = set()
+    for package in build_only_packages:
+        if not isinstance(package, dict):
+            raise ValueError("frozen notice inventory has a malformed build-only package")
+        name = package.get("name")
+        version = package.get("version")
+        roots = package.get("archive_import_roots")
+        if (
+            not isinstance(name, str)
+            or not isinstance(version, str)
+            or not isinstance(roots, list)
+            or not roots
+            or not all(isinstance(root, str) and root.isidentifier() for root in roots)
+        ):
+            raise ValueError(f"invalid build-only package record: {package}")
+        if name in package_index or name in build_only_names:
+            raise ValueError(f"duplicate runtime/build-only package: {name}")
+        build_only_names.add(name)
+        build_only_import_roots.update(roots)
+
+    pyinstaller_build_record = next(
+        (package for package in build_only_packages if package["name"] == PYINSTALLER_DISTRIBUTION),
+        None,
+    )
+    if (
+        pyinstaller_build_record is None
+        or pyinstaller_build_record["version"] != PYINSTALLER_VERSION
+        or "PyInstaller" not in pyinstaller_build_record["archive_import_roots"]
+    ):
+        raise ValueError("exact PyInstaller build-only boundary is absent")
+
+    components = inventory.get("embedded_build_components")
+    if not isinstance(components, list) or len(components) != 1:
+        raise ValueError("frozen notice inventory has an invalid build-component boundary")
+    bootloader = components[0]
+    if not isinstance(bootloader, dict):
+        raise ValueError("PyInstaller bootloader notice record is malformed")
+    expected_fields = {
+        "name": "pyinstaller-bootloader",
+        "source_distribution": PYINSTALLER_DISTRIBUTION,
+        "source_version": PYINSTALLER_VERSION,
+        "license_scope": "GPL-2.0-or-later WITH PyInstaller-Bootloader-exception",
+        "source_member": (f"pyinstaller-{PYINSTALLER_VERSION}.dist-info/licenses/COPYING.txt"),
+        "bundled_member": PYINSTALLER_NOTICE_MEMBER,
+        "sha256": PYINSTALLER_NOTICE_SHA256,
+        "required_markers": list(PYINSTALLER_EXCEPTION_MARKERS),
+    }
+    for key, expected in expected_fields.items():
+        if bootloader.get(key) != expected:
+            raise ValueError(f"PyInstaller bootloader {key} drifted")
+    if PYINSTALLER_NOTICE_MEMBER not in members:
+        raise ValueError("PyInstaller Bootloader Exception notice is absent")
+    bootloader_payload = extract_member(PYINSTALLER_NOTICE_MEMBER)
+    if hashlib.sha256(bootloader_payload).hexdigest() != PYINSTALLER_NOTICE_SHA256:
+        raise ValueError("PyInstaller Bootloader Exception notice hash mismatch")
+    if bootloader.get("bytes") != len(bootloader_payload):
+        raise ValueError("PyInstaller Bootloader Exception notice size mismatch")
+    try:
+        bootloader_text = bootloader_payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("PyInstaller Bootloader Exception notice is not UTF-8") from exc
+    missing_markers = [
+        marker for marker in PYINSTALLER_EXCEPTION_MARKERS if marker not in bootloader_text
+    ]
+    if missing_markers:
+        raise ValueError(
+            "PyInstaller Bootloader Exception notice omitted reviewed terms: "
+            + "; ".join(missing_markers)
+        )
+    return tuple(sorted(build_only_import_roots))
+
+
+def _frozen_python_modules(reader) -> set[str]:
+    """Return top-level and PYZ module names from a PyInstaller archive."""
+
+    modules = {
+        normalized_inventory(str(member))
+        for member in reader.toc
+        if not normalized_inventory(str(member)).startswith(f"{NOTICE_BUNDLE_MEMBER}/")
+    }
+    for member, entry in reader.toc.items():
+        # ``z`` is PyInstaller's CArchive typecode for an embedded PYZ archive.
+        if entry[-1] != "z":
+            continue
+        embedded = reader.open_embedded_archive(member)
+        modules.update(str(module) for module in embedded.toc)
+    return modules
+
+
+def reject_frozen_build_only_imports(
+    *,
+    modules: set[str],
+    import_roots: tuple[str, ...],
+) -> None:
+    """Prove build-tool Python packages did not cross the frozen boundary."""
+
+    violations: list[str] = []
+    for module in modules:
+        normalized_module = normalized_inventory(module)
+        for root in import_roots:
+            if normalized_module == root or normalized_module.startswith((f"{root}.", f"{root}/")):
+                violations.append(normalized_module)
+                break
+    if violations:
+        raise ValueError(
+            "build-only Python modules crossed frozen boundary: "
+            + "; ".join(sorted(violations)[:20])
+        )
+
 
 def verify_frozen_notice_bundle(artifact: Path) -> None:
     """Read and validate license data from the actual PyInstaller archive."""
@@ -169,10 +296,14 @@ def verify_frozen_notice_bundle(artifact: Path) -> None:
             raise ValueError(f"could not extract frozen notice member: {member}")
         return payload
 
-    validate_frozen_notice_inventory(
+    build_only_import_roots = validate_frozen_notice_inventory(
         extract_member(NOTICE_INVENTORY_MEMBER),
         members=set(member_keys),
         extract_member=extract_member,
+    )
+    reject_frozen_build_only_imports(
+        modules=_frozen_python_modules(reader),
+        import_roots=build_only_import_roots,
     )
 
 
