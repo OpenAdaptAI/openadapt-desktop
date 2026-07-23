@@ -209,6 +209,7 @@ class EngineDispatcher:
             "refresh_policy": self.refresh_policy,
             # OS permissions
             "check_permissions": self.check_permissions,
+            "request_input_monitoring": self.request_input_monitoring,
             # review / egress gate
             "scrub_capture": self.scrub_capture,
             "approve_review": self.approve_review,
@@ -856,6 +857,20 @@ class EngineDispatcher:
             "input_monitoring": input_monitoring,
         }
 
+    def request_input_monitoring(self, **params: Any) -> dict:
+        """Request Input Monitoring and return the refreshed permission state.
+
+        This command is reserved for an explicit user action in the onboarding
+        UI. The passive :meth:`check_permissions` command remains prompt-free.
+        The post-request preflight is authoritative: a successful request call
+        does not count as permission until macOS reports access as granted.
+        """
+        if sys.platform != "darwin":
+            return self.check_permissions()
+        if not _mac_preflight_input_monitoring():
+            _mac_request_input_monitoring()
+        return self.check_permissions()
+
     # ------------------------------------------------------- review / egress
 
     def scrub_capture(self, **params: Any) -> dict:
@@ -1001,7 +1016,7 @@ def _mac_preflight_input_monitoring() -> bool:  # pragma: no cover - platform-sp
 
 
 def _mac_request_input_monitoring() -> bool:  # pragma: no cover - platform-specific
-    """Request Input Monitoring after an explicit capture-start action."""
+    """Request Input Monitoring after an explicit user action."""
     try:
         from Quartz import CGRequestListenEventAccess
 

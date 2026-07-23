@@ -477,6 +477,94 @@ class TestMisc:
             "input_monitoring": False,
         }
 
+    def test_non_mac_input_monitoring_request_returns_granted_shape(
+        self, deps, monkeypatch
+    ) -> None:
+        disp, _db, _e = deps
+        monkeypatch.setattr("engine.dispatch.sys.platform", "linux")
+        monkeypatch.setattr(
+            "engine.dispatch._mac_request_input_monitoring",
+            lambda: pytest.fail("non-mac platforms must not request macOS access"),
+        )
+
+        assert disp.dispatch("request_input_monitoring", {}) == {
+            "screen_recording": True,
+            "accessibility": True,
+            "input_monitoring": True,
+        }
+
+    def test_mac_input_monitoring_request_rechecks_authoritative_state(
+        self, deps, monkeypatch
+    ) -> None:
+        disp, _db, _e = deps
+        monkeypatch.setattr("engine.dispatch.sys.platform", "darwin")
+        monkeypatch.setattr("engine.dispatch._mac_preflight_screen", lambda: True)
+        monkeypatch.setattr(
+            "engine.dispatch._mac_preflight_accessibility", lambda: True
+        )
+        checks = iter((False, True))
+        monkeypatch.setattr(
+            "engine.dispatch._mac_preflight_input_monitoring",
+            lambda: next(checks),
+        )
+        requests: list[bool] = []
+        monkeypatch.setattr(
+            "engine.dispatch._mac_request_input_monitoring",
+            lambda: requests.append(True) or True,
+        )
+
+        assert disp.dispatch("request_input_monitoring", {}) == {
+            "screen_recording": True,
+            "accessibility": True,
+            "input_monitoring": True,
+        }
+        assert requests == [True]
+
+    def test_mac_input_monitoring_request_does_not_assume_success(
+        self, deps, monkeypatch
+    ) -> None:
+        disp, _db, _e = deps
+        monkeypatch.setattr("engine.dispatch.sys.platform", "darwin")
+        monkeypatch.setattr("engine.dispatch._mac_preflight_screen", lambda: True)
+        monkeypatch.setattr(
+            "engine.dispatch._mac_preflight_accessibility", lambda: True
+        )
+        monkeypatch.setattr(
+            "engine.dispatch._mac_preflight_input_monitoring", lambda: False
+        )
+        monkeypatch.setattr(
+            "engine.dispatch._mac_request_input_monitoring", lambda: True
+        )
+
+        assert disp.dispatch("request_input_monitoring", {}) == {
+            "screen_recording": True,
+            "accessibility": True,
+            "input_monitoring": False,
+        }
+
+    def test_mac_input_monitoring_request_skips_prompt_when_already_granted(
+        self, deps, monkeypatch
+    ) -> None:
+        disp, _db, _e = deps
+        monkeypatch.setattr("engine.dispatch.sys.platform", "darwin")
+        monkeypatch.setattr("engine.dispatch._mac_preflight_screen", lambda: True)
+        monkeypatch.setattr(
+            "engine.dispatch._mac_preflight_accessibility", lambda: True
+        )
+        monkeypatch.setattr(
+            "engine.dispatch._mac_preflight_input_monitoring", lambda: True
+        )
+        monkeypatch.setattr(
+            "engine.dispatch._mac_request_input_monitoring",
+            lambda: pytest.fail("granted access must not prompt again"),
+        )
+
+        assert disp.dispatch("request_input_monitoring", {}) == {
+            "screen_recording": True,
+            "accessibility": True,
+            "input_monitoring": True,
+        }
+
     def test_unknown_command_raises(self, deps) -> None:
         disp, _db, _e = deps
         with pytest.raises(KeyError):
@@ -497,7 +585,8 @@ class TestMisc:
             "run_workflow", "get_run_report", "teach_fix", "push_workflow",
             "get_sync_state", "pause_sync", "resume_sync", "get_needs_attention",
             "login_browser", "login_paste", "logout", "get_auth_status",
-            "get_config", "set_config", "check_permissions", "scrub_capture",
+            "get_config", "set_config", "check_permissions",
+            "request_input_monitoring", "scrub_capture",
             "approve_review", "dismiss_review", "get_pending_reviews",
         }
         assert expected.issubset(set(disp.commands))

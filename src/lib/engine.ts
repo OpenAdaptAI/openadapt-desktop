@@ -48,8 +48,9 @@ export const CMD = {
   // cached fail-closed by the engine (engine/policy.py, docs/POLICY_SYNC.md).
   // The desktop consumes it read-only; the canonical write path is the cloud API.
   GET_EFFECTIVE_POLICY: "get_effective_policy",
-  // OS permissions (screen recording / accessibility)
+  // OS permissions (screen recording / accessibility / input monitoring)
   CHECK_PERMISSIONS: "check_permissions",
+  REQUEST_INPUT_MONITORING: "request_input_monitoring",
   // review / egress gate (existing engine surface)
   SCRUB_CAPTURE: "scrub_capture",
   APPROVE_REVIEW: "approve_review",

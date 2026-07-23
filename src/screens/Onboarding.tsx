@@ -25,6 +25,7 @@ export function Onboarding({ onStart }: { onStart: () => void }) {
     input_monitoring: false,
   });
   const [checked, setChecked] = useState(false);
+  const [requestingInput, setRequestingInput] = useState(false);
 
   async function refresh() {
     const p = await engineTry<PermissionStatus>(
@@ -43,6 +44,20 @@ export function Onboarding({ onStart }: { onStart: () => void }) {
   useEffect(() => {
     void refresh();
   }, []);
+
+  async function requestInputMonitoring() {
+    setRequestingInput(true);
+    try {
+      await engineTry<PermissionStatus>(
+        CMD.REQUEST_INPUT_MONITORING,
+        {},
+        perms,
+      );
+    } finally {
+      await refresh();
+      setRequestingInput(false);
+    }
+  }
 
   const ready =
     !MAC ||
@@ -110,6 +125,15 @@ export function Onboarding({ onStart }: { onStart: () => void }) {
                 </Pill>
                 <span className="spacer" />
                 <span>Input Monitoring</span>
+                {!perms.input_monitoring && (
+                  <Button
+                    size="sm"
+                    disabled={requestingInput}
+                    onClick={() => void requestInputMonitoring()}
+                  >
+                    {requestingInput ? "Requesting…" : "Request access"}
+                  </Button>
+                )}
                 <Button size="sm" onClick={() => openExternal(INPUT_PANE)}>
                   Open pane
                 </Button>
