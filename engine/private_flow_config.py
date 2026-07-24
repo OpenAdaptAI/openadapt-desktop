@@ -3,7 +3,8 @@
 Desktop target selectors (window owner/title/readiness text and endpoints) can
 contain PHI or customer-identifying data.  Flow accepts the same values through
 its deployment config, so Desktop merges direct target overrides over the
-operator's YAML/JSON config and gives Flow only a private file path.
+operator's YAML/JSON config and gives Flow only a private file path. POSIX uses
+mode 0600; Windows uses its current-user profile/run-directory ACL boundary.
 """
 
 from __future__ import annotations
@@ -114,10 +115,12 @@ def private_flow_config(
     source: Path | None = None,
     target: ExecutionTarget | None = None,
 ) -> Iterator[Path | None]:
-    """Yield a short-lived mode-0600 merged config, then remove it.
+    """Yield a short-lived private merged config, then remove it.
 
     If there is no source and no direct target, no file is needed and ``None``
-    is yielded.  The caller must keep the context open until Flow exits.
+    is yielded. POSIX files are mode 0600; Windows temp files inherit the
+    current user's protected run-directory ACL. The caller must keep the context
+    open until Flow exits.
     """
 
     if source is None and target is None:

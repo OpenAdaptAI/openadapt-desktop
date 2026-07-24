@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import stat
 from pathlib import Path
 
@@ -46,7 +47,12 @@ effects:
     ) as staged:
         assert staged is not None
         staged_path = staged
-        assert stat.S_IMODE(staged.stat().st_mode) & 0o077 == 0
+        if os.name != "nt":
+            assert stat.S_IMODE(staged.stat().st_mode) == 0o600
+        else:
+            # Windows does not expose POSIX owner/group bits. mkstemp creates
+            # inside Desktop's current-user run directory and inherits its ACL.
+            assert staged.is_file()
         merged = yaml.safe_load(staged.read_text())
         assert merged["backend"] == {
             "kind": "rdp",
