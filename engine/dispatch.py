@@ -413,133 +413,201 @@ class EngineDispatcher:
         workflow_id = params.get("workflow_id")
         bundle = self._bundle_dir(workflow_id)
         if bundle is None:
-            return {"ok": False, "error": f"Unknown workflow {workflow_id}"}
+            return self._pre_action_refusal(f"Unknown workflow {workflow_id}")
         try:
             target, deployment_config = self._execution_target(params)
         except ValueError as exc:
-            return {"ok": False, "error": str(exc)}
+            return self._pre_action_refusal(str(exc))
         run_id = uuid.uuid4().hex[:8]
         run_dir = self.config.data_dir / "runs" / f"{'run' if run else 'replay'}-{run_id}"
         run_dir.mkdir(parents=True, exist_ok=True)
-        self.emit(
-            "replay_progress",
-            {
-                "workflow_id": workflow_id,
-                "state": "running",
-                "backend": target.backend,
-            },
-        )
+        backend = target.backend if target is not None else "configured"
+        # A selected config always exists (validated above). The historical
+        # governed-run default remains fail-loud when absent; a direct target
+        # can still form a complete target-only deployment config.
+        default_config = self.config.data_dir / "deployment.json"
+        base_config = deployment_config
+        if run and base_config is None and default_config.is_file():
+            base_config = default_config
+
+        result = None
+        invocation_started = False
+        log_redactions: tuple[str, ...] = ()
         try:
-            if run:
-                # Keep the historical per-machine default for callers that have
-                # not selected a file in the cockpit. Flow remains the
-                # authoritative fail-closed deployment/policy validator.
-                config_path = deployment_config or self.config.data_dir / "deployment.json"
-                result = self.services.flow_bridge.run(
-                    bundle,
-                    config_path,
-                    out_dir=run_dir,
-                    target=target,
-                )
-            else:
-                # Native/remote Flow backends do not import or launch
-                # Playwright. Never make their execution depend on a Chromium
-                # download.
-                ensure_browser = getattr(
-                    self.services.flow_bridge, "ensure_browser_runtime", None
-                )
-                if target.backend == "web" and ensure_browser is not None:
-                    ensure_browser(
-                        lambda state, detail: self.emit(
-                            "browser_runtime",
-                            {
-                                "workflow_id": workflow_id,
-                                "state": state,
-                                "detail": detail,
-                            },
-                        )
-                    )
-                result = self.services.flow_bridge.replay(
-                    bundle,
-                    out_dir=run_dir,
-                    target=target,
-                    config=deployment_config,
-                )
-        except Exception as exc:
-            self.emit(
-                "replay_progress",
-                {
-                    "workflow_id": workflow_id,
-                    "state": "error",
-                    "backend": target.backend,
-                },
+            from engine.private_flow_config import (
+                flow_log_redactions,
+                private_flow_config,
             )
-            return {"ok": False, "error": str(exc)}
-        for line in (result.stdout or "").splitlines():
-            self.emit("log_line", {"line": line})
-        # Flow uses exit 1 for a governed halt, so the exit code alone is not
-        # failure evidence. A halt has a bound report.json; a nonzero process
-        # with no report must never be presented as a successful empty run.
+
+            log_redactions = flow_log_redactions(base_config, target)
+
+            with private_flow_config(
+                run_dir,
+                source=base_config,
+                target=target,
+            ) as staged_config:
+                # Native/remote Flow backends do not import or launch
+                # Playwright. Config-only execution delegates backend setup to
+                # Flow, preserving a native/remote backend without injecting
+                # Desktop's historical web default.
+                ensure_browser = getattr(self.services.flow_bridge, "ensure_browser_runtime", None)
+                should_ensure_browser = (
+                    not run
+                    and ensure_browser is not None
+                    and (
+                        (target is not None and target.backend == "web")
+                        or (target is None and deployment_config is None)
+                    )
+                )
+                if should_ensure_browser:
+                    try:
+                        ensure_browser(
+                            lambda state, detail: self.emit(
+                                "browser_runtime",
+                                {
+                                    "workflow_id": workflow_id,
+                                    "state": state,
+                                    "detail": detail,
+                                },
+                            )
+                        )
+                    except Exception:
+                        return self._pre_action_refusal(
+                            "Browser setup failed before Flow was invoked"
+                        )
+
+                self.emit(
+                    "replay_progress",
+                    {
+                        "workflow_id": workflow_id,
+                        "state": "running",
+                        "backend": backend,
+                    },
+                )
+                try:
+                    invocation_started = True
+                    if run:
+                        # A missing historical default stays fail-loud in Flow.
+                        config_path = staged_config or default_config
+                        result = self.services.flow_bridge.run(
+                            bundle,
+                            config_path,
+                            out_dir=run_dir,
+                        )
+                    else:
+                        result = self.services.flow_bridge.replay(
+                            bundle,
+                            out_dir=run_dir,
+                            config=staged_config,
+                        )
+                except Exception:
+                    # Once invocation begins, delivery/effect state is unknown.
+                    # Never echo exception text: it may contain config values.
+                    result = None
+        except Exception as exc:
+            from engine.private_flow_config import PrivateFlowConfigError
+
+            if invocation_started:
+                # Cleanup or post-spawn failures cannot prove that no action
+                # reached the target.
+                result = None
+            elif isinstance(exc, PrivateFlowConfigError):
+                return self._pre_action_refusal(str(exc))
+            else:
+                return self._pre_action_refusal(
+                    "Execution configuration could not be staged safely"
+                )
+
         from engine.flow_bridge import FlowBridge
 
-        if not result.ok and not FlowBridge.read_report(run_dir):
-            self.emit(
-                "replay_progress",
-                {
-                    "workflow_id": workflow_id,
-                    "state": "error",
-                    "backend": target.backend,
-                },
+        report_data = FlowBridge.read_report(run_dir)
+        if result is None:
+            outcome = "unknown"
+            error = (
+                "Flow invocation ended without a classifiable result. The "
+                "workflow may have delivered an action."
             )
-            return {
-                "ok": False,
-                "error": (
-                    "Flow refused or failed before producing a run report "
-                    f"(exit {result.returncode}). No workflow success was recorded."
-                ),
-            }
+        else:
+            from engine.private_flow_config import redact_flow_log
+
+            for line in (result.stdout or "").splitlines():
+                self.emit(
+                    "log_line",
+                    {"line": redact_flow_log(line, log_redactions)},
+                )
+            outcome = FlowBridge.classify_outcome(result.returncode, report_data)
+            error = None
+            if outcome == "unknown":
+                error = (
+                    "Flow produced no explicit success or halt outcome "
+                    f"(exit {result.returncode}). The workflow may have delivered "
+                    "an action."
+                )
+
         try:
             self.services.db.insert_run(run_id, str(run_dir), bundle_id=workflow_id)
+            self.services.db.update_run(run_id, status=outcome)
         except Exception:
             pass
-        report = self._run_report(run_dir, workflow_id, run_id)
+        report = self._run_report(
+            run_dir,
+            workflow_id,
+            run_id,
+            outcome=outcome,
+            error=error,
+        )
+        progress_state = {
+            "success": "done",
+            "halt": "halted",
+            "unknown": "unknown",
+        }[outcome]
         self.emit(
             "replay_progress",
             {
                 "workflow_id": workflow_id,
-                "state": "halted" if report.get("halt") else "done",
-                "backend": target.backend,
+                "state": progress_state,
+                "backend": backend,
             },
         )
         return report
 
-    def _execution_target(self, params: dict) -> tuple[Any, Path | None]:
-        """Validate one typed non-secret target and optional config path."""
+    @staticmethod
+    def _pre_action_refusal(error: str) -> dict:
+        """Return the only response that proves Flow was never invoked."""
+
+        return {
+            "ok": False,
+            "outcome": "refused",
+            "pre_action_refusal": True,
+            "error": error,
+        }
+
+    def _execution_target(self, params: dict) -> tuple[Any | None, Path | None]:
+        """Validate one typed PHI-capable target and optional config path."""
 
         from pydantic import ValidationError
 
         from engine.targets import ExecutionTarget
 
         raw_target = params.get("target")
-        if raw_target is None:
-            raw_target = {"backend": "web"}
-        if not isinstance(raw_target, dict):
-            raise ValueError("target must be an object")
-        try:
-            target = ExecutionTarget.model_validate(raw_target)
-        except ValidationError as exc:
-            # Pydantic's compact error text contains field names and values.
-            # Target values are intentionally non-secret, but keep the UI
-            # message minimal and avoid echoing endpoint/path values.
-            fields = sorted(
-                {
-                    ".".join(str(part) for part in error.get("loc", ()))
-                    for error in exc.errors()
-                    if error.get("loc")
-                }
-            )
-            detail = ", ".join(fields) or "target"
-            raise ValueError(f"Invalid execution target ({detail})") from None
+        target = None
+        if raw_target is not None:
+            if not isinstance(raw_target, dict):
+                raise ValueError("target must be an object")
+            try:
+                target = ExecutionTarget.model_validate(raw_target)
+            except ValidationError as exc:
+                # Pydantic errors can contain selector values. Return field
+                # names only; every target value is treated as PHI-capable.
+                fields = sorted(
+                    {
+                        ".".join(str(part) for part in error.get("loc", ()))
+                        for error in exc.errors()
+                        if error.get("loc")
+                    }
+                )
+                detail = ", ".join(fields) or "target"
+                raise ValueError(f"Invalid execution target ({detail})") from None
 
         raw_config = params.get("deployment_config")
         deployment_config: Path | None = None
@@ -549,32 +617,56 @@ class EngineDispatcher:
             deployment_config = Path(raw_config.strip()).expanduser()
             if not deployment_config.is_file():
                 raise ValueError("Selected deployment config file was not found")
-        try:
-            target.validate_required(deployment_config=deployment_config is not None)
-        except ValueError as exc:
-            raise ValueError(str(exc)) from None
+        if target is not None:
+            try:
+                target.validate_required(deployment_config=deployment_config is not None)
+            except ValueError as exc:
+                raise ValueError(str(exc)) from None
 
         return target, deployment_config
 
     def get_run_report(self, **params: Any) -> dict | None:
         """Return the latest ``RunReport`` for a workflow, or None if none."""
         workflow_id = params.get("workflow_id")
-        runs = [r for r in self.services.db.list_runs(limit=100)
-                if r.get("bundle_id") == workflow_id]
+        runs = [
+            r for r in self.services.db.list_runs(limit=100) if r.get("bundle_id") == workflow_id
+        ]
         if not runs:
             return None
         run = runs[0]
         run_dir = run.get("run_path")
         if not run_dir:
             return None
-        return self._run_report(Path(run_dir), workflow_id, run.get("run_id", ""))
+        stored_outcome = run.get("status")
+        outcome = stored_outcome if stored_outcome in {"success", "halt", "unknown"} else None
+        return self._run_report(
+            Path(run_dir),
+            workflow_id,
+            run.get("run_id", ""),
+            outcome=outcome,
+        )
 
-    def _run_report(self, run_dir: Path, workflow_id: str | None, run_id: str) -> dict:
+    def _run_report(
+        self,
+        run_dir: Path,
+        workflow_id: str | None,
+        run_id: str,
+        *,
+        outcome: str | None = None,
+        error: str | None = None,
+    ) -> dict:
         from engine.flow_bridge import FlowBridge
 
         report = FlowBridge.read_report(run_dir)
+        if outcome is None:
+            # Report-only fallback for older DB rows. A true report can be
+            # explicit success evidence; a structured halt remains a halt.
+            inferred_returncode = 0 if report.get("success") is True else 1
+            outcome = FlowBridge.classify_outcome(inferred_returncode, report)
         halt = FlowBridge.read_halt(run_dir)
-        halt_state = (halt or {}).get("state_id") if isinstance(halt, dict) else None
+        halt_state = (
+            (halt or {}).get("state_id") if outcome == "halt" and isinstance(halt, dict) else None
+        )
 
         # openadapt-flow writes per-step outcomes under ``results`` (each with
         # step_id / intent / ok / resolution / effect_verified / elapsed_ms). Map
@@ -588,7 +680,7 @@ class EngineDispatcher:
             steps = raw_steps if isinstance(raw_steps, list) else []
 
         halt_block = None
-        if isinstance(halt, dict) and halt:
+        if outcome == "halt" and isinstance(halt, dict) and halt:
             rung = None
             for r in results or []:
                 if r.get("step_id") == halt_state:
@@ -601,9 +693,7 @@ class EngineDispatcher:
             }
 
         total_steps = (
-            self._workflow_step_count(workflow_id)
-            or report.get("total_steps")
-            or len(steps)
+            self._workflow_step_count(workflow_id) or report.get("total_steps") or len(steps)
         )
         total_ms = report.get("total_ms")
         metrics = report.get("metrics") or {}
@@ -614,8 +704,10 @@ class EngineDispatcher:
         if cost is None:
             cost = report.get("est_model_cost_usd")
 
-        return {
-            "ok": True,
+        mapped = {
+            "ok": outcome == "success",
+            "outcome": outcome,
+            "pre_action_refusal": False,
             "run_id": report.get("run_id") or run_id,
             "workflow_id": workflow_id or report.get("workflow_id") or "",
             "workflow_name": report.get("workflow_name", ""),
@@ -624,6 +716,9 @@ class EngineDispatcher:
             "halt": halt_block,
             "metrics": {"duration_s": duration_s, "cost_usd": cost},
         }
+        if error:
+            mapped["error"] = error
+        return mapped
 
     @staticmethod
     def _step_index(step_id: Any) -> int:
@@ -682,15 +777,15 @@ class EngineDispatcher:
         bundle = self._bundle_dir(workflow_id)
         if bundle is None:
             return {"promoted": False, "message": f"Unknown workflow {workflow_id}"}
-        run = next((r for r in self.services.db.list_runs(limit=100)
-                    if r.get("bundle_id") == workflow_id), None)
+        run = next(
+            (r for r in self.services.db.list_runs(limit=100) if r.get("bundle_id") == workflow_id),
+            None,
+        )
         if run is None or not run.get("run_path"):
             return {"promoted": False, "message": "No halted run to teach against"}
         out_dir = self.config.data_dir / "bundles" / f"{workflow_id}_taught_{uuid.uuid4().hex[:6]}"
         try:
-            result = self.services.flow_bridge.teach(
-                Path(run["run_path"]), bundle, out_dir
-            )
+            result = self.services.flow_bridge.teach(Path(run["run_path"]), bundle, out_dir)
         except Exception as exc:
             return {"promoted": False, "message": str(exc)}
         message = "Fix promoted." if result.ok else (result.stderr or "Teach did not promote.")
@@ -991,8 +1086,11 @@ class EngineDispatcher:
         scrubber = Scrubber(level=ScrubLevel(level))
         scrubbed = scrubber.scrub_capture(Path(capture["capture_path"]))
         transition_status(
-            capture_id, ReviewStatus.CAPTURED, ReviewStatus.SCRUBBED,
-            db=self.services.db, audit=self.services.audit,
+            capture_id,
+            ReviewStatus.CAPTURED,
+            ReviewStatus.SCRUBBED,
+            db=self.services.db,
+            audit=self.services.audit,
         )
         self.services.db.update_capture(capture_id, scrubbed_path=str(scrubbed))
         return {"ok": True, "scrubbed_path": str(scrubbed)}
@@ -1013,8 +1111,11 @@ class EngineDispatcher:
             return {"ok": False, "error": "capture_id is required"}
         try:
             transition_status(
-                capture_id, getattr(ReviewStatus, frm), getattr(ReviewStatus, to),
-                db=self.services.db, audit=self.services.audit,
+                capture_id,
+                getattr(ReviewStatus, frm),
+                getattr(ReviewStatus, to),
+                db=self.services.db,
+                audit=self.services.audit,
             )
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
@@ -1033,9 +1134,7 @@ class EngineDispatcher:
         if self.services.runner is None:
             from engine.runner_loop import RunnerService
 
-            self.services.runner = RunnerService(
-                self.config, self.services, emit=self.emit
-            )
+            self.services.runner = RunnerService(self.config, self.services, emit=self.emit)
         return self.services.runner
 
     def runner_status(self, **params: Any) -> dict:

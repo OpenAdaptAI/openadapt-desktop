@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
+import yaml
 
 from engine.config import EngineConfig
 from engine.controller import RecordingState
@@ -64,7 +66,10 @@ def deps(tmp_path: Path):
     db.initialize()
     events: list[tuple[str, dict]] = []
     services = EngineServices(
-        config, db=db, storage=FakeStorage(), audit=FakeAudit(),
+        config,
+        db=db,
+        storage=FakeStorage(),
+        audit=FakeAudit(),
         controller=FakeController(),
     )
     disp = EngineDispatcher(config, services=services, emit=lambda e, d: events.append((e, d)))
@@ -89,14 +94,10 @@ class TestRecordingCommands:
         assert set(s) >= {"recording", "paused", "duration_secs", "capture_id"}
         assert s["recording"] is False
 
-    def test_mac_start_requests_input_monitoring_only_when_needed(
-        self, deps, monkeypatch
-    ) -> None:
+    def test_mac_start_requests_input_monitoring_only_when_needed(self, deps, monkeypatch) -> None:
         disp, _db, _events = deps
         monkeypatch.setattr("engine.dispatch.sys.platform", "darwin")
-        monkeypatch.setattr(
-            "engine.dispatch._mac_preflight_input_monitoring", lambda: False
-        )
+        monkeypatch.setattr("engine.dispatch._mac_preflight_input_monitoring", lambda: False)
         requests: list[bool] = []
         monkeypatch.setattr(
             "engine.dispatch._mac_request_input_monitoring",
@@ -113,12 +114,8 @@ class TestRecordingCommands:
     ) -> None:
         disp, _db, events = deps
         monkeypatch.setattr("engine.dispatch.sys.platform", "darwin")
-        monkeypatch.setattr(
-            "engine.dispatch._mac_preflight_input_monitoring", lambda: False
-        )
-        monkeypatch.setattr(
-            "engine.dispatch._mac_request_input_monitoring", lambda: False
-        )
+        monkeypatch.setattr("engine.dispatch._mac_preflight_input_monitoring", lambda: False)
+        monkeypatch.setattr("engine.dispatch._mac_request_input_monitoring", lambda: False)
 
         with pytest.raises(PermissionError, match="Input Monitoring permission"):
             disp.dispatch("start_recording", {})
@@ -139,9 +136,7 @@ class TestRecordingCommands:
     ) -> None:
         disp, _db, _events = deps
         monkeypatch.setattr("engine.dispatch.sys.platform", "darwin")
-        monkeypatch.setattr(
-            "engine.dispatch._mac_preflight_input_monitoring", lambda: True
-        )
+        monkeypatch.setattr("engine.dispatch._mac_preflight_input_monitoring", lambda: True)
         monkeypatch.setattr(
             "engine.dispatch._mac_request_input_monitoring",
             lambda: pytest.fail("permission request must not run"),
@@ -190,12 +185,12 @@ class TestLibraryCommands:
                 progress("checking", "Checking")
                 progress("ready", "Ready")
 
-            def replay(self, _bundle, out_dir, *, target, config):
+            def replay(self, _bundle, out_dir, *, config):
                 from engine.flow_bridge import FlowResult
 
-                assert target.backend == "web"
                 assert config is None
                 order.append("replay")
+                (out_dir / "report.json").write_text('{"success": true}')
                 return FlowResult(ok=True, returncode=0, out_dir=out_dir)
 
         disp.services._flow_bridge = Bridge()
@@ -231,12 +226,14 @@ class TestLibraryCommands:
         disp.services._flow_bridge = bridge
         result = disp.dispatch("replay_workflow", {"workflow_id": "bnd1"})
 
-        assert result == {"ok": False, "error": "browser setup failed"}
+        assert result == {
+            "ok": False,
+            "outcome": "refused",
+            "pre_action_refusal": True,
+            "error": "Browser setup failed before Flow was invoked",
+        }
         assert bridge.replay_called is False
-        assert any(
-            event == "replay_progress" and data["state"] == "error"
-            for event, data in events
-        )
+        assert not any(event == "replay_progress" for event, _data in events)
 
     def test_rdp_replay_skips_browser_and_dispatches_exact_target(
         self, deps, tmp_path: Path
@@ -246,16 +243,25 @@ class TestLibraryCommands:
         bundle.mkdir()
         db.insert_bundle("bnd1", str(bundle), capture_id="cap1")
         calls: list[tuple] = []
+        staged_configs: list[dict] = []
 
         class Bridge:
             def ensure_browser_runtime(self, _progress) -> None:
                 raise AssertionError("RDP must not provision Chromium")
 
-            def replay(self, target_bundle, out_dir, *, target, config):
+            def replay(self, target_bundle, out_dir, *, config):
                 from engine.flow_bridge import FlowResult
 
-                calls.append((target_bundle, out_dir, target, config))
-                return FlowResult(ok=True, returncode=0, out_dir=out_dir)
+                assert config is not None
+                calls.append((target_bundle, out_dir, config))
+                staged_configs.append(yaml.safe_load(config.read_text()))
+                (out_dir / "report.json").write_text('{"success": true}')
+                return FlowResult(
+                    ok=True,
+                    returncode=0,
+                    stdout="target 10.0.0.5 ready at Patient Search",
+                    out_dir=out_dir,
+                )
 
         disp.services._flow_bridge = Bridge()
         result = disp.dispatch(
@@ -272,13 +278,20 @@ class TestLibraryCommands:
 
         assert result["workflow_id"] == "bnd1"
         assert len(calls) == 1
-        assert calls[0][2].model_dump(exclude_none=True) == {
-            "backend": "rdp",
-            "linux_allow_physical_input": False,
-            "rdp_host": "10.0.0.5",
-            "rdp_readiness_text": "Patient Search",
-        }
-        assert calls[0][3] is None
+        assert staged_configs == [
+            {
+                "backend": {
+                    "kind": "rdp",
+                    "rdp_host": "10.0.0.5",
+                    "rdp_readiness_text": "Patient Search",
+                }
+            }
+        ]
+        assert "10.0.0.5" not in repr(calls)
+        assert "Patient Search" not in repr(calls)
+        assert not calls[0][2].exists()
+        log_lines = [data["line"] for event, data in events if event == "log_line"]
+        assert log_lines == ["target [REDACTED] ready at [REDACTED]"]
         assert not any(event == "browser_runtime" for event, _data in events)
 
     def test_citrix_governed_run_passes_target_and_selected_config(
@@ -291,12 +304,15 @@ class TestLibraryCommands:
         deployment = tmp_path / "deployment.yaml"
         deployment.write_text("backend:\n  kind: citrix\n")
         calls: list[tuple] = []
+        staged_configs: list[dict] = []
 
         class Bridge:
-            def run(self, target_bundle, config, out_dir, *, target):
+            def run(self, target_bundle, config, out_dir):
                 from engine.flow_bridge import FlowResult
 
-                calls.append((target_bundle, config, out_dir, target))
+                calls.append((target_bundle, config, out_dir))
+                staged_configs.append(yaml.safe_load(config.read_text()))
+                (out_dir / "report.json").write_text('{"success": true}')
                 return FlowResult(ok=True, returncode=0, out_dir=out_dir)
 
         disp.services._flow_bridge = Bridge()
@@ -315,27 +331,44 @@ class TestLibraryCommands:
 
         assert result["workflow_id"] == "bnd1"
         assert len(calls) == 1
-        assert calls[0][1] == deployment
-        assert calls[0][3].backend == "citrix"
-        assert calls[0][3].rdp_window_title == "Production EMR"
-        assert calls[0][3].rdp_host is None
+        assert calls[0][1] != deployment
+        assert staged_configs == [
+            {
+                "backend": {
+                    "kind": "citrix",
+                    "rdp_window_title": "Production EMR",
+                    "rdp_readiness_text": "Patient Search",
+                }
+            }
+        ]
+        assert "Production EMR" not in repr(calls)
+        assert "Patient Search" not in repr(calls)
+        assert not calls[0][1].exists()
 
-    def test_rdp_deployment_config_can_supply_connection_credentials(
+    def test_config_only_rdp_preserves_backend_when_target_is_omitted(
         self, deps, tmp_path: Path
     ) -> None:
-        disp, db, _events = deps
+        disp, db, events = deps
         bundle = tmp_path / "bundle"
         bundle.mkdir()
         db.insert_bundle("bnd1", str(bundle), capture_id="cap1")
         deployment = tmp_path / "deployment.yaml"
-        deployment.write_text("backend:\n  kind: rdp\n")
+        deployment.write_text(
+            "backend:\n  kind: rdp\n  rdp_host: 10.0.0.5\n  rdp_username: operator\n"
+        )
         calls: list[tuple] = []
+        staged_configs: list[dict] = []
 
         class Bridge:
-            def replay(self, target_bundle, out_dir, *, target, config):
+            def ensure_browser_runtime(self, _progress) -> None:
+                raise AssertionError("config-only RDP must not provision Chromium")
+
+            def replay(self, target_bundle, out_dir, *, config):
                 from engine.flow_bridge import FlowResult
 
-                calls.append((target_bundle, out_dir, target, config))
+                calls.append((target_bundle, out_dir, config))
+                staged_configs.append(yaml.safe_load(config.read_text()))
+                (out_dir / "report.json").write_text('{"success": true}')
                 return FlowResult(ok=True, returncode=0, out_dir=out_dir)
 
         disp.services._flow_bridge = Bridge()
@@ -344,18 +377,16 @@ class TestLibraryCommands:
             {
                 "workflow_id": "bnd1",
                 "deployment_config": str(deployment),
-                "target": {"backend": "rdp"},
             },
         )
 
         assert result["workflow_id"] == "bnd1"
-        assert calls[0][2].backend == "rdp"
-        assert calls[0][2].rdp_host is None
-        assert calls[0][3] == deployment
+        assert staged_configs[0]["backend"]["kind"] == "rdp"
+        assert staged_configs[0]["backend"]["rdp_host"] == "10.0.0.5"
+        assert "--backend" not in repr(calls)
+        assert not any(event == "browser_runtime" for event, _data in events)
 
-    def test_cross_backend_fields_are_refused_before_any_action(
-        self, deps, tmp_path: Path
-    ) -> None:
+    def test_cross_backend_fields_are_refused_before_any_action(self, deps, tmp_path: Path) -> None:
         disp, db, events = deps
         bundle = tmp_path / "bundle"
         bundle.mkdir()
@@ -377,7 +408,12 @@ class TestLibraryCommands:
             },
         )
 
-        assert result == {"ok": False, "error": "Invalid execution target (target)"}
+        assert result == {
+            "ok": False,
+            "outcome": "refused",
+            "pre_action_refusal": True,
+            "error": "Invalid execution target (target)",
+        }
         assert not any(event == "replay_progress" for event, _data in events)
 
     def test_secret_target_fields_are_rejected_without_echoing_values(
@@ -413,7 +449,7 @@ class TestLibraryCommands:
         db.insert_bundle("bnd1", str(bundle), capture_id="cap1")
 
         class Bridge:
-            def replay(self, _bundle, out_dir, *, target, config):
+            def replay(self, _bundle, out_dir, *, config):
                 from engine.flow_bridge import FlowResult
 
                 return FlowResult(
@@ -439,22 +475,100 @@ class TestLibraryCommands:
         assert "exit 2" in result["error"]
         assert "super-secret" not in result["error"]
         assert any(
-            event == "replay_progress" and data["state"] == "error"
-            for event, data in events
+            event == "replay_progress" and data["state"] == "unknown" for event, data in events
         )
 
-    def test_nonzero_governed_halt_report_remains_teachable(
-        self, deps, tmp_path: Path
+    @pytest.mark.parametrize(
+        ("returncode", "report"),
+        [
+            (0, {"results": []}),
+            (0, {"success": False}),
+            (1, {"success": True}),
+            (
+                0,
+                {
+                    "success": True,
+                    "halt": {"outcome": "halt", "reason": "contradictory"},
+                },
+            ),
+        ],
+    )
+    def test_ambiguous_reports_never_emit_done(
+        self, deps, tmp_path: Path, returncode: int, report: dict
     ) -> None:
-        import json
+        disp, db, events = deps
+        bundle = tmp_path / "bundle"
+        bundle.mkdir()
+        db.insert_bundle("bnd1", str(bundle), capture_id="cap1")
 
+        class Bridge:
+            def replay(self, _bundle, out_dir, *, config):
+                from engine.flow_bridge import FlowResult
+
+                (out_dir / "report.json").write_text(json.dumps(report))
+                return FlowResult(
+                    ok=returncode == 0,
+                    returncode=returncode,
+                    out_dir=out_dir,
+                )
+
+        disp.services._flow_bridge = Bridge()
+        result = disp.dispatch(
+            "replay_workflow",
+            {
+                "workflow_id": "bnd1",
+                "target": {
+                    "backend": "citrix",
+                    "rdp_readiness_text": "Patient Search",
+                },
+            },
+        )
+
+        assert result["ok"] is False
+        assert result["outcome"] == "unknown"
+        states = [data["state"] for event, data in events if event == "replay_progress"]
+        assert states == ["running", "unknown"]
+        assert "done" not in states
+
+    def test_invocation_exception_reports_unknown_effect_state(self, deps, tmp_path: Path) -> None:
+        disp, db, events = deps
+        bundle = tmp_path / "bundle"
+        bundle.mkdir()
+        db.insert_bundle("bnd1", str(bundle), capture_id="cap1")
+
+        class Bridge:
+            def replay(self, _bundle, out_dir, *, config):
+                raise RuntimeError("Patient Jane Doe secret endpoint")
+
+        disp.services._flow_bridge = Bridge()
+        result = disp.dispatch(
+            "replay_workflow",
+            {
+                "workflow_id": "bnd1",
+                "target": {
+                    "backend": "citrix",
+                    "rdp_readiness_text": "Patient Search",
+                },
+            },
+        )
+
+        assert result["ok"] is False
+        assert result["outcome"] == "unknown"
+        assert result["pre_action_refusal"] is False
+        assert "may have delivered an action" in result["error"]
+        assert "Jane Doe" not in result["error"]
+        assert any(
+            event == "replay_progress" and data["state"] == "unknown" for event, data in events
+        )
+
+    def test_nonzero_governed_halt_report_remains_teachable(self, deps, tmp_path: Path) -> None:
         disp, db, _events = deps
         bundle = tmp_path / "bundle"
         bundle.mkdir()
         db.insert_bundle("bnd1", str(bundle), capture_id="cap1")
 
         class Bridge:
-            def replay(self, _bundle, out_dir, *, target, config):
+            def replay(self, _bundle, out_dir, *, config):
                 from engine.flow_bridge import FlowResult
 
                 (out_dir / "report.json").write_text(
@@ -490,7 +604,8 @@ class TestLibraryCommands:
             },
         )
 
-        assert result["ok"] is True
+        assert result["ok"] is False
+        assert result["outcome"] == "halt"
         assert result["halt"]["reason"] == "ambiguous target"
         assert result["steps"][0]["state"] == "halted"
         assert db.list_runs(limit=10)[0]["bundle_id"] == "bnd1"
@@ -519,8 +634,12 @@ class TestSyncCommands:
         db.insert_bundle("bnd1", str(disp.config.data_dir), capture_id="cap1")
         monkeypatch.setattr(
             "engine.hosted.push",
-            lambda *a, **k: {"success": True, "workflow_id": "wf_1",
-                             "dashboard_url": "u", "error": ""},
+            lambda *a, **k: {
+                "success": True,
+                "workflow_id": "wf_1",
+                "dashboard_url": "u",
+                "error": "",
+            },
         )
         r = disp.dispatch("push_workflow", {"workflow_id": "bnd1"})
         assert r["ok"] is True
@@ -531,8 +650,14 @@ class TestSyncCommands:
 class TestAuthCommands:
     def test_login_paste(self, deps, monkeypatch, fake_keyring) -> None:
         disp, _db, _e = deps
-        cred = {"kind": "ingest_token", "token": "t", "refresh_token": None,
-                "org_id": "org_1", "host": disp.config.hosted_host, "expires_at": None}
+        cred = {
+            "kind": "ingest_token",
+            "token": "t",
+            "refresh_token": None,
+            "org_id": "org_1",
+            "host": disp.config.hosted_host,
+            "expires_at": None,
+        }
         monkeypatch.setattr(
             "engine.auth.paste.PasteTokenProvider.login", lambda self, token=None: cred
         )
@@ -548,11 +673,7 @@ class TestAuthCommands:
         self, deps, monkeypatch, tmp_path
     ) -> None:
         disp, _db, events = deps
-        uri = (
-            "openadapt://connect?pairing=oap_"
-            + "A" * 43
-            + "&host=https%3A%2F%2Fapp.openadapt.ai"
-        )
+        uri = "openadapt://connect?pairing=oap_" + "A" * 43 + "&host=https%3A%2F%2Fapp.openadapt.ai"
         received: list[str] = []
         monkeypatch.setenv("OPENADAPT_CONFIG_TOML", str(tmp_path / "config.toml"))
 
@@ -568,10 +689,13 @@ class TestAuthCommands:
         result = disp.dispatch("connect_uri", {"uri": uri})
         assert result["paired"] is True
         assert received == [uri]
-        assert ("pairing_state", {
-            "status": "connected",
-            "host": "https://app.openadapt.ai",
-        }) in events
+        assert (
+            "pairing_state",
+            {
+                "status": "connected",
+                "host": "https://app.openadapt.ai",
+            },
+        ) in events
 
     def test_connect_uri_requires_a_single_string_parameter(self, deps) -> None:
         disp, _db, _events = deps
@@ -614,8 +738,6 @@ class TestRunReportMapping:
     """_run_report must map openadapt-flow's real report.json onto RunReport."""
 
     def _write_report(self, run_dir: Path, report: dict) -> None:
-        import json
-
         run_dir.mkdir(parents=True, exist_ok=True)
         (run_dir / "report.json").write_text(json.dumps(report))
 
@@ -719,12 +841,8 @@ class TestMisc:
         disp, _db, _e = deps
         monkeypatch.setattr("engine.dispatch.sys.platform", "darwin")
         monkeypatch.setattr("engine.dispatch._mac_preflight_screen", lambda: True)
-        monkeypatch.setattr(
-            "engine.dispatch._mac_preflight_accessibility", lambda: False
-        )
-        monkeypatch.setattr(
-            "engine.dispatch._mac_preflight_input_monitoring", lambda: False
-        )
+        monkeypatch.setattr("engine.dispatch._mac_preflight_accessibility", lambda: False)
+        monkeypatch.setattr("engine.dispatch._mac_preflight_input_monitoring", lambda: False)
         monkeypatch.setattr(
             "engine.dispatch._mac_request_input_monitoring",
             lambda: pytest.fail("passive check must never request permission"),
@@ -758,9 +876,7 @@ class TestMisc:
         disp, _db, _e = deps
         monkeypatch.setattr("engine.dispatch.sys.platform", "darwin")
         monkeypatch.setattr("engine.dispatch._mac_preflight_screen", lambda: True)
-        monkeypatch.setattr(
-            "engine.dispatch._mac_preflight_accessibility", lambda: True
-        )
+        monkeypatch.setattr("engine.dispatch._mac_preflight_accessibility", lambda: True)
         checks = iter((False, True))
         monkeypatch.setattr(
             "engine.dispatch._mac_preflight_input_monitoring",
@@ -779,21 +895,13 @@ class TestMisc:
         }
         assert requests == [True]
 
-    def test_mac_input_monitoring_request_does_not_assume_success(
-        self, deps, monkeypatch
-    ) -> None:
+    def test_mac_input_monitoring_request_does_not_assume_success(self, deps, monkeypatch) -> None:
         disp, _db, _e = deps
         monkeypatch.setattr("engine.dispatch.sys.platform", "darwin")
         monkeypatch.setattr("engine.dispatch._mac_preflight_screen", lambda: True)
-        monkeypatch.setattr(
-            "engine.dispatch._mac_preflight_accessibility", lambda: True
-        )
-        monkeypatch.setattr(
-            "engine.dispatch._mac_preflight_input_monitoring", lambda: False
-        )
-        monkeypatch.setattr(
-            "engine.dispatch._mac_request_input_monitoring", lambda: True
-        )
+        monkeypatch.setattr("engine.dispatch._mac_preflight_accessibility", lambda: True)
+        monkeypatch.setattr("engine.dispatch._mac_preflight_input_monitoring", lambda: False)
+        monkeypatch.setattr("engine.dispatch._mac_request_input_monitoring", lambda: True)
 
         assert disp.dispatch("request_input_monitoring", {}) == {
             "screen_recording": True,
@@ -807,12 +915,8 @@ class TestMisc:
         disp, _db, _e = deps
         monkeypatch.setattr("engine.dispatch.sys.platform", "darwin")
         monkeypatch.setattr("engine.dispatch._mac_preflight_screen", lambda: True)
-        monkeypatch.setattr(
-            "engine.dispatch._mac_preflight_accessibility", lambda: True
-        )
-        monkeypatch.setattr(
-            "engine.dispatch._mac_preflight_input_monitoring", lambda: True
-        )
+        monkeypatch.setattr("engine.dispatch._mac_preflight_accessibility", lambda: True)
+        monkeypatch.setattr("engine.dispatch._mac_preflight_input_monitoring", lambda: True)
         monkeypatch.setattr(
             "engine.dispatch._mac_request_input_monitoring",
             lambda: pytest.fail("granted access must not prompt again"),
@@ -838,14 +942,35 @@ class TestMisc:
         disp, _db, _e = deps
         # The exact CMD catalog from the app's src/lib/engine.ts.
         expected = {
-            "start_recording", "stop_recording", "pause_recording",
-            "resume_recording", "get_status", "get_workflows", "get_captures",
-            "get_storage_usage", "compile_recording", "replay_workflow",
-            "run_workflow", "get_run_report", "teach_fix", "push_workflow",
-            "get_sync_state", "pause_sync", "resume_sync", "get_needs_attention",
-            "login_browser", "login_paste", "logout", "get_auth_status",
-            "get_config", "set_config", "check_permissions",
-            "request_input_monitoring", "scrub_capture",
-            "approve_review", "dismiss_review", "get_pending_reviews",
+            "start_recording",
+            "stop_recording",
+            "pause_recording",
+            "resume_recording",
+            "get_status",
+            "get_workflows",
+            "get_captures",
+            "get_storage_usage",
+            "compile_recording",
+            "replay_workflow",
+            "run_workflow",
+            "get_run_report",
+            "teach_fix",
+            "push_workflow",
+            "get_sync_state",
+            "pause_sync",
+            "resume_sync",
+            "get_needs_attention",
+            "login_browser",
+            "login_paste",
+            "logout",
+            "get_auth_status",
+            "get_config",
+            "set_config",
+            "check_permissions",
+            "request_input_monitoring",
+            "scrub_capture",
+            "approve_review",
+            "dismiss_review",
+            "get_pending_reviews",
         }
         assert expected.issubset(set(disp.commands))

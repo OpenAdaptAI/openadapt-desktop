@@ -68,25 +68,17 @@ class TestFlowBridgeInvocation:
         assert "--run-dir" in command
         assert "--out" not in command
 
-    def test_citrix_replay_forwards_only_workspace_target_flags(
+    def test_config_only_replay_never_injects_web_backend(
         self, tmp_path: Path, monkeypatch
     ) -> None:
-        monkeypatch.setattr(
-            "engine.flow_bridge.shutil.which", lambda _: "/usr/bin/openadapt-flow"
-        )
+        monkeypatch.setattr("engine.flow_bridge.shutil.which", lambda _: "/usr/bin/openadapt-flow")
         calls: list = []
         bridge = FlowBridge(runner=_runner(calls))
-        target = ExecutionTarget(
-            backend="citrix",
-            rdp_window="Citrix Viewer",
-            rdp_window_title="Production EMR",
-            rdp_readiness_text="Patient Search",
-        )
+        deployment = tmp_path / "deployment.yaml"
         bridge.replay(
             tmp_path / "bundle",
             out_dir=tmp_path / "run",
-            config=tmp_path / "deployment.yaml",
-            target=target,
+            config=deployment,
         )
 
         command, _ = calls[0]
@@ -97,36 +89,21 @@ class TestFlowBridgeInvocation:
             "--run-dir",
             str(tmp_path / "run"),
             "--config",
-            str(tmp_path / "deployment.yaml"),
-            "--backend",
-            "citrix",
-            "--rdp-window",
-            "Citrix Viewer",
-            "--rdp-window-title",
-            "Production EMR",
-            "--rdp-readiness-text",
-            "Patient Search",
+            str(deployment),
         ]
-        assert "--rdp-host" not in command
+        assert "--backend" not in command
 
-    def test_rdp_run_forwards_network_target_and_keeps_credentials_out_of_argv(
+    def test_run_uses_only_private_config_path_for_target_details(
         self, tmp_path: Path, monkeypatch
     ) -> None:
-        monkeypatch.setattr(
-            "engine.flow_bridge.shutil.which", lambda _: "/usr/bin/openadapt-flow"
-        )
+        monkeypatch.setattr("engine.flow_bridge.shutil.which", lambda _: "/usr/bin/openadapt-flow")
         calls: list = []
         bridge = FlowBridge(runner=_runner(calls))
-        target = ExecutionTarget(
-            backend="rdp",
-            rdp_host="10.0.0.5",
-            rdp_readiness_text="Patient Search",
-        )
+        deployment = tmp_path / ".deployment-private.yaml"
         bridge.run(
             tmp_path / "bundle",
-            tmp_path / "deployment.yaml",
+            deployment,
             out_dir=tmp_path / "run",
-            target=target,
         )
 
         command, _ = calls[0]
@@ -135,26 +112,18 @@ class TestFlowBridgeInvocation:
             "run",
             str(tmp_path / "bundle"),
             "--config",
-            str(tmp_path / "deployment.yaml"),
+            str(deployment),
             "--run-dir",
             str(tmp_path / "run"),
-            "--backend",
-            "rdp",
-            "--rdp-host",
-            "10.0.0.5",
-            "--rdp-readiness-text",
-            "Patient Search",
         ]
-        assert not any("password" in value.lower() for value in command)
+        assert "--backend" not in command
 
     @pytest.mark.parametrize(
         ("target", "expected"),
         [
             (
-                ExecutionTarget(
-                    backend="windows", agent_url="http://localhost:5001"
-                ),
-                ["--backend", "windows", "--agent-url", "http://localhost:5001"],
+                ExecutionTarget(backend="windows", agent_url="http://localhost:5001"),
+                {"kind": "windows", "agent_url": "http://localhost:5001"},
             ),
             (
                 ExecutionTarget(
@@ -162,14 +131,11 @@ class TestFlowBridgeInvocation:
                     macos_app="TextEdit",
                     macos_window_title="Notes",
                 ),
-                [
-                    "--backend",
-                    "macos",
-                    "--macos-app",
-                    "TextEdit",
-                    "--macos-window-title",
-                    "Notes",
-                ],
+                {
+                    "kind": "macos",
+                    "macos_app": "TextEdit",
+                    "macos_window_title": "Notes",
+                },
             ),
             (
                 ExecutionTarget(
@@ -178,22 +144,19 @@ class TestFlowBridgeInvocation:
                     linux_window_title="Notes",
                     linux_allow_physical_input=True,
                 ),
-                [
-                    "--backend",
-                    "linux",
-                    "--linux-app",
-                    "gedit",
-                    "--linux-window-title",
-                    "Notes",
-                    "--linux-allow-physical-input",
-                ],
+                {
+                    "kind": "linux",
+                    "linux_app": "gedit",
+                    "linux_window_title": "Notes",
+                    "linux_allow_physical_input": True,
+                },
             ),
         ],
     )
-    def test_native_targets_use_flow_public_flags(
-        self, target: ExecutionTarget, expected: list[str]
+    def test_native_targets_render_flow_deployment_overrides(
+        self, target: ExecutionTarget, expected: dict[str, object]
     ) -> None:
-        assert target.flow_args() == expected
+        assert target.deployment_overrides() == expected
 
     def test_secret_flag_values_are_redacted_from_debug_command(self) -> None:
         rendered = _safe_command_for_log(
@@ -201,6 +164,20 @@ class TestFlowBridgeInvocation:
         )
         assert "oar_secret" not in rendered
         assert rendered == "openadapt-flow push --token [REDACTED] --kind bundle"
+
+    def test_phi_capable_selector_values_are_redacted_from_debug_command(self) -> None:
+        rendered = _safe_command_for_log(
+            [
+                "openadapt-flow",
+                "replay",
+                "--rdp-window-title",
+                "Patient Jane Doe",
+                "--rdp-readiness-text",
+                "MRN 12345",
+            ]
+        )
+        assert "Jane Doe" not in rendered
+        assert "12345" not in rendered
 
     def test_nonzero_returncode(self, tmp_path: Path, monkeypatch) -> None:
         monkeypatch.setattr("engine.flow_bridge.shutil.which", lambda _: "/usr/bin/openadapt-flow")
@@ -275,6 +252,28 @@ class TestReportParsing:
     def test_read_halt_none_when_ok(self, tmp_path: Path) -> None:
         (tmp_path / "report.json").write_text(json.dumps({"status": "ok"}))
         assert FlowBridge.read_halt(tmp_path) is None
+
+    @pytest.mark.parametrize(
+        ("returncode", "report", "expected"),
+        [
+            (0, {"success": True}, "success"),
+            (0, {"success": True, "terminal_outcome": "success"}, "success"),
+            (1, {"success": False, "halt": {"outcome": "halt"}}, "halt"),
+            (1, {"terminal_outcome": "halt"}, "halt"),
+            (1, {"halt": {"outcome": "escalate"}}, "halt"),
+            (1, {"success": True}, "unknown"),
+            (0, {"success": False}, "unknown"),
+            (0, {}, "unknown"),
+            (2, {"results": []}, "unknown"),
+            (0, {"success": True, "halt": {"outcome": "halt"}}, "unknown"),
+            (0, {"success": "yes"}, "unknown"),
+            (1, {"halt": "not-structured"}, "unknown"),
+        ],
+    )
+    def test_classifies_only_explicit_consistent_flow_outcomes(
+        self, returncode: int, report: dict, expected: str
+    ) -> None:
+        assert FlowBridge.classify_outcome(returncode, report) == expected
 
 
 class TestBrowserRuntime:

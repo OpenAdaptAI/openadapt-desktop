@@ -1,9 +1,10 @@
-"""Typed execution-target contract shared by Desktop dispatch and FlowBridge.
+"""Typed execution-target contract shared by Desktop and Flow deployment config.
 
-``openadapt-flow`` owns backend construction.  Desktop only collects the small
-set of non-secret CLI overrides that Flow exposes, then passes an optional
-deployment config path for operator-managed settings (credentials, policy,
-effect verification, and other advanced wiring).
+``openadapt-flow`` owns backend construction.  Desktop collects the small set
+of direct target overrides that Flow exposes, merges them over an optional
+operator deployment config, and stages the result in a private mode-0600 file.
+Window owners, titles, readiness selectors, and endpoints are PHI-capable and
+must never be forwarded on the process command line or written to logs.
 
 The model is deliberately closed and backend-specific: stale fields from a
 previous UI selection are refused rather than being silently forwarded to the
@@ -57,7 +58,7 @@ _FIELDS_BY_BACKEND: dict[str, set[str]] = {
 
 
 class ExecutionTarget(BaseModel):
-    """Non-secret Flow backend selection received over Desktop's local IPC."""
+    """PHI-capable Flow backend selection received over Desktop's local IPC."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -104,8 +105,7 @@ class ExecutionTarget(BaseModel):
         irrelevant = sorted(supplied - relevant)
         if irrelevant:
             raise ValueError(
-                f"target fields do not apply to backend {self.backend!r}: "
-                + ", ".join(irrelevant)
+                f"target fields do not apply to backend {self.backend!r}: " + ", ".join(irrelevant)
             )
         if self.backend == "rdp" and self.rdp_host and self.rdp_window:
             raise ValueError(
@@ -143,35 +143,35 @@ class ExecutionTarget(BaseModel):
                 + " (or select a deployment config that provides it)"
             )
 
-    def flow_args(self) -> list[str]:
-        """Render the exact public backend flags supported by Flow 1.20+."""
+    def deployment_overrides(self) -> dict[str, object]:
+        """Render Flow 1.20's backend config keys without exposing argv values."""
 
-        args = ["--backend", self.backend]
+        overrides: dict[str, object] = {"kind": self.backend}
         values: tuple[tuple[str, str | None], ...]
         if self.backend == "web":
-            values = (("--url", self.url),)
+            values = (("url", self.url),)
         elif self.backend == "windows":
-            values = (("--agent-url", self.agent_url),)
+            values = (("agent_url", self.agent_url),)
         elif self.backend == "macos":
             values = (
-                ("--macos-app", self.macos_app),
-                ("--macos-window-title", self.macos_window_title),
+                ("macos_app", self.macos_app),
+                ("macos_window_title", self.macos_window_title),
             )
         elif self.backend == "linux":
             values = (
-                ("--linux-app", self.linux_app),
-                ("--linux-window-title", self.linux_window_title),
+                ("linux_app", self.linux_app),
+                ("linux_window_title", self.linux_window_title),
             )
         else:
             values = (
-                ("--rdp-host", self.rdp_host),
-                ("--rdp-window", self.rdp_window),
-                ("--rdp-window-title", self.rdp_window_title),
-                ("--rdp-readiness-text", self.rdp_readiness_text),
+                ("rdp_host", self.rdp_host),
+                ("rdp_window", self.rdp_window),
+                ("rdp_window_title", self.rdp_window_title),
+                ("rdp_readiness_text", self.rdp_readiness_text),
             )
-        for flag, value in values:
+        for key, value in values:
             if value:
-                args.extend((flag, value))
+                overrides[key] = value
         if self.backend == "linux" and self.linux_allow_physical_input:
-            args.append("--linux-allow-physical-input")
-        return args
+            overrides["linux_allow_physical_input"] = True
+        return overrides

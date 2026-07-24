@@ -382,6 +382,22 @@ td.id {
   color: var(--text-faint);
   text-transform: uppercase;
 }
+.target-fieldset {
+  border: 0;
+  margin-left: 0;
+  margin-right: 0;
+  min-width: 0;
+  padding: 0;
+}
+.target-fieldset legend {
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  letter-spacing: 0.04em;
+  margin-bottom: var(--space-2);
+  padding: 0;
+  text-transform: uppercase;
+}
 .input,
 textarea.input,
 select.input {

@@ -24,15 +24,13 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import Callable, Literal
 
 from loguru import logger
 
-if TYPE_CHECKING:
-    from engine.targets import ExecutionTarget
-
 FLOW_BIN = "openadapt-flow"
 EMBEDDED_FLOW_MODE = "__openadapt_flow__"
+FlowOutcome = Literal["success", "halt", "unknown"]
 
 
 class FlowNotAvailableError(RuntimeError):
@@ -102,13 +100,23 @@ def _subprocess_env() -> dict[str, str]:
 
 
 def _safe_command_for_log(cmd: list[str]) -> str:
-    """Render a command without ever logging secret-bearing flag values."""
+    """Render a command without logging secret- or selector-bearing values."""
 
     redacted_after = {
         "--token",
         "--password",
         "--rdp-password",
         "--agent-token",
+        "--url",
+        "--agent-url",
+        "--macos-app",
+        "--macos-window-title",
+        "--linux-app",
+        "--linux-window-title",
+        "--rdp-host",
+        "--rdp-window",
+        "--rdp-window-title",
+        "--rdp-readiness-text",
     }
     safe: list[str] = []
     redact_next = False
@@ -261,7 +269,6 @@ class FlowBridge:
         url: str | None = None,
         timeout: float | None = None,
         *,
-        target: "ExecutionTarget | None" = None,
         config: Path | None = None,
     ) -> FlowResult:
         """Replay a bundle; returns the run directory in ``out_dir`` if given."""
@@ -270,11 +277,7 @@ class FlowBridge:
             args += ["--run-dir", str(out_dir)]
         if config:
             args += ["--config", str(config)]
-        if target is not None:
-            if url:
-                raise ValueError("url and target cannot both be supplied")
-            args += target.flow_args()
-        elif url:
+        if url:
             args += ["--url", url]
         return self._run(args, out_dir=out_dir, timeout=timeout)
 
@@ -285,8 +288,6 @@ class FlowBridge:
         out_dir: Path | None = None,
         timeout: float | None = None,
         authorization_file: Path | None = None,
-        *,
-        target: "ExecutionTarget | None" = None,
     ) -> FlowResult:
         """Run a bundle under a deployment config.
 
@@ -300,8 +301,6 @@ class FlowBridge:
             args += ["--run-dir", str(out_dir)]
         if authorization_file:
             args += ["--authorization-file", str(authorization_file)]
-        if target is not None:
-            args += target.flow_args()
         return self._run(args, out_dir=out_dir, timeout=timeout)
 
     def run_supports_authorization(self) -> bool:
@@ -341,8 +340,14 @@ class FlowBridge:
             args += ["--token", token]
         return self._run(args, timeout=timeout)
 
-    def teach(self, run_dir: Path, bundle_dir: Path, out_dir: Path, fix: Path | None = None,
-              timeout: float | None = None) -> FlowResult:
+    def teach(
+        self,
+        run_dir: Path,
+        bundle_dir: Path,
+        out_dir: Path,
+        fix: Path | None = None,
+        timeout: float | None = None,
+    ) -> FlowResult:
         """Teach a fix for a halted run, producing a promoted bundle in ``out_dir``."""
         args = ["teach", str(run_dir), "--bundle", str(bundle_dir), "--out", str(out_dir)]
         if fix:
@@ -362,6 +367,33 @@ class FlowBridge:
         except (json.JSONDecodeError, OSError):
             return {}
 
+    @staticmethod
+    def classify_outcome(returncode: int, report: dict) -> FlowOutcome:
+        """Classify only explicit Flow 1.20.1 success or halt evidence.
+
+        Flow's connector defines success as exit 0 plus a true ``success``
+        field, and a halt from ``terminal_outcome == "halt"`` or a structured
+        ``halt`` record.  Desktop additionally rejects contradictory reports
+        (for example ``success: true`` together with a halt) as unknown.
+        """
+
+        halt = report.get("halt")
+        explicit_halt = report.get("terminal_outcome") == "halt" or (
+            isinstance(halt, dict) and bool(halt)
+        )
+        terminal = report.get("terminal_outcome")
+        explicit_success = (
+            returncode == 0
+            and report.get("success") is True
+            and terminal in (None, "success")
+            and not explicit_halt
+        )
+        if explicit_success:
+            return "success"
+        if report.get("success") is not True and explicit_halt:
+            return "halt"
+        return "unknown"
+
     @classmethod
     def read_halt(cls, run_dir: Path) -> dict | None:
         """Return the ``halt`` block from a run's ``report.json``, or None.
@@ -373,6 +405,8 @@ class FlowBridge:
         halt = report.get("halt")
         if isinstance(halt, dict) and halt:
             return halt
+        if report.get("terminal_outcome") == "halt":
+            return {"outcome": "halt"}
         if report.get("status") == "halt":
             return report
         return None

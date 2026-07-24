@@ -11,8 +11,9 @@ export type TargetBackend =
   | "citrix";
 
 /**
- * Non-secret execution target passed to Flow. Backend credentials and policy
- * stay in the operator-owned deployment config / referenced environment.
+ * PHI-capable execution target staged in a private Flow deployment config.
+ * Backend credentials and policy stay in the operator-owned deployment config
+ * or its referenced environment.
  */
 export interface ExecutionTarget {
   backend: TargetBackend;
@@ -70,7 +71,9 @@ export interface RunStep {
 }
 
 export interface RunReport {
-  ok?: boolean;
+  ok: boolean;
+  outcome: "success" | "halt" | "unknown";
+  pre_action_refusal: false;
   error?: string;
   run_id: string;
   workflow_id: string;
@@ -86,6 +89,15 @@ export interface RunReport {
   metrics?: { duration_s?: number; cost_usd?: number } | null;
 }
 
+export interface ExecutionRefusal {
+  ok: false;
+  outcome: "refused";
+  pre_action_refusal: true;
+  error: string;
+}
+
+export type ExecutionResponse = RunReport | ExecutionRefusal;
+
 export interface BrowserRuntimeStatus {
   workflow_id: string;
   state: "checking" | "installing" | "ready" | "error";
@@ -94,8 +106,8 @@ export interface BrowserRuntimeStatus {
 
 export interface ReplayProgress {
   workflow_id: string;
-  state: "running" | "halted" | "done" | "error";
-  backend: TargetBackend;
+  state: "running" | "halted" | "done" | "unknown" | "error";
+  backend: TargetBackend | "configured";
 }
 
 export interface SyncState {

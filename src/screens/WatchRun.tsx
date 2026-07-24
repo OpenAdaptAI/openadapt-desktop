@@ -1,9 +1,10 @@
 // Watch-it-run — trigger a replay and watch the compile/replay rail + live log.
 // Consumes replay_progress / log_line events; falls back to get_run_report.
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { CMD, engineInvoke, engineTry, onEngineEvent, EVT } from "../lib/engine";
 import type {
   BrowserRuntimeStatus,
+  ExecutionResponse,
   ExecutionTarget,
   ReplayProgress,
   RunReport,
@@ -60,6 +61,7 @@ const TARGETS: Record<
 
 type ExecuteMode = "replay" | "run";
 type RdpMode = "network" | "window";
+type RunIssue = { message: string; preActionRefusal: boolean };
 
 export function WatchRun({
   workflowId,
@@ -71,11 +73,12 @@ export function WatchRun({
   const [report, setReport] = useState<RunReport | null>(null);
   const [running, setRunning] = useState(false);
   const [runtime, setRuntime] = useState<BrowserRuntimeStatus | null>(null);
-  const [runError, setRunError] = useState<string | null>(null);
+  const [runIssue, setRunIssue] = useState<RunIssue | null>(null);
   const [target, setTarget] = useState<ExecutionTarget>({ backend: "web" });
   const [rdpMode, setRdpMode] = useState<RdpMode>("network");
   const [deploymentConfig, setDeploymentConfig] = useState("");
   const stepsRef = useRef<RunStep[]>([]);
+  const fieldPrefix = useId();
 
   async function load() {
     const r = await engineTry<RunReport | null>(
@@ -137,11 +140,11 @@ export function WatchRun({
 
   async function execute(mode: ExecuteMode) {
     setRunning(true);
-    setRunError(null);
+    setRunIssue(null);
     stepsRef.current = [];
     setReport((r) => (r ? { ...r, steps: [] } : r));
     try {
-      const r = await engineInvoke<RunReport>(
+      const r = await engineInvoke<ExecutionResponse>(
         mode === "run" ? CMD.RUN_WORKFLOW : CMD.REPLAY_WORKFLOW,
         {
           workflow_id: workflowId,
@@ -151,15 +154,30 @@ export function WatchRun({
             : {}),
         },
       );
-      if (r.ok === false) {
-        throw new Error(r.error || "Execution could not start.");
-      }
-      if (r) {
+      if (r.outcome === "refused") {
+        setRunIssue({
+          message: r.error,
+          preActionRefusal: r.pre_action_refusal,
+        });
+      } else {
         setReport(r);
         stepsRef.current = r.steps ?? [];
+        if (r.outcome === "unknown") {
+          setRunIssue({
+            message:
+              r.error || "Desktop could not classify the execution outcome.",
+            preActionRefusal: false,
+          });
+        }
       }
     } catch (error) {
-      setRunError(error instanceof Error ? error.message : String(error));
+      setRunIssue({
+        message:
+          error instanceof Error
+            ? error.message
+            : "The engine connection ended unexpectedly.",
+        preActionRefusal: false,
+      });
     } finally {
       setRunning(false);
     }
@@ -196,10 +214,12 @@ export function WatchRun({
           title="Where should this workflow run?"
           sub="Choose the application surface. OpenAdapt uses the same compiled workflow and fail-closed verification on every target."
         />
-        <Field label="Application surface">
+        <Field label="Application surface" htmlFor={`${fieldPrefix}-backend`}>
           <select
+            id={`${fieldPrefix}-backend`}
             className="input"
             value={target.backend}
+            aria-describedby={`${fieldPrefix}-backend-description`}
             onChange={(event) =>
               selectBackend(event.target.value as TargetBackend)
             }
@@ -211,7 +231,10 @@ export function WatchRun({
             ))}
           </select>
         </Field>
-        <div className="row target-summary">
+        <div
+          className="row target-summary"
+          id={`${fieldPrefix}-backend-description`}
+        >
           <Pill tone={target.backend === "citrix" ? "warn" : "neutral"}>
             {selected.maturity}
           </Pill>
@@ -223,6 +246,7 @@ export function WatchRun({
           rdpMode={rdpMode}
           setField={setTargetField}
           switchRdpMode={switchRdpMode}
+          idPrefix={fieldPrefix}
         />
 
         <details className="advanced-target">
@@ -231,19 +255,26 @@ export function WatchRun({
             <Field
               label="Deployment config"
               hint="Optional local YAML/JSON file for policy, effect verification, credentials, and other advanced Flow settings."
+              htmlFor={`${fieldPrefix}-deployment-config`}
+              hintId={`${fieldPrefix}-deployment-config-hint`}
             >
               <input
+                id={`${fieldPrefix}-deployment-config`}
                 className="input mono"
                 value={deploymentConfig}
+                aria-describedby={`${fieldPrefix}-deployment-config-hint ${fieldPrefix}-deployment-config-note`}
                 onChange={(event) => setDeploymentConfig(event.target.value)}
                 placeholder="/path/to/deployment.yaml"
                 spellCheck={false}
               />
             </Field>
-            <p className="page-sub">
-              Only this local path is sent to the engine. Secret values stay
-              outside Desktop in the operator-managed file or its environment
-              references; Desktop never displays or logs them.
+            <p
+              className="page-sub"
+              id={`${fieldPrefix}-deployment-config-note`}
+            >
+              Desktop merges target details into a short-lived private config.
+              Secret and selector values stay off the process command line and
+              out of Desktop logs.
             </p>
           </div>
         </details>
@@ -264,10 +295,19 @@ export function WatchRun({
             {runtime.detail}
           </Callout>
         )}
-        {runError && (
-          <Callout tone="warn" title="Execution did not start">
-            {runError} Correct the target details and try again; no workflow
-            action was sent.
+        {runIssue && (
+          <Callout
+            tone="warn"
+            title={
+              runIssue.preActionRefusal
+                ? "Execution was refused before action"
+                : "Execution outcome needs verification"
+            }
+          >
+            {runIssue.message}{" "}
+            {runIssue.preActionRefusal
+              ? "Correct the configuration before trying again; Flow was not invoked."
+              : "Do not retry until you verify the target application or system of record and inspect the retained run evidence; the prior dispatch may have delivered an action."}
           </Callout>
         )}
         <ReplayMonitor
@@ -330,6 +370,7 @@ function TargetFields({
   rdpMode,
   setField,
   switchRdpMode,
+  idPrefix,
 }: {
   target: ExecutionTarget;
   rdpMode: RdpMode;
@@ -338,6 +379,7 @@ function TargetFields({
     value: ExecutionTarget[K],
   ) => void;
   switchRdpMode: (mode: RdpMode) => void;
+  idPrefix: string;
 }) {
   switch (target.backend) {
     case "web":
@@ -345,11 +387,15 @@ function TargetFields({
         <Field
           label="Page URL"
           hint="Leave blank only to use Flow's bundled local demonstration."
+          htmlFor={`${idPrefix}-web-url`}
+          hintId={`${idPrefix}-web-url-hint`}
         >
           <input
+            id={`${idPrefix}-web-url`}
             className="input"
             type="url"
             value={target.url ?? ""}
+            aria-describedby={`${idPrefix}-web-url-hint`}
             onChange={(event) => setField("url", event.target.value)}
             placeholder="https://your-app.example"
             spellCheck={false}
@@ -361,11 +407,15 @@ function TargetFields({
         <Field
           label="Windows connection"
           hint="The WAA agent URL on this machine or through your approved tunnel."
+          htmlFor={`${idPrefix}-windows-agent`}
+          hintId={`${idPrefix}-windows-agent-hint`}
         >
           <input
+            id={`${idPrefix}-windows-agent`}
             className="input"
             type="url"
             value={target.agent_url ?? ""}
+            aria-describedby={`${idPrefix}-windows-agent-hint`}
             onChange={(event) => setField("agent_url", event.target.value)}
             placeholder="http://localhost:5001"
             spellCheck={false}
@@ -375,10 +425,17 @@ function TargetFields({
     case "macos":
       return (
         <>
-          <Field label="Mac application" hint="The owner application, for example TextEdit.">
+          <Field
+            label="Mac application"
+            hint="The owner application, for example TextEdit."
+            htmlFor={`${idPrefix}-macos-app`}
+            hintId={`${idPrefix}-macos-app-hint`}
+          >
             <input
+              id={`${idPrefix}-macos-app`}
               className="input"
               value={target.macos_app ?? ""}
+              aria-describedby={`${idPrefix}-macos-app-hint`}
               onChange={(event) => setField("macos_app", event.target.value)}
               placeholder="TextEdit"
             />
@@ -386,10 +443,14 @@ function TargetFields({
           <Field
             label="Window title"
             hint="Optional title substring; ambiguous matches stop safely."
+            htmlFor={`${idPrefix}-macos-window-title`}
+            hintId={`${idPrefix}-macos-window-title-hint`}
           >
             <input
+              id={`${idPrefix}-macos-window-title`}
               className="input"
               value={target.macos_window_title ?? ""}
+              aria-describedby={`${idPrefix}-macos-window-title-hint`}
               onChange={(event) =>
                 setField("macos_window_title", event.target.value)
               }
@@ -400,10 +461,17 @@ function TargetFields({
     case "linux":
       return (
         <>
-          <Field label="Linux application" hint="Exact AT-SPI application name.">
+          <Field
+            label="Linux application"
+            hint="Exact AT-SPI application name."
+            htmlFor={`${idPrefix}-linux-app`}
+            hintId={`${idPrefix}-linux-app-hint`}
+          >
             <input
+              id={`${idPrefix}-linux-app`}
               className="input"
               value={target.linux_app ?? ""}
+              aria-describedby={`${idPrefix}-linux-app-hint`}
               onChange={(event) => setField("linux_app", event.target.value)}
               placeholder="gedit"
             />
@@ -411,17 +479,25 @@ function TargetFields({
           <Field
             label="Window title"
             hint="Exact top-level title; zero or multiple matches stop safely."
+            htmlFor={`${idPrefix}-linux-window-title`}
+            hintId={`${idPrefix}-linux-window-title-hint`}
           >
             <input
+              id={`${idPrefix}-linux-window-title`}
               className="input"
               value={target.linux_window_title ?? ""}
+              aria-describedby={`${idPrefix}-linux-window-title-hint`}
               onChange={(event) =>
                 setField("linux_window_title", event.target.value)
               }
             />
           </Field>
-          <label className="check-row">
+          <label
+            className="check-row"
+            htmlFor={`${idPrefix}-linux-physical-input`}
+          >
             <input
+              id={`${idPrefix}-linux-physical-input`}
               type="checkbox"
               checked={Boolean(target.linux_allow_physical_input)}
               onChange={(event) =>
@@ -438,7 +514,8 @@ function TargetFields({
     case "rdp":
       return (
         <>
-          <Field label="RDP connection">
+          <fieldset className="field target-fieldset">
+            <legend>RDP connection</legend>
             <SegControl<RdpMode>
               value={rdpMode}
               onChange={switchRdpMode}
@@ -447,15 +524,19 @@ function TargetFields({
                 { value: "window", label: "Local client window" },
               ]}
             />
-          </Field>
+          </fieldset>
           {rdpMode === "network" ? (
             <Field
               label="RDP host"
               hint="Host name or IP only. Credentials stay in the deployment config."
+              htmlFor={`${idPrefix}-rdp-host`}
+              hintId={`${idPrefix}-rdp-host-hint`}
             >
               <input
+                id={`${idPrefix}-rdp-host`}
                 className="input"
                 value={target.rdp_host ?? ""}
+                aria-describedby={`${idPrefix}-rdp-host-hint`}
                 onChange={(event) => setField("rdp_host", event.target.value)}
                 placeholder="10.0.0.5"
                 spellCheck={false}
@@ -465,16 +546,24 @@ function TargetFields({
             <Field
               label="Client window owner"
               hint="Exact local app/process that paints the remote session."
+              htmlFor={`${idPrefix}-rdp-window`}
+              hintId={`${idPrefix}-rdp-window-hint`}
             >
               <input
+                id={`${idPrefix}-rdp-window`}
                 className="input"
                 value={target.rdp_window ?? ""}
+                aria-describedby={`${idPrefix}-rdp-window-hint`}
                 onChange={(event) => setField("rdp_window", event.target.value)}
                 placeholder="Microsoft Remote Desktop"
               />
             </Field>
           )}
-          <RemoteWindowFields target={target} setField={setField} />
+          <RemoteWindowFields
+            target={target}
+            setField={setField}
+            idPrefix={`${idPrefix}-rdp`}
+          />
         </>
       );
     case "citrix":
@@ -488,17 +577,26 @@ function TargetFields({
           <Field
             label="Ready-screen text"
             hint="Stable text that confirms the intended app is open before input. Required by governed Citrix runs."
+            htmlFor={`${idPrefix}-citrix-readiness`}
+            hintId={`${idPrefix}-citrix-readiness-hint`}
           >
             <input
+              id={`${idPrefix}-citrix-readiness`}
               className="input"
               value={target.rdp_readiness_text ?? ""}
+              aria-describedby={`${idPrefix}-citrix-readiness-hint`}
               onChange={(event) =>
                 setField("rdp_readiness_text", event.target.value)
               }
               placeholder="Patient Search"
             />
           </Field>
-          <RemoteWindowFields target={target} setField={setField} citrix />
+          <RemoteWindowFields
+            target={target}
+            setField={setField}
+            idPrefix={`${idPrefix}-citrix`}
+            citrix
+          />
         </>
       );
   }
@@ -507,6 +605,7 @@ function TargetFields({
 function RemoteWindowFields({
   target,
   setField,
+  idPrefix,
   citrix = false,
 }: {
   target: ExecutionTarget;
@@ -514,6 +613,7 @@ function RemoteWindowFields({
     key: K,
     value: ExecutionTarget[K],
   ) => void;
+  idPrefix: string;
   citrix?: boolean;
 }) {
   return (
@@ -522,10 +622,14 @@ function RemoteWindowFields({
         <Field
           label="Workspace window owner"
           hint="Optional override for a nonstandard Citrix client name."
+          htmlFor={`${idPrefix}-window`}
+          hintId={`${idPrefix}-window-hint`}
         >
           <input
+            id={`${idPrefix}-window`}
             className="input"
             value={target.rdp_window ?? ""}
+            aria-describedby={`${idPrefix}-window-hint`}
             onChange={(event) => setField("rdp_window", event.target.value)}
             placeholder="Citrix Viewer"
           />
@@ -534,10 +638,14 @@ function RemoteWindowFields({
       <Field
         label="Session window title"
         hint="Optional exact title to disambiguate multiple remote sessions."
+        htmlFor={`${idPrefix}-window-title`}
+        hintId={`${idPrefix}-window-title-hint`}
       >
         <input
+          id={`${idPrefix}-window-title`}
           className="input"
           value={target.rdp_window_title ?? ""}
+          aria-describedby={`${idPrefix}-window-title-hint`}
           onChange={(event) =>
             setField("rdp_window_title", event.target.value)
           }
@@ -547,10 +655,14 @@ function RemoteWindowFields({
         <Field
           label="Ready-screen text"
           hint="Optional stable text checked on the current remote frame before input."
+          htmlFor={`${idPrefix}-readiness`}
+          hintId={`${idPrefix}-readiness-hint`}
         >
           <input
+            id={`${idPrefix}-readiness`}
             className="input"
             value={target.rdp_readiness_text ?? ""}
+            aria-describedby={`${idPrefix}-readiness-hint`}
             onChange={(event) =>
               setField("rdp_readiness_text", event.target.value)
             }
