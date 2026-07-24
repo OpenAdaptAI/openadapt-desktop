@@ -66,8 +66,9 @@ def test_frozen_runtime_bundles_required_third_party_notices(tmp_path: Path) -> 
     assert ["--hidden-import", "shapely"] == command[
         command.index("shapely") - 1 : command.index("shapely") + 1
     ]
-    assert ["--hidden-import", "numpy.core.multiarray"] == command[
-        command.index("numpy.core.multiarray") - 1 : command.index("numpy.core.multiarray") + 1
+    assert "numpy.core.multiarray" not in command
+    assert ["--exclude-module", "numpy"] == command[
+        command.index("numpy") - 1 : command.index("numpy") + 1
     ]
 
 

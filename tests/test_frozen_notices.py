@@ -120,8 +120,9 @@ def test_frozen_runtime_closure_excludes_managed_vision_wheels(
         "openadapt-flow": FakeDistribution(
             tmp_path / "flow",
             "openadapt-flow",
-            requires=["opencv-python-headless", "rapidocr-onnxruntime"],
+            requires=["numpy", "opencv-python-headless", "rapidocr-onnxruntime"],
         ),
+        "numpy": FakeDistribution(tmp_path / "numpy", "numpy"),
         "opencv-python-headless": FakeDistribution(
             tmp_path / "opencv-headless",
             "opencv-python-headless",
@@ -269,6 +270,40 @@ def test_bootloader_notice_rejects_unreviewed_bytes(tmp_path: Path) -> None:
         )
 
 
+def test_bootloader_notice_stages_canonical_lf_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    notice_text = "\n".join(notices.PYINSTALLER_EXCEPTION_MARKERS) + "\n"
+    pyinstaller = FakeDistribution(
+        tmp_path / "pyinstaller",
+        "pyinstaller",
+        version=notices.PYINSTALLER_VERSION,
+        license_expression="GPL-2.0-or-later WITH Bootloader-exception",
+        notice_files={
+            (
+                f"pyinstaller-{notices.PYINSTALLER_VERSION}.dist-info/licenses/COPYING.txt"
+            ): notice_text,
+        },
+    )
+    source = pyinstaller.locate_file(pyinstaller.files[0])
+    source.write_bytes(notice_text.replace("\n", "\r\n").encode())
+    monkeypatch.setattr(
+        notices,
+        "PYINSTALLER_NOTICE_SHA256",
+        hashlib.sha256(notice_text.encode()).hexdigest(),
+    )
+
+    record = notices._stage_pyinstaller_bootloader_notice(  # noqa: SLF001
+        tmp_path / "bundle",
+        pyinstaller_dist=pyinstaller,
+    )
+
+    staged = tmp_path / "bundle" / "build-components" / "pyinstaller" / "COPYING.txt"
+    assert staged.read_bytes() == notice_text.encode()
+    assert record["sha256"] == hashlib.sha256(notice_text.encode()).hexdigest()
+
+
 def test_bootloader_notice_rejects_unreviewed_version(tmp_path: Path) -> None:
     pyinstaller = FakeDistribution(
         tmp_path / "pyinstaller",
@@ -382,6 +417,38 @@ def test_flatbuffers_uses_exact_reviewed_upstream_notice(tmp_path: Path) -> None
     assert hashlib.sha256(source.read_bytes()).hexdigest() == (
         "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
     )
+
+
+def test_reviewed_notice_hash_is_stable_across_windows_line_endings(
+    tmp_path: Path,
+) -> None:
+    flatbuffers = _flatbuffers_distribution(tmp_path)
+    notice = tmp_path / "notices" / "flatbuffers" / "LICENSE"
+    notice.parent.mkdir(parents=True)
+    canonical = (notices.REVIEWED_NOTICE_ROOT / "flatbuffers" / "LICENSE").read_bytes()
+    notice.write_bytes(canonical.replace(b"\n", b"\r\n"))
+
+    sources = notices._reviewed_external_notice_sources(  # noqa: SLF001
+        "flatbuffers",
+        flatbuffers,
+        notice_root=tmp_path / "notices",
+    )
+
+    assert sources == [
+        (
+            (
+                "reviewed-upstream:"
+                + notices.REVIEWED_EXTERNAL_NOTICE_FILES[
+                    ("flatbuffers", str(flatbuffers.version))
+                ]["source_url"]
+                + "#commit="
+                + notices.REVIEWED_EXTERNAL_NOTICE_FILES[
+                    ("flatbuffers", str(flatbuffers.version))
+                ]["source_commit"]
+            ),
+            notice,
+        )
+    ]
 
 
 def test_reviewed_external_notice_rejects_byte_drift(tmp_path: Path) -> None:

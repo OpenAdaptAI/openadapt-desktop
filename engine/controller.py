@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import enum
 import json
+import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -41,6 +42,10 @@ if TYPE_CHECKING:
 def _load_capture_recorder():
     """Load the native recorder or fail before claiming a recording started."""
 
+    if getattr(sys, "frozen", False):
+        from engine.managed_vision import ensure_managed_vision_runtime
+
+        ensure_managed_vision_runtime()
     try:
         from openadapt_capture import Recorder
     except ImportError as exc:

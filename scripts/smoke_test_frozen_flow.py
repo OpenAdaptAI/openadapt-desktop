@@ -50,6 +50,7 @@ def main() -> int:
         # first-use provision.  No system Python or openadapt-flow command is
         # used by any lifecycle command below.
         env["PLAYWRIGHT_BROWSERS_PATH"] = str(root / "browser-runtime")
+        env["OPENADAPT_VISION_RUNTIME_ROOT"] = str(root / "vision-runtime")
         env.pop("OPENADAPT_FLOW_NO_AUTO_INSTALL", None)
 
         flow = [str(executable), "__openadapt_flow__"]
@@ -57,6 +58,10 @@ def main() -> int:
             [*flow, "demo-record", "--out", str(root / "recording")],
             env=env,
         )
+        if "local vision runtime is ready" not in first_output:
+            raise RuntimeError("clean-user run did not exercise first-use vision provision")
+        if not any((root / "vision-runtime").glob("*/*/.complete.json")):
+            raise RuntimeError("vision runtime was not persisted outside the one-file extraction")
         if "Downloading the Chromium browser" not in first_output:
             raise RuntimeError("clean-user run did not exercise first-use browser provision")
         if not any((root / "browser-runtime").glob("chromium*")):

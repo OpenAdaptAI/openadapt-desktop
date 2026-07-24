@@ -3,11 +3,37 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
+from engine import controller as controller_module
 from engine.controller import RecordingController, RecordingState
+
+REAL_LOAD_CAPTURE_RECORDER = controller_module._load_capture_recorder  # noqa: SLF001
+
+
+def test_frozen_capture_provisions_vision_before_recorder_import(monkeypatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(controller_module.sys, "frozen", True, raising=False)
+    managed = ModuleType("engine.managed_vision")
+    capture = ModuleType("openadapt_capture")
+
+    class Recorder:
+        pass
+
+    def provision() -> None:
+        calls.append("provision")
+
+    managed.ensure_managed_vision_runtime = provision  # type: ignore[attr-defined]
+    capture.Recorder = Recorder  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "engine.managed_vision", managed)
+    monkeypatch.setitem(sys.modules, "openadapt_capture", capture)
+
+    assert REAL_LOAD_CAPTURE_RECORDER() is Recorder
+    assert calls == ["provision"]
 
 
 class TestRecordingController:

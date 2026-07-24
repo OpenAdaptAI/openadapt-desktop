@@ -56,7 +56,7 @@ FORBIDDEN_FROZEN_MEMBERS = re.compile(
     re.IGNORECASE,
 )
 FORBIDDEN_EMBEDDED_VISION_MEMBERS = re.compile(
-    r"(?:^|[/.'\" _-])(?:cv2|opencv[_-]python(?:[_-]headless)?|"
+    r"(?:^|[/.'\" _-])(?:numpy|cv2|opencv[_-]python(?:[_-]headless)?|"
     r"rapidocr[_-]onnxruntime)(?:[/.'\" _-]|$)",
     re.IGNORECASE,
 )

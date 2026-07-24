@@ -27,9 +27,10 @@ ROOT = Path(__file__).resolve().parents[1]
 # Defense in depth.  Static analysis of the product CLI should not pull these
 # modules in, and the artifact audit independently refuses them if it ever does.
 EXCLUDED_MODULES = (
-    # OpenCV's upstream wheels and RapidOCR are exact-hash, first-use runtime
+    # NumPy, OpenCV, and RapidOCR are exact-hash, first-use runtime
     # components. They remain outside the MIT sidecar/installer and are loaded
     # from the verified user-data cache by engine.managed_vision.
+    "numpy",
     "cv2",
     "rapidocr_onnxruntime",
     # Build tooling is neither required at runtime nor permitted in the frozen
@@ -106,11 +107,6 @@ def build_command(
         "onnxruntime",
         "--hidden-import",
         "shapely",
-        # OpenCV's separately provisioned loader imports this legacy NumPy
-        # compatibility alias; NumPy 2.x no longer exposes it to PyInstaller's
-        # static graph unless named explicitly.
-        "--hidden-import",
-        "numpy.core.multiarray",
         "--hidden-import",
         "pyclipper",
         "--hidden-import",

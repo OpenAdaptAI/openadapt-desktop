@@ -54,6 +54,7 @@ FORBIDDEN_FROZEN_DISTRIBUTIONS = frozenset(
 )
 EXTERNALLY_PROVISIONED_DISTRIBUTIONS = frozenset(
     {
+        "numpy",
         "opencv-python",
         "opencv-python-headless",
         "rapidocr-onnxruntime",
@@ -346,6 +347,19 @@ def _declared_name(dist) -> str:
     return _canonicalize_name(str(name))
 
 
+def _canonical_notice_bytes(source: Path) -> bytes:
+    """Return reviewed notice text with platform-independent LF endings."""
+
+    payload = source.read_bytes()
+    if b"\x00" in payload:
+        raise RuntimeError(f"notice candidate contains a NUL byte: {source}")
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise RuntimeError(f"notice candidate is not UTF-8: {source}") from exc
+    return text.replace("\r\n", "\n").replace("\r", "\n").encode("utf-8")
+
+
 def _reviewed_external_notice_sources(
     canonical_name: str,
     dist,
@@ -371,7 +385,7 @@ def _reviewed_external_notice_sources(
         raise RuntimeError(
             f"reviewed external notice is missing for {canonical_name}: {source}"
         )
-    payload = source.read_bytes()
+    payload = _canonical_notice_bytes(source)
     digest = hashlib.sha256(payload).hexdigest()
     if digest != record["sha256"]:
         raise RuntimeError(
@@ -506,7 +520,7 @@ def _stage_pyinstaller_bootloader_notice(
             f"found {[member for member, _ in candidates]}"
         )
     source_member, source = candidates[0]
-    payload = source.read_bytes()
+    payload = _canonical_notice_bytes(source)
     digest = hashlib.sha256(payload).hexdigest()
     if digest != PYINSTALLER_NOTICE_SHA256:
         raise RuntimeError(
@@ -590,8 +604,8 @@ def prepare_notice_bundle(
             safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", source.name).strip("-")
             destination = package_dir / f"{index:03d}-{safe_name or 'NOTICE'}"
             destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(source, destination)
-            payload = destination.read_bytes()
+            payload = _canonical_notice_bytes(source)
+            destination.write_bytes(payload)
             notices.append(
                 {
                     "source_member": source_member,
