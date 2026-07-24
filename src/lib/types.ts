@@ -2,6 +2,32 @@
 
 export type DeploymentLane = "cloud" | "byoc";
 export type PhiMode = "off" | "on";
+export type TargetBackend =
+  | "web"
+  | "windows"
+  | "macos"
+  | "linux"
+  | "rdp"
+  | "citrix";
+
+/**
+ * Non-secret execution target passed to Flow. Backend credentials and policy
+ * stay in the operator-owned deployment config / referenced environment.
+ */
+export interface ExecutionTarget {
+  backend: TargetBackend;
+  url?: string;
+  agent_url?: string;
+  macos_app?: string;
+  macos_window_title?: string;
+  linux_app?: string;
+  linux_window_title?: string;
+  linux_allow_physical_input?: boolean;
+  rdp_host?: string;
+  rdp_window?: string;
+  rdp_window_title?: string;
+  rdp_readiness_text?: string;
+}
 
 export type StepState =
   | "pending"
@@ -64,6 +90,12 @@ export interface BrowserRuntimeStatus {
   workflow_id: string;
   state: "checking" | "installing" | "ready" | "error";
   detail: string;
+}
+
+export interface ReplayProgress {
+  workflow_id: string;
+  state: "running" | "halted" | "done" | "error";
+  backend: TargetBackend;
 }
 
 export interface SyncState {

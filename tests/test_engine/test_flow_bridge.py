@@ -11,8 +11,10 @@ from engine.flow_bridge import (
     EMBEDDED_FLOW_MODE,
     BrowserRuntimeError,
     FlowBridge,
+    _safe_command_for_log,
     flow_available,
 )
+from engine.targets import ExecutionTarget
 
 
 class FakeProc:
@@ -65,6 +67,140 @@ class TestFlowBridgeInvocation:
         assert command[1] == "replay"
         assert "--run-dir" in command
         assert "--out" not in command
+
+    def test_citrix_replay_forwards_only_workspace_target_flags(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(
+            "engine.flow_bridge.shutil.which", lambda _: "/usr/bin/openadapt-flow"
+        )
+        calls: list = []
+        bridge = FlowBridge(runner=_runner(calls))
+        target = ExecutionTarget(
+            backend="citrix",
+            rdp_window="Citrix Viewer",
+            rdp_window_title="Production EMR",
+            rdp_readiness_text="Patient Search",
+        )
+        bridge.replay(
+            tmp_path / "bundle",
+            out_dir=tmp_path / "run",
+            config=tmp_path / "deployment.yaml",
+            target=target,
+        )
+
+        command, _ = calls[0]
+        assert command == [
+            "/usr/bin/openadapt-flow",
+            "replay",
+            str(tmp_path / "bundle"),
+            "--run-dir",
+            str(tmp_path / "run"),
+            "--config",
+            str(tmp_path / "deployment.yaml"),
+            "--backend",
+            "citrix",
+            "--rdp-window",
+            "Citrix Viewer",
+            "--rdp-window-title",
+            "Production EMR",
+            "--rdp-readiness-text",
+            "Patient Search",
+        ]
+        assert "--rdp-host" not in command
+
+    def test_rdp_run_forwards_network_target_and_keeps_credentials_out_of_argv(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(
+            "engine.flow_bridge.shutil.which", lambda _: "/usr/bin/openadapt-flow"
+        )
+        calls: list = []
+        bridge = FlowBridge(runner=_runner(calls))
+        target = ExecutionTarget(
+            backend="rdp",
+            rdp_host="10.0.0.5",
+            rdp_readiness_text="Patient Search",
+        )
+        bridge.run(
+            tmp_path / "bundle",
+            tmp_path / "deployment.yaml",
+            out_dir=tmp_path / "run",
+            target=target,
+        )
+
+        command, _ = calls[0]
+        assert command == [
+            "/usr/bin/openadapt-flow",
+            "run",
+            str(tmp_path / "bundle"),
+            "--config",
+            str(tmp_path / "deployment.yaml"),
+            "--run-dir",
+            str(tmp_path / "run"),
+            "--backend",
+            "rdp",
+            "--rdp-host",
+            "10.0.0.5",
+            "--rdp-readiness-text",
+            "Patient Search",
+        ]
+        assert not any("password" in value.lower() for value in command)
+
+    @pytest.mark.parametrize(
+        ("target", "expected"),
+        [
+            (
+                ExecutionTarget(
+                    backend="windows", agent_url="http://localhost:5001"
+                ),
+                ["--backend", "windows", "--agent-url", "http://localhost:5001"],
+            ),
+            (
+                ExecutionTarget(
+                    backend="macos",
+                    macos_app="TextEdit",
+                    macos_window_title="Notes",
+                ),
+                [
+                    "--backend",
+                    "macos",
+                    "--macos-app",
+                    "TextEdit",
+                    "--macos-window-title",
+                    "Notes",
+                ],
+            ),
+            (
+                ExecutionTarget(
+                    backend="linux",
+                    linux_app="gedit",
+                    linux_window_title="Notes",
+                    linux_allow_physical_input=True,
+                ),
+                [
+                    "--backend",
+                    "linux",
+                    "--linux-app",
+                    "gedit",
+                    "--linux-window-title",
+                    "Notes",
+                    "--linux-allow-physical-input",
+                ],
+            ),
+        ],
+    )
+    def test_native_targets_use_flow_public_flags(
+        self, target: ExecutionTarget, expected: list[str]
+    ) -> None:
+        assert target.flow_args() == expected
+
+    def test_secret_flag_values_are_redacted_from_debug_command(self) -> None:
+        rendered = _safe_command_for_log(
+            ["openadapt-flow", "push", "--token", "oar_secret", "--kind", "bundle"]
+        )
+        assert "oar_secret" not in rendered
+        assert rendered == "openadapt-flow push --token [REDACTED] --kind bundle"
 
     def test_nonzero_returncode(self, tmp_path: Path, monkeypatch) -> None:
         monkeypatch.setattr("engine.flow_bridge.shutil.which", lambda _: "/usr/bin/openadapt-flow")

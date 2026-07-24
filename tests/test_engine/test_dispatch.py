@@ -190,9 +190,11 @@ class TestLibraryCommands:
                 progress("checking", "Checking")
                 progress("ready", "Ready")
 
-            def replay(self, _bundle, out_dir):
+            def replay(self, _bundle, out_dir, *, target, config):
                 from engine.flow_bridge import FlowResult
 
+                assert target.backend == "web"
+                assert config is None
                 order.append("replay")
                 return FlowResult(ok=True, returncode=0, out_dir=out_dir)
 
@@ -221,7 +223,7 @@ class TestLibraryCommands:
                 progress("error", "Retry")
                 raise RuntimeError("browser setup failed")
 
-            def replay(self, _bundle, out_dir):
+            def replay(self, _bundle, out_dir, **_kwargs):
                 self.replay_called = True
                 raise AssertionError("replay must not start")
 
@@ -235,6 +237,263 @@ class TestLibraryCommands:
             event == "replay_progress" and data["state"] == "error"
             for event, data in events
         )
+
+    def test_rdp_replay_skips_browser_and_dispatches_exact_target(
+        self, deps, tmp_path: Path
+    ) -> None:
+        disp, db, events = deps
+        bundle = tmp_path / "bundle"
+        bundle.mkdir()
+        db.insert_bundle("bnd1", str(bundle), capture_id="cap1")
+        calls: list[tuple] = []
+
+        class Bridge:
+            def ensure_browser_runtime(self, _progress) -> None:
+                raise AssertionError("RDP must not provision Chromium")
+
+            def replay(self, target_bundle, out_dir, *, target, config):
+                from engine.flow_bridge import FlowResult
+
+                calls.append((target_bundle, out_dir, target, config))
+                return FlowResult(ok=True, returncode=0, out_dir=out_dir)
+
+        disp.services._flow_bridge = Bridge()
+        result = disp.dispatch(
+            "replay_workflow",
+            {
+                "workflow_id": "bnd1",
+                "target": {
+                    "backend": "rdp",
+                    "rdp_host": "10.0.0.5",
+                    "rdp_readiness_text": "Patient Search",
+                },
+            },
+        )
+
+        assert result["workflow_id"] == "bnd1"
+        assert len(calls) == 1
+        assert calls[0][2].model_dump(exclude_none=True) == {
+            "backend": "rdp",
+            "linux_allow_physical_input": False,
+            "rdp_host": "10.0.0.5",
+            "rdp_readiness_text": "Patient Search",
+        }
+        assert calls[0][3] is None
+        assert not any(event == "browser_runtime" for event, _data in events)
+
+    def test_citrix_governed_run_passes_target_and_selected_config(
+        self, deps, tmp_path: Path
+    ) -> None:
+        disp, db, _events = deps
+        bundle = tmp_path / "bundle"
+        bundle.mkdir()
+        db.insert_bundle("bnd1", str(bundle), capture_id="cap1")
+        deployment = tmp_path / "deployment.yaml"
+        deployment.write_text("backend:\n  kind: citrix\n")
+        calls: list[tuple] = []
+
+        class Bridge:
+            def run(self, target_bundle, config, out_dir, *, target):
+                from engine.flow_bridge import FlowResult
+
+                calls.append((target_bundle, config, out_dir, target))
+                return FlowResult(ok=True, returncode=0, out_dir=out_dir)
+
+        disp.services._flow_bridge = Bridge()
+        result = disp.dispatch(
+            "run_workflow",
+            {
+                "workflow_id": "bnd1",
+                "deployment_config": str(deployment),
+                "target": {
+                    "backend": "citrix",
+                    "rdp_window_title": "Production EMR",
+                    "rdp_readiness_text": "Patient Search",
+                },
+            },
+        )
+
+        assert result["workflow_id"] == "bnd1"
+        assert len(calls) == 1
+        assert calls[0][1] == deployment
+        assert calls[0][3].backend == "citrix"
+        assert calls[0][3].rdp_window_title == "Production EMR"
+        assert calls[0][3].rdp_host is None
+
+    def test_rdp_deployment_config_can_supply_connection_credentials(
+        self, deps, tmp_path: Path
+    ) -> None:
+        disp, db, _events = deps
+        bundle = tmp_path / "bundle"
+        bundle.mkdir()
+        db.insert_bundle("bnd1", str(bundle), capture_id="cap1")
+        deployment = tmp_path / "deployment.yaml"
+        deployment.write_text("backend:\n  kind: rdp\n")
+        calls: list[tuple] = []
+
+        class Bridge:
+            def replay(self, target_bundle, out_dir, *, target, config):
+                from engine.flow_bridge import FlowResult
+
+                calls.append((target_bundle, out_dir, target, config))
+                return FlowResult(ok=True, returncode=0, out_dir=out_dir)
+
+        disp.services._flow_bridge = Bridge()
+        result = disp.dispatch(
+            "replay_workflow",
+            {
+                "workflow_id": "bnd1",
+                "deployment_config": str(deployment),
+                "target": {"backend": "rdp"},
+            },
+        )
+
+        assert result["workflow_id"] == "bnd1"
+        assert calls[0][2].backend == "rdp"
+        assert calls[0][2].rdp_host is None
+        assert calls[0][3] == deployment
+
+    def test_cross_backend_fields_are_refused_before_any_action(
+        self, deps, tmp_path: Path
+    ) -> None:
+        disp, db, events = deps
+        bundle = tmp_path / "bundle"
+        bundle.mkdir()
+        db.insert_bundle("bnd1", str(bundle), capture_id="cap1")
+
+        class Bridge:
+            def replay(self, *_args, **_kwargs):
+                raise AssertionError("invalid target must not execute")
+
+        disp.services._flow_bridge = Bridge()
+        result = disp.dispatch(
+            "replay_workflow",
+            {
+                "workflow_id": "bnd1",
+                "target": {
+                    "backend": "citrix",
+                    "rdp_host": "not-a-citrix-setting",
+                },
+            },
+        )
+
+        assert result == {"ok": False, "error": "Invalid execution target (target)"}
+        assert not any(event == "replay_progress" for event, _data in events)
+
+    def test_secret_target_fields_are_rejected_without_echoing_values(
+        self, deps, tmp_path: Path
+    ) -> None:
+        disp, db, _events = deps
+        bundle = tmp_path / "bundle"
+        bundle.mkdir()
+        db.insert_bundle("bnd1", str(bundle), capture_id="cap1")
+
+        result = disp.dispatch(
+            "replay_workflow",
+            {
+                "workflow_id": "bnd1",
+                "target": {
+                    "backend": "rdp",
+                    "rdp_host": "10.0.0.5",
+                    "rdp_password": "super-secret",
+                },
+            },
+        )
+
+        assert result["ok"] is False
+        assert "rdp_password" in result["error"]
+        assert "super-secret" not in result["error"]
+
+    def test_nonzero_native_flow_without_report_never_becomes_success(
+        self, deps, tmp_path: Path
+    ) -> None:
+        disp, db, events = deps
+        bundle = tmp_path / "bundle"
+        bundle.mkdir()
+        db.insert_bundle("bnd1", str(bundle), capture_id="cap1")
+
+        class Bridge:
+            def replay(self, _bundle, out_dir, *, target, config):
+                from engine.flow_bridge import FlowResult
+
+                return FlowResult(
+                    ok=False,
+                    returncode=2,
+                    stderr="credential=super-secret",
+                    out_dir=out_dir,
+                )
+
+        disp.services._flow_bridge = Bridge()
+        result = disp.dispatch(
+            "replay_workflow",
+            {
+                "workflow_id": "bnd1",
+                "target": {
+                    "backend": "citrix",
+                    "rdp_readiness_text": "Patient Search",
+                },
+            },
+        )
+
+        assert result["ok"] is False
+        assert "exit 2" in result["error"]
+        assert "super-secret" not in result["error"]
+        assert any(
+            event == "replay_progress" and data["state"] == "error"
+            for event, data in events
+        )
+
+    def test_nonzero_governed_halt_report_remains_teachable(
+        self, deps, tmp_path: Path
+    ) -> None:
+        import json
+
+        disp, db, _events = deps
+        bundle = tmp_path / "bundle"
+        bundle.mkdir()
+        db.insert_bundle("bnd1", str(bundle), capture_id="cap1")
+
+        class Bridge:
+            def replay(self, _bundle, out_dir, *, target, config):
+                from engine.flow_bridge import FlowResult
+
+                (out_dir / "report.json").write_text(
+                    json.dumps(
+                        {
+                            "results": [
+                                {
+                                    "step_id": "step_000",
+                                    "intent": "click 'Submit'",
+                                    "ok": False,
+                                    "resolution": {"rung": "ocr"},
+                                }
+                            ],
+                            "halt": {
+                                "state_id": "step_000",
+                                "intent": "click 'Submit'",
+                                "reason": "ambiguous target",
+                            },
+                        }
+                    )
+                )
+                return FlowResult(ok=False, returncode=1, out_dir=out_dir)
+
+        disp.services._flow_bridge = Bridge()
+        result = disp.dispatch(
+            "replay_workflow",
+            {
+                "workflow_id": "bnd1",
+                "target": {
+                    "backend": "citrix",
+                    "rdp_readiness_text": "Patient Search",
+                },
+            },
+        )
+
+        assert result["ok"] is True
+        assert result["halt"]["reason"] == "ambiguous target"
+        assert result["steps"][0]["state"] == "halted"
+        assert db.list_runs(limit=10)[0]["bundle_id"] == "bnd1"
 
 
 class TestSyncCommands:

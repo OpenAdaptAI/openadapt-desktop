@@ -414,17 +414,41 @@ class EngineDispatcher:
         bundle = self._bundle_dir(workflow_id)
         if bundle is None:
             return {"ok": False, "error": f"Unknown workflow {workflow_id}"}
+        try:
+            target, deployment_config = self._execution_target(params)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
         run_id = uuid.uuid4().hex[:8]
         run_dir = self.config.data_dir / "runs" / f"{'run' if run else 'replay'}-{run_id}"
         run_dir.mkdir(parents=True, exist_ok=True)
-        self.emit("replay_progress", {"workflow_id": workflow_id, "state": "running"})
+        self.emit(
+            "replay_progress",
+            {
+                "workflow_id": workflow_id,
+                "state": "running",
+                "backend": target.backend,
+            },
+        )
         try:
             if run:
-                config_path = self.config.data_dir / "deployment.json"
-                result = self.services.flow_bridge.run(bundle, config_path, out_dir=run_dir)
+                # Keep the historical per-machine default for callers that have
+                # not selected a file in the cockpit. Flow remains the
+                # authoritative fail-closed deployment/policy validator.
+                config_path = deployment_config or self.config.data_dir / "deployment.json"
+                result = self.services.flow_bridge.run(
+                    bundle,
+                    config_path,
+                    out_dir=run_dir,
+                    target=target,
+                )
             else:
-                ensure_browser = getattr(self.services.flow_bridge, "ensure_browser_runtime", None)
-                if ensure_browser is not None:
+                # Native/remote Flow backends do not import or launch
+                # Playwright. Never make their execution depend on a Chromium
+                # download.
+                ensure_browser = getattr(
+                    self.services.flow_bridge, "ensure_browser_runtime", None
+                )
+                if target.backend == "web" and ensure_browser is not None:
                     ensure_browser(
                         lambda state, detail: self.emit(
                             "browser_runtime",
@@ -435,12 +459,45 @@ class EngineDispatcher:
                             },
                         )
                     )
-                result = self.services.flow_bridge.replay(bundle, out_dir=run_dir)
+                result = self.services.flow_bridge.replay(
+                    bundle,
+                    out_dir=run_dir,
+                    target=target,
+                    config=deployment_config,
+                )
         except Exception as exc:
-            self.emit("replay_progress", {"workflow_id": workflow_id, "state": "error"})
+            self.emit(
+                "replay_progress",
+                {
+                    "workflow_id": workflow_id,
+                    "state": "error",
+                    "backend": target.backend,
+                },
+            )
             return {"ok": False, "error": str(exc)}
         for line in (result.stdout or "").splitlines():
             self.emit("log_line", {"line": line})
+        # Flow uses exit 1 for a governed halt, so the exit code alone is not
+        # failure evidence. A halt has a bound report.json; a nonzero process
+        # with no report must never be presented as a successful empty run.
+        from engine.flow_bridge import FlowBridge
+
+        if not result.ok and not FlowBridge.read_report(run_dir):
+            self.emit(
+                "replay_progress",
+                {
+                    "workflow_id": workflow_id,
+                    "state": "error",
+                    "backend": target.backend,
+                },
+            )
+            return {
+                "ok": False,
+                "error": (
+                    "Flow refused or failed before producing a run report "
+                    f"(exit {result.returncode}). No workflow success was recorded."
+                ),
+            }
         try:
             self.services.db.insert_run(run_id, str(run_dir), bundle_id=workflow_id)
         except Exception:
@@ -448,9 +505,56 @@ class EngineDispatcher:
         report = self._run_report(run_dir, workflow_id, run_id)
         self.emit(
             "replay_progress",
-            {"workflow_id": workflow_id, "state": "halted" if report.get("halt") else "done"},
+            {
+                "workflow_id": workflow_id,
+                "state": "halted" if report.get("halt") else "done",
+                "backend": target.backend,
+            },
         )
         return report
+
+    def _execution_target(self, params: dict) -> tuple[Any, Path | None]:
+        """Validate one typed non-secret target and optional config path."""
+
+        from pydantic import ValidationError
+
+        from engine.targets import ExecutionTarget
+
+        raw_target = params.get("target")
+        if raw_target is None:
+            raw_target = {"backend": "web"}
+        if not isinstance(raw_target, dict):
+            raise ValueError("target must be an object")
+        try:
+            target = ExecutionTarget.model_validate(raw_target)
+        except ValidationError as exc:
+            # Pydantic's compact error text contains field names and values.
+            # Target values are intentionally non-secret, but keep the UI
+            # message minimal and avoid echoing endpoint/path values.
+            fields = sorted(
+                {
+                    ".".join(str(part) for part in error.get("loc", ()))
+                    for error in exc.errors()
+                    if error.get("loc")
+                }
+            )
+            detail = ", ".join(fields) or "target"
+            raise ValueError(f"Invalid execution target ({detail})") from None
+
+        raw_config = params.get("deployment_config")
+        deployment_config: Path | None = None
+        if raw_config is not None:
+            if not isinstance(raw_config, str) or not raw_config.strip():
+                raise ValueError("deployment_config must be a non-empty local file path")
+            deployment_config = Path(raw_config.strip()).expanduser()
+            if not deployment_config.is_file():
+                raise ValueError("Selected deployment config file was not found")
+        try:
+            target.validate_required(deployment_config=deployment_config is not None)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from None
+
+        return target, deployment_config
 
     def get_run_report(self, **params: Any) -> dict | None:
         """Return the latest ``RunReport`` for a workflow, or None if none."""

@@ -62,7 +62,7 @@ Once you sign in, the shell renders a left-rail cockpit over the live engine:
 | Onboarding | First-run guidance until a workflow exists locally |
 | Workflows | The workflow library: recorded and compiled workflows, with their status |
 | Record & review | Start/stop a capture and step through the local review gate before anything leaves the machine |
-| Runner (watch it run) | Trigger a replay and watch the compile/replay rail, the live step log, and halt evidence when the run stops for attention |
+| Runner (watch it run) | Choose Browser, Windows, macOS, Linux, RDP, or Citrix; supply only that target's connection details; trigger a replay or governed run; and watch the live rail, step log, and halt evidence |
 | Teach | Resolve a halted step and write a governed repair back toward the workflow |
 | Settings | Host, deployment lane, credentials, and local preferences |
 
@@ -77,7 +77,7 @@ sidecar binary is built only in CI.
 | --- | --- | --- |
 | Python capture CLI | Record, list, inspect, scrub, review, approve, local storage, health, and cleanup commands | Beta; covered by tests |
 | Local review gate | Persisted states and egress checks for the capture pipeline | Beta; not the `openadapt-flow` certification system |
-| Tauri/React cockpit | Login, onboarding, workflows, record/review, watch-run, teach, and settings calling the engine through Tauri commands | Beta; renders an engine-offline state when the sidecar binary is absent |
+| Tauri/React cockpit | Login, onboarding, workflows, record/review, target-aware replay/governed run, teach, and settings calling the engine through Tauri commands | Beta; browser is the end-to-end CI path, native/remote maturity remains scoped as above, and the shell renders an engine-offline state when the sidecar binary is absent |
 | Rust commands | Generic `engine_invoke` bridge plus typed commands, sidecar spawn/watchdog/shutdown, and event re-emission to the WebView | Beta; compiled and bundled in CI |
 | Python sidecar IPC | JSON-lines handler backed by a shared `EngineDispatcher` (recording, compile/replay/run/teach, auth, sync/push, review, config) | Beta; unit and e2e tests with mocked boundaries |
 | Tray IPC socket server | Token-authenticated loopback TCP server plus a `~/.openadapt/desktop_ipc.json` discovery file for `openadapt-tray` | Beta; not yet validated end to end against the shipped tray |

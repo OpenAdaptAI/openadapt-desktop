@@ -24,9 +24,12 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 from loguru import logger
+
+if TYPE_CHECKING:
+    from engine.targets import ExecutionTarget
 
 FLOW_BIN = "openadapt-flow"
 EMBEDDED_FLOW_MODE = "__openadapt_flow__"
@@ -98,6 +101,27 @@ def _subprocess_env() -> dict[str, str]:
     return dict(os.environ)
 
 
+def _safe_command_for_log(cmd: list[str]) -> str:
+    """Render a command without ever logging secret-bearing flag values."""
+
+    redacted_after = {
+        "--token",
+        "--password",
+        "--rdp-password",
+        "--agent-token",
+    }
+    safe: list[str] = []
+    redact_next = False
+    for value in cmd:
+        if redact_next:
+            safe.append("[REDACTED]")
+            redact_next = False
+            continue
+        safe.append(value)
+        redact_next = value in redacted_after
+    return " ".join(safe)
+
+
 class FlowBridge:
     """Invokes the ``openadapt-flow`` CLI for the local loop steps.
 
@@ -122,7 +146,7 @@ class FlowBridge:
                 f"'{self.flow_bin}' not found on PATH; install openadapt-flow."
             )
         cmd = [*prefix, *args]
-        logger.debug("flow: {cmd}", cmd=" ".join(cmd))
+        logger.debug("flow: {cmd}", cmd=_safe_command_for_log(cmd))
         proc = self._runner(
             cmd,
             capture_output=True,
@@ -230,19 +254,40 @@ class FlowBridge:
         ]
         return self._run(args, out_dir=out_dir, timeout=timeout)
 
-    def replay(self, bundle_dir: Path, out_dir: Path | None = None, url: str | None = None,
-               timeout: float | None = None) -> FlowResult:
+    def replay(
+        self,
+        bundle_dir: Path,
+        out_dir: Path | None = None,
+        url: str | None = None,
+        timeout: float | None = None,
+        *,
+        target: "ExecutionTarget | None" = None,
+        config: Path | None = None,
+    ) -> FlowResult:
         """Replay a bundle; returns the run directory in ``out_dir`` if given."""
         args = ["replay", str(bundle_dir)]
         if out_dir:
             args += ["--run-dir", str(out_dir)]
-        if url:
+        if config:
+            args += ["--config", str(config)]
+        if target is not None:
+            if url:
+                raise ValueError("url and target cannot both be supplied")
+            args += target.flow_args()
+        elif url:
             args += ["--url", url]
         return self._run(args, out_dir=out_dir, timeout=timeout)
 
-    def run(self, bundle_dir: Path, config: Path, out_dir: Path | None = None,
-            timeout: float | None = None,
-            authorization_file: Path | None = None) -> FlowResult:
+    def run(
+        self,
+        bundle_dir: Path,
+        config: Path,
+        out_dir: Path | None = None,
+        timeout: float | None = None,
+        authorization_file: Path | None = None,
+        *,
+        target: "ExecutionTarget | None" = None,
+    ) -> FlowResult:
         """Run a bundle under a deployment config.
 
         ``authorization_file`` forwards a cloud-minted GovernedRunAuthorization
@@ -255,6 +300,8 @@ class FlowBridge:
             args += ["--run-dir", str(out_dir)]
         if authorization_file:
             args += ["--authorization-file", str(authorization_file)]
+        if target is not None:
+            args += target.flow_args()
         return self._run(args, out_dir=out_dir, timeout=timeout)
 
     def run_supports_authorization(self) -> bool:
