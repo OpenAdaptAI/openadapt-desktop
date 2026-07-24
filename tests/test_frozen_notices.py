@@ -19,7 +19,9 @@ class FakeDistribution:
         *,
         version: str = "1.0.0",
         requires: list[str] | None = None,
-        license_expression: str = "MIT",
+        license_expression: str | None = "MIT",
+        license: str | None = None,
+        classifiers: list[str] | None = None,
         notice_files: dict[str, str] | None = None,
     ) -> None:
         self.root = root
@@ -27,7 +29,12 @@ class FakeDistribution:
         self.requires = requires or []
         self.metadata = Message()
         self.metadata["Name"] = name
-        self.metadata["License-Expression"] = license_expression
+        if license_expression is not None:
+            self.metadata["License-Expression"] = license_expression
+        if license is not None:
+            self.metadata["License"] = license
+        for classifier in classifiers or []:
+            self.metadata["Classifier"] = classifier
         self.files = []
         for member, text in (notice_files or {}).items():
             path = root / member
@@ -335,8 +342,29 @@ def test_reviewed_dual_license_rejects_any_metadata_drift() -> None:
     )
 
 
-def test_flatbuffers_uses_exact_reviewed_upstream_notice() -> None:
-    flatbuffers = distribution("flatbuffers")
+def _flatbuffers_distribution(tmp_path: Path) -> FakeDistribution:
+    return FakeDistribution(
+        tmp_path / "flatbuffers",
+        "flatbuffers",
+        version="25.12.19",
+        license_expression=None,
+        license="Apache 2.0",
+        classifiers=["License :: OSI Approved :: Apache Software License"],
+    )
+
+
+def _rapidocr_distribution(tmp_path: Path) -> FakeDistribution:
+    return FakeDistribution(
+        tmp_path / "rapidocr",
+        "rapidocr-onnxruntime",
+        version="1.4.4",
+        license_expression=None,
+        license="Apache-2.0",
+    )
+
+
+def test_flatbuffers_uses_exact_reviewed_upstream_notice(tmp_path: Path) -> None:
+    flatbuffers = _flatbuffers_distribution(tmp_path)
 
     sources = notices._reviewed_external_notice_sources(  # noqa: SLF001
         "flatbuffers",
@@ -345,16 +373,19 @@ def test_flatbuffers_uses_exact_reviewed_upstream_notice() -> None:
 
     assert len(sources) == 1
     source_member, source = sources[0]
-    assert notices.REVIEWED_EXTERNAL_NOTICE_FILES[
-        ("flatbuffers", str(flatbuffers.version))
-    ]["source_commit"] in source_member
+    assert (
+        notices.REVIEWED_EXTERNAL_NOTICE_FILES[("flatbuffers", str(flatbuffers.version))][
+            "source_commit"
+        ]
+        in source_member
+    )
     assert hashlib.sha256(source.read_bytes()).hexdigest() == (
         "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
     )
 
 
 def test_reviewed_external_notice_rejects_byte_drift(tmp_path: Path) -> None:
-    flatbuffers = distribution("flatbuffers")
+    flatbuffers = _flatbuffers_distribution(tmp_path)
     notice = tmp_path / "notices" / "flatbuffers" / "LICENSE"
     notice.parent.mkdir(parents=True)
     notice.write_text("changed terms\n")
@@ -395,16 +426,17 @@ def test_loguru_uses_exact_reviewed_upstream_notice() -> None:
 
     assert len(sources) == 1
     source_member, source = sources[0]
-    assert notices.REVIEWED_EXTERNAL_NOTICE_FILES[("loguru", str(loguru.version))][
-        "source_commit"
-    ] in source_member
+    assert (
+        notices.REVIEWED_EXTERNAL_NOTICE_FILES[("loguru", str(loguru.version))]["source_commit"]
+        in source_member
+    )
     assert hashlib.sha256(source.read_bytes()).hexdigest() == (
         "b35d026cc7aca9d5859a02eb87ddf7a386a24c986838651bd1f283f94e003327"
     )
 
 
-def test_rapidocr_uses_exact_reviewed_upstream_notice() -> None:
-    rapidocr = distribution("rapidocr-onnxruntime")
+def test_rapidocr_uses_exact_reviewed_upstream_notice(tmp_path: Path) -> None:
+    rapidocr = _rapidocr_distribution(tmp_path)
 
     sources = notices._reviewed_external_notice_sources(  # noqa: SLF001
         "rapidocr-onnxruntime",
