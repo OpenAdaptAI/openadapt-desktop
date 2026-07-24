@@ -45,6 +45,19 @@ EXCLUDED_MODULES = (
 )
 
 RAPIDOCR_NOTICE_DIR = ROOT / "third_party" / "rapidocr"
+LINUX_RUNNER_RUNTIME_EXCLUDE = r"libgcc_s\.so(\..*)?"
+
+
+def configure_system_runtime_boundary(*, platform: str = sys.platform) -> bool:
+    """Keep the Linux runner's unpinned libgcc outside the frozen artifact."""
+
+    if not platform.startswith("linux"):
+        return False
+    from PyInstaller.depend import dylib
+
+    dylib._excludes.add(LINUX_RUNNER_RUNTIME_EXCLUDE)  # noqa: SLF001
+    dylib.exclude_list = dylib.MatchList(dylib._excludes)  # noqa: SLF001
+    return True
 
 
 def notice_data(
@@ -157,6 +170,7 @@ def main() -> int:
         root_license=ROOT / "LICENSE",
     )
     try:
+        configure_system_runtime_boundary()
         command = build_command(
             distpath=args.distpath,
             workpath=args.workpath,

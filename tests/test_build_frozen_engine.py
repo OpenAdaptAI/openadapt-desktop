@@ -46,6 +46,24 @@ def test_adhoc_build_does_not_enable_hardened_runtime_inside_onefile(tmp_path: P
         ]
 
 
+def test_linux_runner_libgcc_is_excluded_at_pyinstaller_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from PyInstaller.depend import dylib
+
+    monkeypatch.setattr(dylib, "_excludes", set(dylib._excludes))
+    monkeypatch.setattr(dylib, "exclude_list", dylib.MatchList(dylib._excludes))
+
+    assert build.configure_system_runtime_boundary(platform="linux") is True
+    assert dylib.include_library("/lib/x86_64-linux-gnu/libgcc_s.so.1") is False
+    assert dylib.include_library("/lib/x86_64-linux-gnu/libstdc++.so.6") is True
+
+
+@pytest.mark.parametrize("platform", ["darwin", "win32"])
+def test_non_linux_system_runtime_boundary_is_a_noop(platform: str) -> None:
+    assert build.configure_system_runtime_boundary(platform=platform) is False
+
+
 def test_frozen_runtime_bundles_required_third_party_notices(tmp_path: Path) -> None:
     command = _build_command("", tmp_path)
 
