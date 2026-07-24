@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from email.message import Message
+from importlib.metadata import distribution
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -98,6 +99,44 @@ def test_frozen_runtime_closure_excludes_build_tools(tmp_path: Path) -> None:
         "flow-runtime",
     }
     assert "pyinstaller" not in closure
+
+
+def test_frozen_runtime_closure_excludes_managed_vision_wheels(
+    tmp_path: Path,
+) -> None:
+    distributions = {
+        "openadapt-desktop": FakeDistribution(
+            tmp_path / "desktop",
+            "openadapt-desktop",
+            requires=["openadapt-flow"],
+        ),
+        "openadapt-flow": FakeDistribution(
+            tmp_path / "flow",
+            "openadapt-flow",
+            requires=["opencv-python-headless", "rapidocr-onnxruntime"],
+        ),
+        "opencv-python-headless": FakeDistribution(
+            tmp_path / "opencv-headless",
+            "opencv-python-headless",
+        ),
+        "rapidocr-onnxruntime": FakeDistribution(
+            tmp_path / "rapidocr",
+            "rapidocr-onnxruntime",
+            requires=["opencv-python", "onnxruntime"],
+        ),
+        "opencv-python": FakeDistribution(tmp_path / "opencv", "opencv-python"),
+        "onnxruntime": FakeDistribution(tmp_path / "onnxruntime", "onnxruntime"),
+    }
+
+    closure = notices.frozen_runtime_closure(
+        distribution_getter=distributions.__getitem__,
+    )
+
+    assert set(closure) == {
+        "onnxruntime",
+        "openadapt-desktop",
+        "openadapt-flow",
+    }
 
 
 def test_dependency_closure_terminates_on_cycles(tmp_path: Path) -> None:
@@ -253,6 +292,152 @@ def test_notice_bundle_rejects_copyleft_before_staging(tmp_path: Path) -> None:
             closure={"oa-atomacos": forbidden},
             required_notice_tokens={},
         )
+
+
+@pytest.mark.parametrize("name", ["av", "scipy"])
+def test_known_binary_runtime_boundary_rejects_permissive_wrapper_metadata(
+    tmp_path: Path,
+    name: str,
+) -> None:
+    forbidden = FakeDistribution(
+        tmp_path / name,
+        name,
+        license_expression="BSD-3-Clause",
+        notice_files={"dist-info/LICENSE": "permissive wrapper terms\n"},
+    )
+
+    with pytest.raises(RuntimeError, match="copyleft distribution"):
+        notices.prepare_notice_bundle(
+            tmp_path / "bundle",
+            root_license=tmp_path / "LICENSE",
+            closure={name: forbidden},
+            required_notice_tokens={},
+        )
+
+
+def test_reviewed_matplotlib_dual_license_uses_exact_ftl_evidence() -> None:
+    matplotlib = distribution("matplotlib")
+    evidence = notices.license_evidence(matplotlib)
+
+    assert notices.COPYLEFT_LICENSE_RE.search("\n".join(evidence))
+    assert not notices.has_unapproved_copyleft_evidence(
+        "matplotlib",
+        str(matplotlib.version),
+        evidence,
+    )
+
+
+def test_reviewed_dual_license_rejects_any_metadata_drift() -> None:
+    assert notices.has_unapproved_copyleft_evidence(
+        "matplotlib",
+        "3.11.1",
+        ["License: FTL OR GPL-2.0-or-later\nchanged"],
+    )
+
+
+def test_flatbuffers_uses_exact_reviewed_upstream_notice() -> None:
+    flatbuffers = distribution("flatbuffers")
+
+    sources = notices._reviewed_external_notice_sources(  # noqa: SLF001
+        "flatbuffers",
+        flatbuffers,
+    )
+
+    assert len(sources) == 1
+    source_member, source = sources[0]
+    assert notices.REVIEWED_EXTERNAL_NOTICE_FILES[
+        ("flatbuffers", str(flatbuffers.version))
+    ]["source_commit"] in source_member
+    assert hashlib.sha256(source.read_bytes()).hexdigest() == (
+        "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    )
+
+
+def test_reviewed_external_notice_rejects_byte_drift(tmp_path: Path) -> None:
+    flatbuffers = distribution("flatbuffers")
+    notice = tmp_path / "notices" / "flatbuffers" / "LICENSE"
+    notice.parent.mkdir(parents=True)
+    notice.write_text("changed terms\n")
+
+    with pytest.raises(RuntimeError, match="notice bytes require review"):
+        notices._reviewed_external_notice_sources(  # noqa: SLF001
+            "flatbuffers",
+            flatbuffers,
+            notice_root=tmp_path / "notices",
+        )
+
+
+def test_reviewed_external_notice_is_not_a_version_wildcard(tmp_path: Path) -> None:
+    flatbuffers = FakeDistribution(
+        tmp_path / "installed",
+        "flatbuffers",
+        version="25.12.20",
+        license_expression="Apache 2.0",
+    )
+
+    assert (
+        notices._reviewed_external_notice_sources(  # noqa: SLF001
+            "flatbuffers",
+            flatbuffers,
+            notice_root=tmp_path / "notices",
+        )
+        == []
+    )
+
+
+def test_loguru_uses_exact_reviewed_upstream_notice() -> None:
+    loguru = distribution("loguru")
+
+    sources = notices._reviewed_external_notice_sources(  # noqa: SLF001
+        "loguru",
+        loguru,
+    )
+
+    assert len(sources) == 1
+    source_member, source = sources[0]
+    assert notices.REVIEWED_EXTERNAL_NOTICE_FILES[("loguru", str(loguru.version))][
+        "source_commit"
+    ] in source_member
+    assert hashlib.sha256(source.read_bytes()).hexdigest() == (
+        "b35d026cc7aca9d5859a02eb87ddf7a386a24c986838651bd1f283f94e003327"
+    )
+
+
+def test_rapidocr_uses_exact_reviewed_upstream_notice() -> None:
+    rapidocr = distribution("rapidocr-onnxruntime")
+
+    sources = notices._reviewed_external_notice_sources(  # noqa: SLF001
+        "rapidocr-onnxruntime",
+        rapidocr,
+    )
+
+    assert len(sources) == 1
+    assert hashlib.sha256(sources[0][1].read_bytes()).hexdigest() == (
+        "3e0af25fdd06aa9586ae97adb00ea927ebe5a3805ac77d2d3a81ce5f55693333"
+    )
+
+
+def test_notice_discovery_ignores_binary_symbol_named_copying(tmp_path: Path) -> None:
+    pyobjc = FakeDistribution(
+        tmp_path / "pyobjc",
+        "pyobjc-core",
+        notice_files={
+            (
+                "PyObjCTest/copying.cpython-312-darwin.so.dSYM/"
+                "Contents/Resources/DWARF/copying.cpython-312-darwin.so"
+            ): "binary-like symbol payload",
+        },
+    )
+
+    assert notices._notice_sources(pyobjc) == []  # noqa: SLF001
+
+
+def test_unreviewed_dual_license_is_not_a_blanket_exception() -> None:
+    assert notices.has_unapproved_copyleft_evidence(
+        "another-package",
+        "1.0.0",
+        ["License-Expression: MIT OR GPL-2.0-only"],
+    )
 
 
 def test_first_party_mit_fallback_is_explicit_and_concrete(

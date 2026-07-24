@@ -69,6 +69,10 @@ def test_semantic_release_refreshes_lock_and_builds_before_tagging() -> None:
     assert "git add uv.lock" in build_command
     assert "uv build --wheel --sdist" in build_command
     assert "check_release_consistency.py --require-dist" in build_command
+    assert "verify_build_artifact.py python-distribution" in build_command
+    assert build_command.index("uv build --wheel --sdist") < build_command.index(
+        "verify_build_artifact.py python-distribution"
+    )
     assert "uv lock" not in build_command
     assert "$PACKAGE_NAME" not in build_command
 
@@ -160,13 +164,13 @@ def test_beta_release_notes_describe_the_bundled_flow_runtime() -> None:
         for dependency in build_dependencies
         if dependency.startswith("openadapt-flow==")
     ]
-    assert flow_dependencies == ["openadapt-flow==1.20.0"]
-    assert "openadapt-capture>=1.0.1" in dependencies
+    assert flow_dependencies == ["openadapt-flow==1.20.1"]
+    assert "openadapt-capture>=1.0.4" in dependencies
     assert "openadapt-privacy>=1.0.0" in dependencies
     assert "Development Status :: 4 - Beta" in classifiers
     assert "Development Status :: 2 - Pre-Alpha" not in classifiers
-    assert bundled_flow_version() == "1.20.0"
-    assert bundled_flow_banner() == "openadapt-flow 1.20.0"
+    assert bundled_flow_version() == "1.20.1"
+    assert bundled_flow_banner() == "openadapt-flow 1.20.1"
     assert 'name = "playwright"\nversion = "1.61.0"' in lock
     assert flow_dependencies[0] in notes
     assert "playwright==1.61.0" in notes

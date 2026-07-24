@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import sys
+from importlib.metadata import PackageNotFoundError, version
 from importlib.util import find_spec
 from pathlib import Path
 
@@ -31,6 +32,43 @@ ENGINE_VERSION = __version__
 # runs out-of-process; using the same signed binary avoids a second sidecar path
 # and guarantees that the installed cockpit invokes the version it shipped.
 EMBEDDED_FLOW_MODE = "__openadapt_flow__"
+
+
+def _embedded_flow_version() -> str:
+    """Return the exact Flow distribution version copied into the freeze."""
+
+    try:
+        return version("openadapt-flow")
+    except PackageNotFoundError as exc:
+        raise RuntimeError(
+            "The bundled OpenAdapt Flow runtime metadata is missing."
+        ) from exc
+
+
+def _print_embedded_flow_help() -> None:
+    """Keep internal Flow discovery offline before optional vision provision."""
+
+    print(
+        f"""openadapt-flow {_embedded_flow_version()}
+
+Bundled OpenAdapt Flow runtime.
+
+Usage: openadapt-flow COMMAND [OPTIONS]
+
+Core commands:
+  record       Record a demonstrated workflow
+  compile      Compile a recording into a deterministic bundle
+  replay       Replay a bundle locally
+  run          Run a bundle under a deployment configuration
+  teach        Teach a governed repair after a halt
+  approve      Approve a durably paused escalation
+  resume       Resume from the last verified checkpoint
+  lint         Inspect bundle coverage
+  certify      Enforce a bundle safety policy
+  console      Open the local operator console
+
+Run a command with --help for its complete options."""
+    )
 
 
 def _configure_frozen_browser_cache() -> None:
@@ -74,6 +112,17 @@ def _run_embedded_flow() -> None:
 
     _configure_frozen_browser_cache()
     _normalize_flow_auto_scrub_capability()
+    flow_args = sys.argv[2:]
+    if not flow_args or flow_args[0] in {"-h", "--help"}:
+        _print_embedded_flow_help()
+        return
+    if flow_args[0] in {"-V", "--version"}:
+        print(f"openadapt-flow {_embedded_flow_version()}")
+        return
+    if getattr(sys, "frozen", False):
+        from engine.managed_vision import ensure_managed_vision_runtime
+
+        ensure_managed_vision_runtime()
     from openadapt_flow.__main__ import main as flow_main
 
     sys.argv = [sys.argv[0], *sys.argv[2:]]

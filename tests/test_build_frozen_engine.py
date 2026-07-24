@@ -31,12 +31,15 @@ def test_developer_id_signs_embedded_binaries_with_tauri_identity(tmp_path: Path
 
     index = command.index("--codesign-identity")
     assert command[index + 1] == "Developer ID Application: OpenAdapt AI (TEAM123)"
+    entitlements = command.index("--osx-entitlements-file")
+    assert command[entitlements + 1] == str(build.ROOT / "src-tauri" / "Entitlements.plist")
 
 
 def test_adhoc_build_does_not_enable_hardened_runtime_inside_onefile(tmp_path: Path) -> None:
     command = _build_command("-", tmp_path)
 
     assert "--codesign-identity" not in command
+    assert "--osx-entitlements-file" not in command
     for module in build.EXCLUDED_MODULES:
         assert ["--exclude-module", module] == command[
             command.index(module) - 1 : command.index(module) + 1
@@ -53,6 +56,18 @@ def test_frozen_runtime_bundles_required_third_party_notices(tmp_path: Path) -> 
         f"{build.RAPIDOCR_NOTICE_DIR / 'LICENSE'}:third_party/rapidocr",
         f"{build.RAPIDOCR_NOTICE_DIR / 'NOTICE'}:third_party/rapidocr",
         f"{tmp_path / 'frozen-notices'}:third_party/python",
+    ]
+    assert ["--collect-data", "engine"] == command[
+        command.index("engine") - 1 : command.index("engine") + 1
+    ]
+    assert ["--hidden-import", "onnxruntime"] == command[
+        command.index("onnxruntime") - 1 : command.index("onnxruntime") + 1
+    ]
+    assert ["--hidden-import", "shapely"] == command[
+        command.index("shapely") - 1 : command.index("shapely") + 1
+    ]
+    assert ["--hidden-import", "numpy.core.multiarray"] == command[
+        command.index("numpy.core.multiarray") - 1 : command.index("numpy.core.multiarray") + 1
     ]
 
 
@@ -94,10 +109,10 @@ def test_python_distribution_guard_runs_without_build_extra(tmp_path: Path) -> N
 
 
 def test_windows_frozen_inventory_member_paths_are_normalized() -> None:
-    windows_inventory = repr("third_party\\rapidocr\\LICENSE") + "\n"
+    windows_inventory = repr("third_party\\onnxruntime\\LICENSE") + "\n"
 
     normalized = verify.normalized_inventory(windows_inventory)
-    assert "third_party/rapidocr/LICENSE" in normalized
+    assert "third_party/onnxruntime/LICENSE" in normalized
     assert "//" not in normalized
     member_keys = verify.frozen_member_keys([r"third_party\python\NOTICE-INVENTORY.json"])
     assert member_keys["third_party/python/NOTICE-INVENTORY.json"] == (
@@ -108,6 +123,20 @@ def test_windows_frozen_inventory_member_paths_are_normalized() -> None:
 def test_frozen_inventory_rejects_copyleft_module_names() -> None:
     assert verify.FORBIDDEN_FROZEN_MEMBERS.search("'oa_atomacos._a11y'")
     assert verify.FORBIDDEN_FROZEN_MEMBERS.search("'pynput.keyboard._darwin'")
+    assert verify.FORBIDDEN_FROZEN_MEMBERS.search("'scipy.fftpack'")
+    assert verify.FORBIDDEN_FROZEN_MEMBERS.search("'av._core'")
+    assert verify.FORBIDDEN_FROZEN_MEMBERS.search("libquadmath.0.dylib")
+    assert verify.FORBIDDEN_FROZEN_MEMBERS.search("libx264.165.dylib")
+    # Independently licensed media/vision components are governed by their
+    # separate runtime boundary; generic libav names are not blanket-banned.
+    assert not verify.FORBIDDEN_FROZEN_MEMBERS.search("cv2/.dylibs/libavcodec.61.dylib")
+    assert verify.FORBIDDEN_EMBEDDED_VISION_MEMBERS.search("cv2/.dylibs/libavcodec.61.dylib")
+    assert verify.FORBIDDEN_EMBEDDED_VISION_MEMBERS.search("'rapidocr_onnxruntime.main'")
+    assert verify.FORBIDDEN_EMBEDDED_VISION_MEMBERS.search(
+        "opencv_python-5.0.0.93.dist-info/LICENSE.txt"
+    )
+    assert not verify.FORBIDDEN_FROZEN_MEMBERS.search("'java.util'")
+    assert not verify.FORBIDDEN_FROZEN_MEMBERS.search("'scipytools.helper'")
 
 
 def test_frozen_notice_inventory_binds_concrete_archive_bytes(
@@ -226,6 +255,30 @@ def test_frozen_notice_inventory_rejects_copyleft_metadata() -> None:
     ).encode()
 
     with pytest.raises(ValueError, match="copyleft package"):
+        verify.validate_frozen_notice_inventory(
+            inventory,
+            members=set(),
+            extract_member=lambda member: b"",
+        )
+
+
+def test_frozen_notice_inventory_rejects_managed_vision_package() -> None:
+    inventory = json.dumps(
+        {
+            "schema_version": 2,
+            "runtime_roots": list(verify.FROZEN_RUNTIME_ROOTS),
+            "packages": [
+                {
+                    "name": "opencv-python",
+                    "version": "5.0.0.93",
+                    "license_evidence": ["Apache-2.0"],
+                    "notices": [],
+                }
+            ],
+        }
+    ).encode()
+
+    with pytest.raises(ValueError, match="separately provisioned package"):
         verify.validate_frozen_notice_inventory(
             inventory,
             members=set(),

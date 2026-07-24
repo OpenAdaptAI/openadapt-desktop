@@ -16,7 +16,7 @@ from pathlib import Path
 
 try:
     from scripts.frozen_notices import (
-        COPYLEFT_LICENSE_RE,
+        EXTERNALLY_PROVISIONED_DISTRIBUTIONS,
         FORBIDDEN_FROZEN_DISTRIBUTIONS,
         FROZEN_RUNTIME_ROOTS,
         NOTICE_BUNDLE_MEMBER,
@@ -27,10 +27,11 @@ try:
         PYINSTALLER_NOTICE_SHA256,
         PYINSTALLER_VERSION,
         REQUIRED_NOTICE_TOKENS,
+        has_unapproved_copyleft_evidence,
     )
 except ModuleNotFoundError:  # pragma: no cover - direct ``python scripts/...`` use
     from frozen_notices import (
-        COPYLEFT_LICENSE_RE,
+        EXTERNALLY_PROVISIONED_DISTRIBUTIONS,
         FORBIDDEN_FROZEN_DISTRIBUTIONS,
         FROZEN_RUNTIME_ROOTS,
         NOTICE_BUNDLE_MEMBER,
@@ -41,13 +42,22 @@ except ModuleNotFoundError:  # pragma: no cover - direct ``python scripts/...`` 
         PYINSTALLER_NOTICE_SHA256,
         PYINSTALLER_VERSION,
         REQUIRED_NOTICE_TOKENS,
+        has_unapproved_copyleft_evidence,
     )
 
 ROOT = Path(__file__).resolve().parents[1]
 
 FORBIDDEN_FROZEN_MEMBERS = re.compile(
     r"(?:openimis|adversary_corpus|identity_roc|reliability_corpus|"
-    r"grown[_-]corpus|oracle[_-]recipes|oa[_.-]atomacos|pynput)",
+    r"grown[_-]corpus|oracle[_-]recipes|oa[_.-]atomacos|pynput|"
+    r"(?:^|[/.'\" _-])scipy(?:[/.'\" _-]|$)|"
+    r"(?:^|[/.'\" ])av(?:[/.'\" ]|$)|"
+    r"lib(?:x264|x265|quadmath|gfortran|gcc))",
+    re.IGNORECASE,
+)
+FORBIDDEN_EMBEDDED_VISION_MEMBERS = re.compile(
+    r"(?:^|[/.'\" _-])(?:cv2|opencv[_-]python(?:[_-]headless)?|"
+    r"rapidocr[_-]onnxruntime)(?:[/.'\" _-]|$)",
     re.IGNORECASE,
 )
 
@@ -126,8 +136,13 @@ def validate_frozen_notice_inventory(
         evidence = package.get("license_evidence")
         if not isinstance(evidence, list) or not all(isinstance(value, str) for value in evidence):
             raise ValueError(f"invalid license evidence for {name}")
-        if name in FORBIDDEN_FROZEN_DISTRIBUTIONS or COPYLEFT_LICENSE_RE.search(
-            "\n".join(evidence)
+        version = package.get("version")
+        if not isinstance(version, str):
+            raise ValueError(f"invalid frozen notice version for {name}")
+        if name in EXTERNALLY_PROVISIONED_DISTRIBUTIONS:
+            raise ValueError(f"separately provisioned package crossed frozen boundary: {name}")
+        if name in FORBIDDEN_FROZEN_DISTRIBUTIONS or (
+            has_unapproved_copyleft_evidence(name, version, evidence)
         ):
             raise ValueError(f"copyleft package crossed frozen boundary: {name}")
         notices = package.get("notices")
@@ -418,6 +433,16 @@ def main() -> int:
             line.strip()
             for line in inventory_text.splitlines()
             if FORBIDDEN_FROZEN_MEMBERS.search(line)
+            or (
+                FORBIDDEN_EMBEDDED_VISION_MEMBERS.search(line)
+                and not any(
+                    notice in line
+                    for notice in (
+                        "third_party/rapidocr/LICENSE",
+                        "third_party/rapidocr/NOTICE",
+                    )
+                )
+            )
         )
         if forbidden:
             parser.error(

@@ -22,6 +22,7 @@ FROZEN_RUNTIME_ROOTS = ("openadapt-desktop", "openadapt-flow")
 BUILD_EXTRA = frozenset({"build"})
 NOTICE_BUNDLE_MEMBER = "third_party/python"
 NOTICE_INVENTORY_NAME = "NOTICE-INVENTORY.json"
+REVIEWED_NOTICE_ROOT = Path(__file__).resolve().parents[1] / "third_party"
 
 # PyInstaller itself is a build tool and must not be classified as an ordinary
 # frozen runtime package. Its compiled bootloader and loader files are,
@@ -43,16 +44,111 @@ PYINSTALLER_EXCEPTION_MARKERS = (
 # they must not be copied into OpenAdapt's permissively licensed one-file
 # runtime.  The metadata scan below also catches any other GPL/AGPL/LGPL
 # distribution before PyInstaller runs.
-FORBIDDEN_FROZEN_DISTRIBUTIONS = frozenset({"oa-atomacos", "pynput"})
+FORBIDDEN_FROZEN_DISTRIBUTIONS = frozenset(
+    {
+        "av",
+        "oa-atomacos",
+        "pynput",
+        "scipy",
+    }
+)
+EXTERNALLY_PROVISIONED_DISTRIBUTIONS = frozenset(
+    {
+        "opencv-python",
+        "opencv-python-headless",
+        "rapidocr-onnxruntime",
+    }
+)
 COPYLEFT_LICENSE_RE = re.compile(
     r"(?:\bA?GPL(?:v?\d|[-+. ]|$)|\bLGPL(?:v?\d|[-+. ]|$)|"
     r"GNU (?:AFFERO |LESSER )?GENERAL PUBLIC LICENSE)",
     re.IGNORECASE,
 )
-NOTICE_FILE_RE = re.compile(
-    r"(?:^|[/\\])(?:licen[cs]e|copying|notice|authors)(?:[._-]|$)",
-    re.IGNORECASE,
-)
+# Matplotlib's wheel metadata embeds the full notices for its bundled
+# components. FreeType is offered under ``FTL OR GPL-2.0-or-later``; OpenAdapt
+# redistributes it under the permissive FTL alternative. Keep this exception
+# bound to the exact reviewed version and complete metadata bytes so a future
+# Matplotlib release, platform-specific metadata drift, or a newly introduced
+# copyleft-only component fails closed and requires a fresh review.
+REVIEWED_PERMISSIVE_DUAL_LICENSE_EVIDENCE = {
+    ("matplotlib", "3.11.1"): (
+        "a000c9b0ba20e722b42edf7081b936cc8f9fa5f62d4265b4fd0c45826d633a65"
+    ),
+}
+# Some upstream wheels omit their concrete license file even though their
+# source release carries one. Do not replace that missing file with a broad
+# metadata-only allowance. Pin the exact distribution version, upstream commit,
+# repository asset, and reviewed bytes; any package or license drift then fails
+# closed and requires a new release-boundary review.
+REVIEWED_EXTERNAL_NOTICE_FILES: dict[tuple[str, str], dict[str, str]] = {
+    ("flatbuffers", "25.12.19"): {
+        "relative_path": "flatbuffers/LICENSE",
+        "source_url": (
+            "https://github.com/google/flatbuffers/blob/"
+            "7e163021e59cca4f8e1e35a7c828b5c6b7915953/LICENSE"
+        ),
+        "source_commit": "7e163021e59cca4f8e1e35a7c828b5c6b7915953",
+        "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+        "license_expression": "Apache-2.0",
+        "license_evidence_sha256": (
+            "c62f9b91d0225d20bebe9794089b7c6f4cf6e332eccbe9a2a71e600ed546a16d"
+        ),
+    },
+    ("loguru", "0.7.3"): {
+        "relative_path": "loguru/LICENSE",
+        "source_url": (
+            "https://github.com/Delgan/loguru/blob/"
+            "ae3bfd1b85b6b4a3db535f69b975687c79498be4/LICENSE"
+        ),
+        "source_commit": "ae3bfd1b85b6b4a3db535f69b975687c79498be4",
+        "sha256": "b35d026cc7aca9d5859a02eb87ddf7a386a24c986838651bd1f283f94e003327",
+        "license_expression": "MIT",
+        "license_evidence_sha256": (
+            "012477eb0ae60687750030b5b3d1206dd5a17244ffe5ed5300044feaf6ae62ad"
+        ),
+    },
+    ("pyobjc-core", "12.2.1"): {
+        "relative_path": "pyobjc/LICENSE.txt",
+        "source_url": (
+            "https://github.com/ronaldoussoren/pyobjc/blob/"
+            "cb525f3e7f433c851b68725dea54bc70d35681b8/"
+            "pyobjc-core/License.txt"
+        ),
+        "source_commit": "cb525f3e7f433c851b68725dea54bc70d35681b8",
+        "sha256": "0ca04b07928d4872b9d9bb22187ca0426dd8bfab08f26eada0999a71dc81aaff",
+        "license_expression": "MIT",
+        "license_evidence_sha256": (
+            "e5dcffe836b6ec8a58e492419b550e65fb8cbdc308503979e5dacb33ac7ea3b7"
+        ),
+    },
+    ("pyobjc-framework-applicationservices", "12.2.1"): {
+        "relative_path": "pyobjc/LICENSE.txt",
+        "source_url": (
+            "https://github.com/ronaldoussoren/pyobjc/blob/"
+            "cb525f3e7f433c851b68725dea54bc70d35681b8/"
+            "pyobjc-framework-ApplicationServices/License.txt"
+        ),
+        "source_commit": "cb525f3e7f433c851b68725dea54bc70d35681b8",
+        "sha256": "0ca04b07928d4872b9d9bb22187ca0426dd8bfab08f26eada0999a71dc81aaff",
+        "license_expression": "MIT",
+        "license_evidence_sha256": (
+            "e5dcffe836b6ec8a58e492419b550e65fb8cbdc308503979e5dacb33ac7ea3b7"
+        ),
+    },
+    ("rapidocr-onnxruntime", "1.4.4"): {
+        "relative_path": "rapidocr/LICENSE",
+        "source_url": (
+            "https://github.com/RapidAI/RapidOCR/blob/"
+            "86ae3f5079df3422c1829cd84baf19bc8a7a9453/LICENSE"
+        ),
+        "source_commit": "86ae3f5079df3422c1829cd84baf19bc8a7a9453",
+        "sha256": "3e0af25fdd06aa9586ae97adb00ea927ebe5a3805ac77d2d3a81ce5f55693333",
+        "license_expression": "Apache-2.0",
+        "license_evidence_sha256": (
+            "2af71558e438db0b73a20beab92dc278a94e1bbe974c00c1a33e3ab62d53a608"
+        ),
+    },
+}
 
 # These packages are central to the Desktop/Capture/Flow runtime and therefore
 # must contribute concrete notice text, not only a short metadata classifier.
@@ -184,6 +280,8 @@ def frozen_runtime_closure(
                     f"{prior.version} != {dist.version}"
                 )
             resolved[name] = dist
+    for name in EXTERNALLY_PROVISIONED_DISTRIBUTIONS:
+        resolved.pop(name, None)
     return dict(sorted(resolved.items()))
 
 
@@ -191,10 +289,52 @@ def _notice_sources(dist) -> list[tuple[str, Path]]:
     sources: list[tuple[str, Path]] = []
     for member in dist.files or ():
         member_name = str(member).replace("\\", "/")
-        if not NOTICE_FILE_RE.search(member_name):
+        basename = member_name.rsplit("/", 1)[-1].lower()
+        is_notice = basename in {
+            "license",
+            "licence",
+            "copying",
+            "notice",
+            "authors",
+        } or basename.startswith(
+            (
+                "license.",
+                "license-",
+                "license_",
+                "licence.",
+                "licence-",
+                "licence_",
+            )
+        )
+        if basename in {
+            "copying.txt",
+            "copying.md",
+            "copying.rst",
+            "notice.txt",
+            "notice.md",
+            "notice.rst",
+            "authors.txt",
+            "authors.md",
+            "authors.rst",
+        }:
+            is_notice = True
+        if not is_notice:
             continue
         source = Path(dist.locate_file(member))
         if source.is_file():
+            payload = source.read_bytes()
+            if b"\x00" in payload:
+                raise RuntimeError(
+                    f"{_declared_name(dist)} notice candidate contains NUL bytes: "
+                    f"{member_name}"
+                )
+            try:
+                payload.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise RuntimeError(
+                    f"{_declared_name(dist)} notice candidate is not UTF-8: "
+                    f"{member_name}"
+                ) from exc
             sources.append((member_name, source))
     return sorted(sources)
 
@@ -206,16 +346,88 @@ def _declared_name(dist) -> str:
     return _canonicalize_name(str(name))
 
 
+def _reviewed_external_notice_sources(
+    canonical_name: str,
+    dist,
+    *,
+    notice_root: Path = REVIEWED_NOTICE_ROOT,
+) -> list[tuple[str, Path]]:
+    """Return an exact reviewed upstream notice for a notice-less wheel."""
+
+    record = REVIEWED_EXTERNAL_NOTICE_FILES.get((canonical_name, str(dist.version)))
+    if record is None:
+        return []
+
+    evidence = "\n".join(license_evidence(dist))
+    evidence_digest = hashlib.sha256(evidence.encode("utf-8")).hexdigest()
+    if evidence_digest != record["license_evidence_sha256"]:
+        raise RuntimeError(
+            f"{canonical_name} license metadata requires review: expected "
+            f"{record['license_evidence_sha256']}, got {evidence_digest}"
+        )
+
+    source = notice_root / record["relative_path"]
+    if not source.is_file():
+        raise RuntimeError(
+            f"reviewed external notice is missing for {canonical_name}: {source}"
+        )
+    payload = source.read_bytes()
+    digest = hashlib.sha256(payload).hexdigest()
+    if digest != record["sha256"]:
+        raise RuntimeError(
+            f"reviewed external notice bytes require review for {canonical_name}: "
+            f"expected {record['sha256']}, got {digest}"
+        )
+    source_member = (
+        f"reviewed-upstream:{record['source_url']}"
+        f"#commit={record['source_commit']}"
+    )
+    return [(source_member, source)]
+
+
+def has_unapproved_copyleft_evidence(
+    canonical_name: str,
+    version: str,
+    evidence: Iterable[str],
+) -> bool:
+    """Return whether license evidence contains unreviewed copyleft terms.
+
+    A permissive alternative is not a copyleft distribution, but prose license
+    fields cannot be parsed safely as SPDX expressions. Exact-byte review pins
+    are therefore the only exception to the conservative token scan.
+    """
+
+    evidence_text = "\n".join(evidence)
+    if not COPYLEFT_LICENSE_RE.search(evidence_text):
+        return False
+    reviewed_hash = REVIEWED_PERMISSIVE_DUAL_LICENSE_EVIDENCE.get(
+        (canonical_name, version)
+    )
+    if reviewed_hash is None:
+        return True
+    return hashlib.sha256(evidence_text.encode("utf-8")).hexdigest() != reviewed_hash
+
+
 def _reject_copyleft(closure: dict[str, object]) -> None:
     for canonical_name, dist in closure.items():
         evidence = license_evidence(dist)
-        if canonical_name in FORBIDDEN_FROZEN_DISTRIBUTIONS or COPYLEFT_LICENSE_RE.search(
-            "\n".join(evidence)
+        if canonical_name in FORBIDDEN_FROZEN_DISTRIBUTIONS or (
+            has_unapproved_copyleft_evidence(
+                canonical_name,
+                str(dist.version),
+                evidence,
+            )
         ):
             detail = "; ".join(evidence) or "known forbidden distribution"
             raise RuntimeError(
                 f"refusing copyleft distribution in frozen runtime: {canonical_name} ({detail})"
             )
+    external = sorted(set(closure) & EXTERNALLY_PROVISIONED_DISTRIBUTIONS)
+    if external:
+        raise RuntimeError(
+            "refusing separately provisioned distribution in frozen runtime: "
+            + ", ".join(external)
+        )
 
 
 def _top_level_imports(dist) -> tuple[str, ...]:
@@ -364,6 +576,8 @@ def prepare_notice_bundle(
             if not root_license.is_file():
                 raise RuntimeError(f"first-party MIT license is missing: {root_license}")
             sources = [("workspace:LICENSE", root_license)]
+        if not sources:
+            sources = _reviewed_external_notice_sources(canonical_name, dist)
         if not sources:
             raise RuntimeError(
                 f"{canonical_name} has no concrete license/NOTICE file in its "

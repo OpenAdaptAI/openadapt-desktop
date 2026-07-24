@@ -2,8 +2,15 @@
 // OS permission gate and the honest "get past the OS warning" copy. Mirrors
 // the cloud seamless flow.
 import { useEffect, useState } from "react";
-import { CMD, engineTry, openExternal } from "../lib/engine";
-import type { PermissionStatus } from "../lib/types";
+import {
+  CMD,
+  engineTry,
+  ffmpegRuntimeStatus,
+  onFfmpegRuntimeStatus,
+  openExternal,
+  retryFfmpegRuntime,
+} from "../lib/engine";
+import type { FfmpegRuntimeStatus, PermissionStatus } from "../lib/types";
 import { Button, Card, CardHead, Callout, Pill } from "../ui/primitives";
 import { OsWarning } from "../ui/OsWarning";
 
@@ -26,6 +33,12 @@ export function Onboarding({ onStart }: { onStart: () => void }) {
   });
   const [checked, setChecked] = useState(false);
   const [requestingInput, setRequestingInput] = useState(false);
+  const [videoRuntime, setVideoRuntime] = useState<FfmpegRuntimeStatus>({
+    phase: "checking",
+    source: "managed",
+    runtime_version: "8.1.2-r1",
+    target: "detecting",
+  });
 
   async function refresh() {
     const p = await engineTry<PermissionStatus>(
@@ -43,6 +56,12 @@ export function Onboarding({ onStart }: { onStart: () => void }) {
 
   useEffect(() => {
     void refresh();
+    void ffmpegRuntimeStatus().then(setVideoRuntime);
+    let unlisten: (() => void) | undefined;
+    void onFfmpegRuntimeStatus(setVideoRuntime).then((stop) => {
+      unlisten = stop;
+    });
+    return () => unlisten?.();
   }, []);
 
   async function requestInputMonitoring() {
@@ -59,11 +78,16 @@ export function Onboarding({ onStart }: { onStart: () => void }) {
     }
   }
 
-  const ready =
+  const permissionsReady =
     !MAC ||
     (perms.screen_recording &&
       perms.accessibility &&
       perms.input_monitoring);
+  const videoReady = videoRuntime.phase === "ready";
+  const ready = permissionsReady && videoReady;
+  const videoBusy = ["checking", "downloading", "verifying"].includes(
+    videoRuntime.phase,
+  );
 
   return (
     <div className="content">
@@ -85,8 +109,15 @@ export function Onboarding({ onStart }: { onStart: () => void }) {
             Re-check permissions
           </Button>
         </div>
-        {!ready && checked && (
+        {!permissionsReady && checked && (
           <p className="hint">Grant the permissions below to begin.</p>
+        )}
+        {permissionsReady && !videoReady && (
+          <p className="hint">
+            {videoBusy
+              ? "Preparing the local video engine…"
+              : "The local video engine needs attention below."}
+          </p>
         )}
       </div>
 
@@ -141,6 +172,59 @@ export function Onboarding({ onStart }: { onStart: () => void }) {
             </div>
           </Card>
         )}
+
+        <Card>
+          <CardHead
+            eyebrow="Automatic"
+            title="Local video engine"
+            sub="Downloaded once, verified, and cached on this machine."
+          />
+          <div className="stack">
+            <div className="row">
+              <Pill
+                tone={
+                  videoReady
+                    ? "ok"
+                    : videoRuntime.phase === "error" ||
+                        videoRuntime.phase === "unavailable"
+                      ? "warn"
+                      : "neutral"
+                }
+              >
+                {videoReady
+                  ? "ready"
+                  : videoBusy
+                    ? "preparing"
+                    : "needs attention"}
+              </Pill>
+              <span className="spacer" />
+              <span>
+                {videoBusy
+                  ? "OpenAdapt is preparing video recording"
+                  : videoReady
+                    ? "Ready for video recording"
+                    : "Video recording is not ready"}
+              </span>
+              {!videoBusy && !videoReady && (
+                <Button
+                  size="sm"
+                  onClick={() =>
+                    void retryFfmpegRuntime().then(setVideoRuntime)
+                  }
+                >
+                  Retry
+                </Button>
+              )}
+            </div>
+            {videoRuntime.detail && !videoReady && (
+              <Callout tone="info">{videoRuntime.detail}</Callout>
+            )}
+            <p className="hint">
+              Video recording runs locally. Workflow data is not sent anywhere
+              during setup.
+            </p>
+          </div>
+        </Card>
 
         <Card>
           <CardHead eyebrow="Heads up" title="First launch" />

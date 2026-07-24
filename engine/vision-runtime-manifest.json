@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "runtime": "openadapt-managed-vision",
+  "runtime_version": "rapidocr-1.4.4-opencv-5.0.0.93-r2",
+  "shared_wheels": [
+    {
+      "distribution": "rapidocr-onnxruntime",
+      "version": "1.4.4",
+      "url": "https://files.pythonhosted.org/packages/ba/12/1e5497183bdbe782dbb91bad1d0d2297dba4d2831b2652657f7517bfc6df/rapidocr_onnxruntime-1.4.4-py3-none-any.whl",
+      "sha256": "971d7d5f223a7a808662229df1ef69893809d8457d834e6373d3854bc1782cbf",
+      "bytes": 14915192,
+      "license_expression": "Apache-2.0"
+    }
+  ],
+  "artifacts": [
+    {
+      "target": "aarch64-apple-darwin",
+      "wheels": [
+        {
+          "distribution": "opencv-python",
+          "version": "5.0.0.93",
+          "url": "https://files.pythonhosted.org/packages/9c/75/76f6ade78f6102c61034f828e2a22616708df2c9504bc8d6af9dd8f73dc5/opencv_python-5.0.0.93-cp37-abi3-macosx_13_0_arm64.whl",
+          "sha256": "198a75138241810206a17c829dbcc40a7cb1841cda538ca86cbbfc6c7d95f898",
+          "bytes": 48322443,
+          "license_expression": "Apache-2.0 with bundled third-party notices"
+        }
+      ]
+    },
+    {
+      "target": "x86_64-apple-darwin",
+      "wheels": [
+        {
+          "distribution": "opencv-python",
+          "version": "5.0.0.93",
+          "url": "https://files.pythonhosted.org/packages/15/8c/bc1bda6aae69a32e9d84fc34153ba104cd25226861eb4aea33b2cea4860d/opencv_python-5.0.0.93-cp37-abi3-macosx_14_0_x86_64.whl",
+          "sha256": "6bbc32f59e1b1a7db7b39c81f63d00625f041d333037fd8702f6da52cc39108b",
+          "bytes": 34782755,
+          "license_expression": "Apache-2.0 with bundled third-party notices"
+        }
+      ]
+    },
+    {
+      "target": "x86_64-pc-windows-msvc",
+      "wheels": [
+        {
+          "distribution": "opencv-python",
+          "version": "5.0.0.93",
+          "url": "https://files.pythonhosted.org/packages/21/f0/9fa6e85cb10c8eb36a0222d27e50fe381b86ce49a55446bf39f491727564/opencv_python-5.0.0.93-cp37-abi3-win_amd64.whl",
+          "sha256": "f90ba04b8f73bc5c3814037699739f0156f597338a98f05956c684e7c3ca10d2",
+          "bytes": 44000345,
+          "license_expression": "Apache-2.0 with bundled third-party notices"
+        }
+      ]
+    },
+    {
+      "target": "x86_64-unknown-linux-gnu",
+      "wheels": [
+        {
+          "distribution": "opencv-python",
+          "version": "5.0.0.93",
+          "url": "https://files.pythonhosted.org/packages/95/54/eb47866b94f2b5b42dde17644b78055ef1ee05aae59962c7290e55270803/opencv_python-5.0.0.93-cp37-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+          "sha256": "f8b6d0a212253dd26ad338c812f1f23ca118fdf05a9c8c6b9444f161aa8c5881",
+          "bytes": 71064711,
+          "license_expression": "Apache-2.0 with bundled third-party notices"
+        }
+      ]
+    }
+  ]
+}
