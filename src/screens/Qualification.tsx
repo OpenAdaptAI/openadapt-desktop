@@ -172,7 +172,7 @@ export function Qualification({
                 <span className="metric-value">{project.graph.bundle.action_count}</span>
               </div>
               <div className="metric">
-                <span className="label">Consequential</span>
+                <span className="label">Irreversible</span>
                 <span className="metric-value">
                   {project.graph.bundle.irreversible_count}
                 </span>
@@ -298,7 +298,7 @@ export function Qualification({
                         }
                       >
                         <option value="reversible">Reversible</option>
-                        <option value="irreversible">Consequential</option>
+                        <option value="irreversible">Irreversible</option>
                       </select>
                     </td>
                     <td>
