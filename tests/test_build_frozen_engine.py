@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 import tarfile
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -46,15 +48,24 @@ def test_adhoc_build_does_not_enable_hardened_runtime_inside_onefile(tmp_path: P
         ]
 
 
-def test_linux_runner_libgcc_is_excluded_at_pyinstaller_resolution(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from PyInstaller.depend import dylib
+def test_linux_runner_libgcc_is_excluded_at_pyinstaller_resolution() -> None:
+    class MatchList:
+        def __init__(self, patterns) -> None:
+            self.patterns = tuple(re.compile(pattern) for pattern in patterns)
 
-    monkeypatch.setattr(dylib, "_excludes", set(dylib._excludes))
-    monkeypatch.setattr(dylib, "exclude_list", dylib.MatchList(dylib._excludes))
+        def check_library(self, libname: str) -> bool:
+            return any(pattern.fullmatch(Path(libname).name) for pattern in self.patterns)
 
-    assert build.configure_system_runtime_boundary(platform="linux") is True
+    dylib = SimpleNamespace(_excludes=set(), MatchList=MatchList, exclude_list=MatchList(set()))
+    dylib.include_library = lambda libname: not dylib.exclude_list.check_library(libname)
+
+    assert (
+        build.configure_system_runtime_boundary(
+            platform="linux",
+            dylib_module=dylib,
+        )
+        is True
+    )
     assert dylib.include_library("/lib/x86_64-linux-gnu/libgcc_s.so.1") is False
     assert dylib.include_library("/lib/x86_64-linux-gnu/libstdc++.so.6") is True
 
