@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -22,6 +23,22 @@ class FakeProc:
         self.returncode = returncode
         self.stdout = stdout
         self.stderr = stderr
+
+
+class FakePopen:
+    def __init__(self, recorder, command, **kwargs):
+        recorder.append((command, kwargs))
+        self.returncode = None
+
+    def poll(self):
+        return self.returncode
+
+    def communicate(self, timeout=None):
+        self.returncode = 0
+        return ("recorded", "")
+
+    def terminate(self):
+        self.returncode = 1
 
 
 def _runner(recorder, returncode=0, stdout="", stderr=""):
@@ -118,6 +135,40 @@ class TestFlowBridgeInvocation:
         ]
         assert "--backend" not in command
 
+    def test_record_process_argv_contains_only_private_request_path(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        monkeypatch.setattr("engine.flow_bridge.find_spec", lambda _name: object())
+        calls: list = []
+
+        def popen(command, **kwargs):
+            return FakePopen(calls, command, **kwargs)
+
+        bridge = FlowBridge(popen=popen)
+        request = tmp_path / ".record-request-private.yaml"
+        request.write_text("Patient Jane Doe at rdp.internal")
+        stop_path = tmp_path / ".stop"
+        ready_path = tmp_path / ".ready"
+        ready_path.touch()
+
+        session = bridge.start_record(
+            tmp_path / "recording",
+            request=request,
+            stop_path=stop_path,
+            ready_path=ready_path,
+        )
+
+        command, _kwargs = calls[0]
+        assert command == [
+            sys.executable,
+            "-m",
+            "engine.flow_record_entry",
+            str(request),
+        ]
+        assert "Jane Doe" not in repr(command)
+        assert "rdp.internal" not in repr(command)
+        assert session.out_dir == tmp_path / "recording"
+
     @pytest.mark.parametrize(
         ("target", "expected"),
         [
@@ -157,6 +208,88 @@ class TestFlowBridgeInvocation:
         self, target: ExecutionTarget, expected: dict[str, object]
     ) -> None:
         assert target.deployment_overrides() == expected
+
+    @pytest.mark.parametrize(
+        ("target", "expected_tail"),
+        [
+            (
+                ExecutionTarget(
+                    backend="macos",
+                    macos_app="Clinical Notes",
+                    macos_window_title="Patient Jane Doe",
+                ),
+                [
+                    "--macos-app",
+                    "Clinical Notes",
+                    "--macos-window-title",
+                    "Patient Jane Doe",
+                    "--window",
+                    "Clinical Notes",
+                    "--window-title",
+                    "Patient Jane Doe",
+                ],
+            ),
+            (
+                ExecutionTarget(
+                    backend="rdp",
+                    rdp_window="Microsoft Remote Desktop",
+                    rdp_window_title="Patient Jane Doe",
+                    rdp_readiness_text="MRN 12345",
+                ),
+                [
+                    "--rdp-window",
+                    "Microsoft Remote Desktop",
+                    "--rdp-window-title",
+                    "Patient Jane Doe",
+                    "--rdp-readiness-text",
+                    "MRN 12345",
+                ],
+            ),
+            (
+                ExecutionTarget(
+                    backend="citrix",
+                    rdp_window="Citrix Viewer",
+                    rdp_window_title="Patient Jane Doe",
+                    rdp_readiness_text="MRN 12345",
+                ),
+                [
+                    "--rdp-window",
+                    "Citrix Viewer",
+                    "--rdp-window-title",
+                    "Patient Jane Doe",
+                    "--rdp-readiness-text",
+                    "MRN 12345",
+                ],
+            ),
+        ],
+    )
+    def test_authoring_target_builds_exact_canonical_flow_record_arguments(
+        self,
+        tmp_path: Path,
+        target: ExecutionTarget,
+        expected_tail: list[str],
+    ) -> None:
+        args = target.record_args(tmp_path / "recording", task="Review workflow")
+
+        assert args[:7] == [
+            "record",
+            "--out",
+            str(tmp_path / "recording"),
+            "--backend",
+            target.backend,
+            "--task",
+            "Review workflow",
+        ]
+        assert args[7:] == expected_tail
+
+    def test_browser_authoring_preserves_flow_bundled_demo_default(self, tmp_path: Path) -> None:
+        assert ExecutionTarget(backend="web").record_args(tmp_path / "recording") == [
+            "record",
+            "--out",
+            str(tmp_path / "recording"),
+            "--backend",
+            "web",
+        ]
 
     def test_secret_flag_values_are_redacted_from_debug_command(self) -> None:
         rendered = _safe_command_for_log(
@@ -252,6 +385,15 @@ class TestReportParsing:
     def test_read_halt_none_when_ok(self, tmp_path: Path) -> None:
         (tmp_path / "report.json").write_text(json.dumps({"status": "ok"}))
         assert FlowBridge.read_halt(tmp_path) is None
+
+    @pytest.mark.parametrize("payload", ["[]", '"success"', "true", "42", "null"])
+    def test_non_object_json_report_is_explicit_unknown(self, tmp_path: Path, payload: str) -> None:
+        (tmp_path / "report.json").write_text(payload)
+
+        report = FlowBridge.read_report(tmp_path)
+
+        assert report == {}
+        assert FlowBridge.classify_outcome(0, report) == "unknown"
 
     @pytest.mark.parametrize(
         ("returncode", "report", "expected"),

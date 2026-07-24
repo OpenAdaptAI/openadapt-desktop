@@ -22,7 +22,9 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
+from importlib.util import find_spec
 from pathlib import Path
 from typing import Callable, Literal
 
@@ -30,6 +32,7 @@ from loguru import logger
 
 FLOW_BIN = "openadapt-flow"
 EMBEDDED_FLOW_MODE = "__openadapt_flow__"
+EMBEDDED_FLOW_RECORD_MODE = "__openadapt_flow_record_config__"
 FlowOutcome = Literal["success", "halt", "unknown"]
 
 
@@ -61,6 +64,44 @@ class FlowResult:
     stdout: str = ""
     stderr: str = ""
     out_dir: Path | None = None
+
+
+@dataclass
+class FlowRecordingSession:
+    """One canonical Flow record subprocess controlled by private sentinels."""
+
+    process: subprocess.Popen[str]
+    out_dir: Path
+    stop_path: Path
+    ready_path: Path
+
+    @property
+    def is_running(self) -> bool:
+        return self.process.poll() is None
+
+    def stop(self, timeout: float = 180) -> FlowResult:
+        """Ask Flow to finalize normally, then collect its bounded output."""
+
+        if self.process.poll() is None:
+            self.stop_path.parent.mkdir(parents=True, exist_ok=True)
+            self.stop_path.touch(mode=0o600, exist_ok=True)
+        try:
+            stdout, stderr = self.process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            # A recorder that cannot finalize must not be reported as a usable
+            # capture. Termination is a last-resort resource cleanup.
+            self.process.terminate()
+            stdout, stderr = self.process.communicate(timeout=30)
+        finally:
+            self.stop_path.unlink(missing_ok=True)
+            self.ready_path.unlink(missing_ok=True)
+        return FlowResult(
+            ok=self.process.returncode == 0,
+            returncode=int(self.process.returncode or 0),
+            stdout=stdout or "",
+            stderr=stderr or "",
+            out_dir=self.out_dir,
+        )
 
 
 def _is_frozen() -> bool:
@@ -138,9 +179,15 @@ class FlowBridge:
         runner: Callable with ``subprocess.run`` semantics (injected in tests).
     """
 
-    def __init__(self, flow_bin: str = FLOW_BIN, runner=subprocess.run) -> None:
+    def __init__(
+        self,
+        flow_bin: str = FLOW_BIN,
+        runner=subprocess.run,
+        popen=subprocess.Popen,
+    ) -> None:
         self.flow_bin = flow_bin
         self._runner = runner
+        self._popen = popen
         self._run_auth_support: bool | None = None
 
     # --- low-level ---
@@ -239,6 +286,54 @@ class FlowBridge:
         if url:
             args += ["--url", url]
         return self._run(args, out_dir=out_dir, timeout=timeout)
+
+    def start_record(
+        self,
+        out_dir: Path,
+        *,
+        request: Path,
+        stop_path: Path,
+        ready_path: Path,
+        startup_timeout: float = 15,
+    ) -> FlowRecordingSession:
+        """Start canonical Flow authoring with only a private path in argv."""
+
+        if _is_frozen():
+            command = [sys.executable, EMBEDDED_FLOW_RECORD_MODE, str(request)]
+        else:
+            if find_spec("openadapt_flow") is None:
+                raise FlowNotAvailableError(
+                    "openadapt-flow is not importable by the Desktop runtime"
+                )
+            command = [
+                sys.executable,
+                "-m",
+                "engine.flow_record_entry",
+                str(request),
+            ]
+        logger.debug("flow record: {cmd}", cmd=_safe_command_for_log(command))
+        process = self._popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=_subprocess_env(),
+        )
+        deadline = time.monotonic() + startup_timeout
+        while time.monotonic() < deadline:
+            returncode = process.poll()
+            if returncode is not None:
+                _stdout, _stderr = process.communicate()
+                raise RuntimeError(
+                    f"openadapt-flow record stopped before authoring began (exit {returncode})"
+                )
+            if ready_path.exists():
+                ready_path.unlink(missing_ok=True)
+                return FlowRecordingSession(process, out_dir, stop_path, ready_path)
+            time.sleep(0.05)
+        process.terminate()
+        process.communicate()
+        raise RuntimeError("openadapt-flow record did not acknowledge authoring startup")
 
     def compile(
         self,
@@ -363,9 +458,10 @@ class FlowBridge:
         if not report_path.exists():
             return {}
         try:
-            return json.loads(report_path.read_text())
+            report = json.loads(report_path.read_text())
         except (json.JSONDecodeError, OSError):
             return {}
+        return report if isinstance(report, dict) else {}
 
     @staticmethod
     def classify_outcome(returncode: int, report: dict) -> FlowOutcome:

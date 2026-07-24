@@ -448,6 +448,36 @@ select.input:focus {
 .seg button + button {
   border-left: 1px solid var(--border);
 }
+.radio-seg label {
+  position: relative;
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
+.radio-seg label + label {
+  border-left: 1px solid var(--border);
+}
+.radio-seg label span {
+  display: block;
+  padding: var(--space-2) var(--space-4);
+}
+.radio-seg label.active {
+  background: var(--surface-sunk);
+  color: var(--text-strong);
+}
+.radio-seg input {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  opacity: 0;
+}
+.radio-seg input:focus-visible + span {
+  box-shadow: inset 0 0 0 3px var(--focus-ring);
+}
+.target-fieldset:disabled .radio-seg label {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
 
 .target-summary {
   margin: calc(-1 * var(--space-2)) 0 var(--space-4);

@@ -14,6 +14,7 @@ wrong substrate.  Secret-bearing Flow fields such as ``agent_token`` and
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
@@ -107,10 +108,10 @@ class ExecutionTarget(BaseModel):
             raise ValueError(
                 f"target fields do not apply to backend {self.backend!r}: " + ", ".join(irrelevant)
             )
-        if self.backend == "rdp" and self.rdp_host and self.rdp_window:
+        if self.backend == "rdp" and self.rdp_host and (self.rdp_window or self.rdp_window_title):
             raise ValueError(
                 "RDP target must select one connection: rdp_host (network) or "
-                "rdp_window (local client window), not both"
+                "rdp_window/rdp_window_title (local client window), not both"
             )
         return self
 
@@ -142,6 +143,24 @@ class ExecutionTarget(BaseModel):
                 + ", ".join(missing)
                 + " (or select a deployment config that provides it)"
             )
+
+    def validate_record_required(self) -> None:
+        """Require the direct fields Flow's authoring path needs."""
+
+        required: tuple[str, ...]
+        if self.backend == "windows":
+            required = ("agent_url",)
+        elif self.backend == "macos":
+            required = ("macos_app",)
+        elif self.backend == "linux":
+            required = ("linux_app", "linux_window_title")
+        else:
+            required = ()
+        missing = [name for name in required if not getattr(self, name)]
+        if self.backend == "rdp" and not (self.rdp_host or self.rdp_window):
+            missing.append("rdp_host or rdp_window")
+        if missing:
+            raise ValueError(f"{self.backend} recording target requires " + ", ".join(missing))
 
     def deployment_overrides(self) -> dict[str, object]:
         """Render Flow 1.20's backend config keys without exposing argv values."""
@@ -175,3 +194,55 @@ class ExecutionTarget(BaseModel):
         if self.backend == "linux" and self.linux_allow_physical_input:
             overrides["linux_allow_physical_input"] = True
         return overrides
+
+    def record_args(self, out_dir: Path, *, task: str = "") -> list[str]:
+        """Build canonical Flow 1.20.1 ``record`` arguments in private memory.
+
+        The caller must never place this list on Desktop's own process command
+        line. The private record helper reconstructs it only after reading and
+        deleting a mode-0600 request file.
+        """
+
+        self.validate_record_required()
+        args = [
+            "record",
+            "--out",
+            str(out_dir),
+            "--backend",
+            self.backend,
+        ]
+        if task:
+            args.extend(["--task", task])
+
+        values: tuple[tuple[str, str | None], ...]
+        if self.backend == "web":
+            values = (("--url", self.url),)
+        elif self.backend == "windows":
+            values = (("--agent-url", self.agent_url),)
+        elif self.backend == "macos":
+            values = (
+                ("--macos-app", self.macos_app),
+                ("--macos-window-title", self.macos_window_title),
+                # Flow's authoring path scopes desktop capture with the shared
+                # window flags while retaining native replay metadata above.
+                ("--window", self.macos_app),
+                ("--window-title", self.macos_window_title),
+            )
+        elif self.backend == "linux":
+            values = (
+                ("--linux-app", self.linux_app),
+                ("--linux-window-title", self.linux_window_title),
+            )
+        else:
+            values = (
+                ("--rdp-host", self.rdp_host),
+                ("--rdp-window", self.rdp_window),
+                ("--rdp-window-title", self.rdp_window_title),
+                ("--rdp-readiness-text", self.rdp_readiness_text),
+            )
+        for flag, value in values:
+            if value:
+                args.extend([flag, value])
+        if self.backend == "linux" and self.linux_allow_physical_input:
+            args.append("--linux-allow-physical-input")
+        return args

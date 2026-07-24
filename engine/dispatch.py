@@ -30,7 +30,11 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 import uuid
+from contextlib import nullcontext
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -43,6 +47,16 @@ EmitFn = Callable[[str, dict], None]
 
 def _noop_emit(event: str, data: dict) -> None:
     """Default event sink -- drops events when no emitter is wired."""
+
+
+@dataclass
+class _ActiveFlowRecording:
+    capture_id: str
+    capture_dir: Path
+    started_at: str
+    started_monotonic: float
+    session: Any
+    redactions: tuple[str, ...]
 
 
 class EngineServices:
@@ -165,6 +179,7 @@ class EngineDispatcher:
         # Sync is orthogonal to recording -- a single paused flag mirrors the
         # tray's pause/resume-sync commands and the frontend sync banner.
         self._sync_paused = False
+        self._flow_recording: _ActiveFlowRecording | None = None
         self._handlers: dict[str, Callable[..., dict | None]] = {}
         self._register()
 
@@ -252,6 +267,8 @@ class EngineDispatcher:
     def start_recording(self, **params: Any) -> dict:
         """Start a recording session and emit ``recording_started``."""
         controller = self.services.controller
+        if self._flow_recording is not None:
+            return self._status_dict(controller)
         if controller.is_recording:
             return self._status_dict(controller)
         if sys.platform == "darwin" and not _mac_preflight_input_monitoring():
@@ -265,7 +282,72 @@ class EngineDispatcher:
                 )
                 self.emit("recording_error", {"error": message})
                 raise PermissionError(message)
-        task = params.get("purpose") or params.get("task") or params.get("name") or ""
+        task = str(params.get("purpose") or params.get("task") or params.get("name") or "")
+        if params.get("target") is not None:
+            try:
+                target, deployment_config = self._execution_target(params)
+                if target is None:
+                    raise ValueError("recording target is required")
+                if deployment_config is not None:
+                    raise ValueError(
+                        "deployment_config applies to replay and governed run, not recording"
+                    )
+                target.validate_record_required()
+            except ValueError as exc:
+                message = str(exc)
+                self.emit("recording_error", {"error": message})
+                raise ValueError(message) from None
+
+            capture_id = uuid.uuid4().hex[:8]
+            timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
+            capture_dir = self.config.data_dir / "captures" / f"{timestamp}_{capture_id}"
+            control_dir = self.config.data_dir / "recording-control"
+            stop_path = control_dir / f".stop-{capture_id}"
+            ready_path = control_dir / f".ready-{capture_id}"
+            started_at = datetime.now(timezone.utc).isoformat()
+            from engine.private_flow_config import (
+                prepare_flow_record_request,
+                stage_private_yaml,
+            )
+
+            prepared = prepare_flow_record_request(
+                target=target,
+                out_dir=capture_dir,
+                task=task,
+                stop_path=stop_path,
+                ready_path=ready_path,
+            )
+            try:
+                with stage_private_yaml(
+                    control_dir,
+                    prepared=prepared,
+                    prefix=".record-request-",
+                ) as request:
+                    session = self.services.flow_bridge.start_record(
+                        capture_dir,
+                        request=request,
+                        stop_path=stop_path,
+                        ready_path=ready_path,
+                    )
+            except Exception:
+                stop_path.unlink(missing_ok=True)
+                ready_path.unlink(missing_ok=True)
+                message = "OpenAdapt Flow could not start the selected recording target"
+                self.emit("recording_error", {"error": message})
+                raise RuntimeError(message) from None
+            self._flow_recording = _ActiveFlowRecording(
+                capture_id=capture_id,
+                capture_dir=capture_dir,
+                started_at=started_at,
+                started_monotonic=time.monotonic(),
+                session=session,
+                redactions=prepared.redactions,
+            )
+            self.services.audit.log("recording_started", capture_id=capture_id)
+            self.emit("recording_started", {"capture_id": capture_id})
+            self.emit("status_update", self._status_dict(controller))
+            return {"capture_id": capture_id, "recording": True}
+
         capture_id = controller.start(task_description=str(task))
         self.services.audit.log("recording_started", capture_id=capture_id)
         self.emit("recording_started", {"capture_id": capture_id})
@@ -275,6 +357,58 @@ class EngineDispatcher:
     def stop_recording(self, **params: Any) -> dict:
         """Stop the active recording and emit ``recording_stopped``."""
         controller = self.services.controller
+        active = self._flow_recording
+        if active is not None:
+            from engine.private_flow_config import redact_flow_log
+
+            try:
+                result = active.session.stop()
+            finally:
+                self._flow_recording = None
+            for line in (result.stdout or "").splitlines():
+                self.emit(
+                    "log_line",
+                    {"line": redact_flow_log(line, active.redactions)},
+                )
+            if not result.ok or not (active.capture_dir / "meta.json").is_file():
+                message = (
+                    "OpenAdapt Flow could not finalize a compile-ready recording; "
+                    "the incomplete local capture was retained for inspection"
+                )
+                self.emit("recording_error", {"error": message})
+                self.emit("status_update", self._status_dict(controller))
+                raise RuntimeError(message)
+
+            meta_path = active.capture_dir / "meta.json"
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                meta = {}
+            if not isinstance(meta, dict):
+                meta = {}
+            meta.setdefault("capture_id", active.capture_id)
+            meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+            if self.services.db.get_capture(active.capture_id) is None:
+                self.services.db.insert_capture(
+                    active.capture_id,
+                    str(active.capture_dir),
+                    str(meta.get("started_at") or active.started_at),
+                    task_description=str(meta.get("task_description") or ""),
+                )
+            duration = max(0.0, time.monotonic() - active.started_monotonic)
+            metadata = {
+                "capture_id": active.capture_id,
+                "id": active.capture_id,
+                "duration": duration,
+                "event_count": 0,
+                "size_bytes": sum(
+                    path.stat().st_size for path in active.capture_dir.rglob("*") if path.is_file()
+                ),
+                "path": str(active.capture_dir),
+            }
+            self.emit("recording_stopped", metadata)
+            self.emit("status_update", self._status_dict(controller))
+            return metadata
         if not controller.is_recording:
             self.emit("recording_error", {"error": "No recording is active"})
             return {"capture_id": None, "recording": False}
@@ -298,6 +432,16 @@ class EngineDispatcher:
     def _status_dict(self, controller: Any) -> dict:
         from engine.controller import RecordingState
 
+        if self._flow_recording is not None:
+            return {
+                "recording": True,
+                "paused": False,
+                "duration_secs": max(
+                    0.0,
+                    time.monotonic() - self._flow_recording.started_monotonic,
+                ),
+                "capture_id": self._flow_recording.capture_id,
+            }
         recording = controller.is_recording
         paused = controller.state == RecordingState.PAUSED
         duration = None
@@ -435,17 +579,18 @@ class EngineDispatcher:
         log_redactions: tuple[str, ...] = ()
         try:
             from engine.private_flow_config import (
-                flow_log_redactions,
-                private_flow_config,
+                prepare_flow_config,
+                stage_private_yaml,
             )
 
-            log_redactions = flow_log_redactions(base_config, target)
+            prepared = prepare_flow_config(base_config, target)
+            log_redactions = prepared.redactions if prepared is not None else ()
+            if prepared is None:
+                staged_context = nullcontext(None)
+            else:
+                staged_context = stage_private_yaml(run_dir, prepared=prepared)
 
-            with private_flow_config(
-                run_dir,
-                source=base_config,
-                target=target,
-            ) as staged_config:
+            with staged_context as staged_config:
                 # Native/remote Flow backends do not import or launch
                 # Playwright. Config-only execution delegates backend setup to
                 # Flow, preserving a native/remote backend without injecting

@@ -144,6 +144,99 @@ class TestRecordingCommands:
 
         assert disp.dispatch("start_recording", {})["recording"] is True
 
+    @pytest.mark.parametrize(
+        "target",
+        [
+            {"backend": "windows", "agent_url": "http://waa.internal:5001"},
+            {
+                "backend": "macos",
+                "macos_app": "Clinical Notes",
+                "macos_window_title": "Patient Jane Doe",
+            },
+            {
+                "backend": "linux",
+                "linux_app": "clinical-app",
+                "linux_window_title": "Patient Jane Doe",
+            },
+            {
+                "backend": "rdp",
+                "rdp_window": "Microsoft Remote Desktop",
+                "rdp_window_title": "Patient Jane Doe",
+                "rdp_readiness_text": "MRN 12345",
+            },
+            {
+                "backend": "citrix",
+                "rdp_window": "Citrix Viewer",
+                "rdp_window_title": "Patient Jane Doe",
+                "rdp_readiness_text": "MRN 12345",
+            },
+        ],
+    )
+    def test_target_aware_authoring_stages_exact_private_flow_record_request(
+        self, deps, monkeypatch, target: dict
+    ) -> None:
+        disp, db, events = deps
+        monkeypatch.setattr("engine.dispatch.sys.platform", "linux")
+        private_requests: list[dict] = []
+        process_calls: list[tuple] = []
+
+        class Session:
+            def __init__(self, out_dir: Path) -> None:
+                self.out_dir = out_dir
+
+            def stop(self):
+                from engine.flow_bridge import FlowResult
+
+                self.out_dir.mkdir(parents=True, exist_ok=True)
+                (self.out_dir / "meta.json").write_text(
+                    json.dumps(
+                        {
+                            "started_at": "2026-07-24T00:00:00+00:00",
+                            "task_description": "Review patient workflow",
+                        }
+                    )
+                )
+                sensitive = " ".join(
+                    str(value) for value in target.values() if isinstance(value, str)
+                )
+                return FlowResult(
+                    ok=True,
+                    returncode=0,
+                    stdout=f"record target {sensitive} Review patient workflow",
+                    out_dir=self.out_dir,
+                )
+
+        class Bridge:
+            def start_record(self, out_dir, *, request, stop_path, ready_path):
+                private_requests.append(yaml.safe_load(request.read_text()))
+                process_calls.append((out_dir, request, stop_path, ready_path))
+                return Session(out_dir)
+
+        disp.services._flow_bridge = Bridge()
+        started = disp.dispatch(
+            "start_recording",
+            {
+                "target": target,
+                "purpose": "Review patient workflow",
+            },
+        )
+        stopped = disp.dispatch("stop_recording", {})
+
+        assert started["recording"] is True
+        assert stopped["capture_id"] == started["capture_id"]
+        assert private_requests[0]["target"] == target
+        assert private_requests[0]["task"] == "Review patient workflow"
+        assert db.get_capture(started["capture_id"]) is not None
+        # The actual process boundary receives only non-sensitive private paths.
+        assert "Jane Doe" not in repr(process_calls)
+        assert "MRN 12345" not in repr(process_calls)
+        assert "Review patient workflow" not in repr(process_calls)
+        emitted = [data["line"] for event, data in events if event == "log_line"]
+        assert len(emitted) == 1
+        assert "Jane Doe" not in emitted[0]
+        assert "MRN 12345" not in emitted[0]
+        assert "Review patient workflow" not in emitted[0]
+
 
 class TestLibraryCommands:
     def test_get_workflows_from_bundles(self, deps) -> None:

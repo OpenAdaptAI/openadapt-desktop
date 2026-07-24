@@ -11,8 +11,10 @@ import yaml
 from engine.private_flow_config import (
     PrivateFlowConfigError,
     flow_log_redactions,
+    prepare_flow_config,
     private_flow_config,
     redact_flow_log,
+    stage_private_yaml,
 )
 from engine.targets import ExecutionTarget
 
@@ -35,7 +37,6 @@ effects:
     target = ExecutionTarget(
         backend="rdp",
         rdp_host="new.example",
-        rdp_window_title="Patient Jane Doe",
         rdp_readiness_text="MRN 12345",
     )
 
@@ -59,7 +60,6 @@ effects:
             "rdp_host": "new.example",
             "rdp_username": "operator",
             "rdp_password": "from-private-source",
-            "rdp_window_title": "Patient Jane Doe",
             "rdp_readiness_text": "MRN 12345",
         }
         assert merged["effects"] == {"kind": "onscreen"}
@@ -102,12 +102,7 @@ def test_config_only_preserves_native_backend_without_web_override(
 
 def test_log_redactions_cover_config_and_direct_selector_values(tmp_path: Path) -> None:
     source = tmp_path / "deployment.yaml"
-    source.write_text(
-        "backend:\n"
-        "  kind: rdp\n"
-        "  rdp_window_title: Patient Jane Doe\n"
-        "  rdp_password: super-secret\n"
-    )
+    source.write_text("backend:\n  kind: rdp\n  rdp_password: super-secret\n")
     target = ExecutionTarget(
         backend="rdp",
         rdp_host="10.0.0.5",
@@ -116,11 +111,11 @@ def test_log_redactions_cover_config_and_direct_selector_values(tmp_path: Path) 
 
     redactions = flow_log_redactions(source, target)
     safe = redact_flow_log(
-        "Patient Jane Doe MRN 12345 at 10.0.0.5 with super-secret",
+        "MRN 12345 at 10.0.0.5 with super-secret",
         redactions,
     )
 
-    assert safe == "[REDACTED] [REDACTED] at [REDACTED] with [REDACTED]"
+    assert safe == "[REDACTED] at [REDACTED] with [REDACTED]"
 
 
 def test_rejects_non_mapping_config_without_echoing_values(tmp_path: Path) -> None:
@@ -135,3 +130,68 @@ def test_rejects_non_mapping_config_without_echoing_values(tmp_path: Path) -> No
 
     assert "Jane Doe" not in message
     assert "12345" not in message
+
+
+def test_selected_local_window_clears_stale_network_transport(tmp_path: Path) -> None:
+    source = tmp_path / "deployment.yaml"
+    source.write_text(
+        "backend:\n"
+        "  kind: rdp\n"
+        "  rdp_host: stale.example\n"
+        "  rdp_username: stale-user\n"
+        "  rdp_password: stale-password\n"
+    )
+    target = ExecutionTarget(
+        backend="rdp",
+        rdp_window="Microsoft Remote Desktop",
+        rdp_window_title="Clinical Workspace",
+    )
+
+    with private_flow_config(tmp_path / "run", source=source, target=target) as staged:
+        assert staged is not None
+        backend = yaml.safe_load(staged.read_text())["backend"]
+
+    assert backend["rdp_window"] == "Microsoft Remote Desktop"
+    assert backend["rdp_window_title"] == "Clinical Workspace"
+    assert not ({"rdp_host", "rdp_username", "rdp_password"} & backend.keys())
+
+
+def test_selected_network_host_clears_stale_local_window_transport(tmp_path: Path) -> None:
+    source = tmp_path / "deployment.yaml"
+    source.write_text(
+        "backend:\n"
+        "  kind: rdp\n"
+        "  rdp_window: Microsoft Remote Desktop\n"
+        "  rdp_window_title: Clinical Workspace\n"
+    )
+    target = ExecutionTarget(backend="rdp", rdp_host="fresh.example")
+
+    with private_flow_config(tmp_path / "run", source=source, target=target) as staged:
+        assert staged is not None
+        backend = yaml.safe_load(staged.read_text())["backend"]
+
+    assert backend["rdp_host"] == "fresh.example"
+    assert not ({"rdp_window", "rdp_window_title"} & backend.keys())
+
+
+def test_prepare_and_stage_use_one_immutable_source_snapshot(tmp_path: Path) -> None:
+    source = tmp_path / "deployment.yaml"
+    source.write_text(
+        "backend:\n  kind: rdp\n  rdp_host: first.example\n  rdp_password: first-secret\n"
+    )
+    prepared = prepare_flow_config(source, None)
+    assert prepared is not None
+
+    # Changing the operator-owned file after preparation cannot change either
+    # the staged values or their redaction set.
+    source.write_text(
+        "backend:\n  kind: rdp\n  rdp_host: second.example\n  rdp_password: second-secret\n"
+    )
+    with stage_private_yaml(tmp_path / "run", prepared=prepared) as staged:
+        deployment = yaml.safe_load(staged.read_text())
+
+    assert deployment["backend"]["rdp_host"] == "first.example"
+    assert "first.example" in prepared.redactions
+    assert "first-secret" in prepared.redactions
+    assert "second.example" not in prepared.payload
+    assert "second-secret" not in prepared.redactions

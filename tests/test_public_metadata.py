@@ -24,13 +24,36 @@ def test_public_metadata_identifies_beta_supporting_surface() -> None:
     assert "AI training data collection" not in pyproject["project"]["description"]
     assert "AI training data collection" not in package["description"]
     expected_native_description = (
-        "Beta installed companion for OpenAdapt authoring, "
-        "teaching, and local pairing"
+        "Beta installed companion for OpenAdapt authoring, teaching, and local pairing"
     )
     assert package["description"] == expected_native_description
     assert cargo["package"]["description"] == expected_native_description
     assert pyproject["project"]["readme"] == "README.md"
     assert pyproject["project"]["scripts"] == {"openadapt-desktop": "engine.cli:main"}
+
+
+def test_target_authoring_uses_unified_available_vocabulary_and_shared_form() -> None:
+    form = (ROOT / "src/ui/ExecutionTargetForm.tsx").read_text()
+    record = (ROOT / "src/screens/RecordReview.tsx").read_text()
+    watch = (ROOT / "src/screens/WatchRun.tsx").read_text()
+    readme = (ROOT / "README.md").read_text()
+
+    assert '"Beta"' in form
+    assert '"Available"' in form
+    for expired in ("Early access", "Exploratory", "Qualification-specific"):
+        assert expired not in form
+        assert expired not in readme
+    assert "ExecutionTargetForm" in record
+    assert "ExecutionTargetForm" in watch
+    assert "target," in record
+
+
+def test_rdp_transport_control_uses_native_radio_semantics() -> None:
+    form = (ROOT / "src/ui/ExecutionTargetForm.tsx").read_text()
+
+    assert 'type="radio"' in form
+    assert "checked={rdpMode === mode}" in form
+    assert "switchRdpTransport(target, mode)" in form
 
 
 def test_readme_does_not_publish_hard_coded_package_version_claims() -> None:
@@ -160,9 +183,7 @@ def test_beta_release_notes_describe_the_bundled_flow_runtime() -> None:
     assert native_release.count("--notes-file docs/BETA_NATIVE_INSTALLERS.md") == 2
     assert "EXPERIMENTAL_NATIVE_INSTALLERS" not in native_release
     flow_dependencies = [
-        dependency
-        for dependency in build_dependencies
-        if dependency.startswith("openadapt-flow==")
+        dependency for dependency in build_dependencies if dependency.startswith("openadapt-flow==")
     ]
     assert flow_dependencies == ["openadapt-flow==1.20.1"]
     assert "openadapt-capture>=1.0.4" in dependencies

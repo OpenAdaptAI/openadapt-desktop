@@ -157,6 +157,7 @@ export function SegControl<T extends string>({
           type="button"
           key={o.value}
           className={o.value === value ? "active" : ""}
+          aria-pressed={o.value === value}
           onClick={() => onChange(o.value)}
         >
           {o.label}
