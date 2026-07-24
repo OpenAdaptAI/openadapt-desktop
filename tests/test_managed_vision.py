@@ -4,6 +4,8 @@ import base64
 import hashlib
 import io
 import json
+import threading
+import time
 import zipfile
 from pathlib import Path
 
@@ -174,6 +176,56 @@ def test_link_like_rejects_windows_junctions(
     monkeypatch.setattr(Path, "is_junction", lambda _path: True, raising=False)
 
     assert vision._is_link_like(tmp_path) is True  # noqa: SLF001
+
+
+def test_cache_admission_rejects_link_like_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contract = vision.load_contract(target="aarch64-apple-darwin")
+    monkeypatch.setattr(vision, "_is_link_like", lambda path: path == tmp_path)
+
+    assert vision._cache_is_valid(tmp_path, contract) is False  # noqa: SLF001
+
+
+def test_runtime_lock_serializes_concurrent_first_use(tmp_path: Path) -> None:
+    lock_path = tmp_path / "vision.lock"
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    second_entered = threading.Event()
+
+    def first() -> None:
+        with vision._runtime_lock(  # noqa: SLF001
+            lock_path,
+            status=lambda _message: None,
+            timeout=2,
+        ):
+            first_entered.set()
+            assert release_first.wait(2)
+
+    def second() -> None:
+        assert first_entered.wait(2)
+        with vision._runtime_lock(  # noqa: SLF001
+            lock_path,
+            status=lambda _message: None,
+            timeout=2,
+        ):
+            second_entered.set()
+
+    first_thread = threading.Thread(target=first)
+    second_thread = threading.Thread(target=second)
+    first_thread.start()
+    second_thread.start()
+    assert first_entered.wait(2)
+    time.sleep(0.05)
+    assert not second_entered.is_set()
+    release_first.set()
+    first_thread.join(2)
+    second_thread.join(2)
+
+    assert not first_thread.is_alive()
+    assert not second_thread.is_alive()
+    assert second_entered.is_set()
 
 
 def test_download_rejects_hash_drift(tmp_path: Path) -> None:

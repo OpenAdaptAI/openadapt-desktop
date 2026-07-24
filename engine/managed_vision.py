@@ -24,9 +24,11 @@ import secrets
 import shutil
 import sys
 import tempfile
+import time
 import urllib.parse
 import urllib.request
 import zipfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from importlib.metadata import distribution
 from pathlib import Path, PurePosixPath
@@ -36,6 +38,8 @@ MANIFEST_PATH = Path(__file__).with_name("vision-runtime-manifest.json")
 MARKER_NAME = ".complete.json"
 MAX_EXTRACTED_BYTES = 700 * 1024 * 1024
 DOWNLOAD_CHUNK_BYTES = 1024 * 1024
+LOCK_TIMEOUT_SECONDS = 300.0
+LOCK_RETRY_SECONDS = 0.1
 ALLOWED_DOWNLOAD_HOST = "files.pythonhosted.org"
 RAPIDOCR_NOTICE_MEMBERS = (
     ("LICENSE", "LICENSE"),
@@ -497,6 +501,8 @@ def _actual_cache_files(path: Path) -> set[str]:
 
 
 def _cache_is_valid(path: Path, contract: RuntimeContract) -> bool:
+    if _is_link_like(path):
+        return False
     try:
         marker = json.loads((path / MARKER_NAME).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -529,6 +535,69 @@ def _cache_is_valid(path: Path, contract: RuntimeContract) -> bool:
         if size != expected_size or digest != expected_digest:
             return False
     return True
+
+
+def _try_lock(stream: BinaryIO) -> None:
+    stream.seek(0)
+    if os.name == "nt":
+        import msvcrt
+
+        msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _unlock(stream: BinaryIO) -> None:
+    stream.seek(0)
+    if os.name == "nt":
+        import msvcrt
+
+        msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def _runtime_lock(
+    lock_path: Path,
+    *,
+    status: Callable[[str], None],
+    timeout: float = LOCK_TIMEOUT_SECONDS,
+):
+    """Serialize admission through activation; OS locks release on process death."""
+
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+b") as stream:
+        if stream.seek(0, os.SEEK_END) == 0:
+            stream.write(b"\0")
+            stream.flush()
+        deadline = time.monotonic() + timeout
+        announced = False
+        while True:
+            try:
+                _try_lock(stream)
+                break
+            except OSError as exc:
+                if time.monotonic() >= deadline:
+                    raise ManagedVisionRuntimeError(
+                        "timed out waiting for another OpenAdapt process to finish "
+                        "preparing the local vision runtime"
+                    ) from exc
+                if not announced:
+                    status(
+                        "OpenAdapt: waiting for another process to finish preparing "
+                        "the local vision runtime..."
+                    )
+                    announced = True
+                time.sleep(LOCK_RETRY_SECONDS)
+        try:
+            yield
+        finally:
+            _unlock(stream)
 
 
 def _activate(path: Path, contract: RuntimeContract) -> None:
@@ -583,52 +652,57 @@ def ensure_managed_vision_runtime(
     contract = load_contract()
     root = runtime_root()
     final = root / contract.build_id / contract.target
-    if _cache_is_valid(final, contract):
-        _activate(final, contract)
-        return final
-
-    status("OpenAdapt: preparing the separately licensed local vision runtime (one-time download).")
     root.mkdir(parents=True, exist_ok=True)
-    staging = Path(tempfile.mkdtemp(prefix=".vision-", dir=root))
-    archives: list[tuple[Wheel, Path]] = []
-    try:
-        for wheel in contract.wheels:
-            status(f"OpenAdapt: downloading {wheel.distribution} {wheel.version}...")
-            archive = staging / f"{wheel.distribution}-{wheel.version}.whl"
-            _download(wheel, archive)
-            archives.append((wheel, archive))
-        payload = staging / "payload"
-        payload.mkdir()
-        status("OpenAdapt: verifying and installing the local vision runtime...")
-        files = _extract_wheels(tuple(archives), payload)
-        files.extend(_install_runtime_notices(payload))
-        files.sort(key=lambda record: str(record["member"]))
-        (payload / MARKER_NAME).write_text(
-            json.dumps(_marker(contract, files), indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        final.parent.mkdir(parents=True, exist_ok=True)
-        if final.exists():
-            quarantine = final.with_name(
-                f"{final.name}.invalid-{os.getpid()}-{secrets.token_hex(4)}"
-            )
-            os.replace(final, quarantine)
-        os.replace(payload, final)
-    except Exception as exc:
-        if isinstance(exc, ManagedVisionRuntimeError):
-            detail = str(exc)
-        else:
-            detail = f"unexpected provisioning failure: {exc}"
-        raise ManagedVisionRuntimeError(
-            f"{detail}. Run the command again to retry; partial downloads were not activated."
-        ) from exc
-    finally:
-        shutil.rmtree(staging, ignore_errors=True)
+    lock_path = root / f".{contract.build_id}-{contract.target}.lock"
+    with _runtime_lock(lock_path, status=status):
+        if _cache_is_valid(final, contract):
+            _activate(final, contract)
+            return final
 
-    if not _cache_is_valid(final, contract):
-        raise ManagedVisionRuntimeError(
-            "managed vision runtime failed its post-install integrity check"
+        status(
+            "OpenAdapt: preparing the separately licensed local vision runtime "
+            "(one-time download)."
         )
-    _activate(final, contract)
-    status("OpenAdapt: local vision runtime is ready.")
-    return final
+        staging = Path(tempfile.mkdtemp(prefix=".vision-", dir=root))
+        archives: list[tuple[Wheel, Path]] = []
+        try:
+            for wheel in contract.wheels:
+                status(f"OpenAdapt: downloading {wheel.distribution} {wheel.version}...")
+                archive = staging / f"{wheel.distribution}-{wheel.version}.whl"
+                _download(wheel, archive)
+                archives.append((wheel, archive))
+            payload = staging / "payload"
+            payload.mkdir()
+            status("OpenAdapt: verifying and installing the local vision runtime...")
+            files = _extract_wheels(tuple(archives), payload)
+            files.extend(_install_runtime_notices(payload))
+            files.sort(key=lambda record: str(record["member"]))
+            (payload / MARKER_NAME).write_text(
+                json.dumps(_marker(contract, files), indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            final.parent.mkdir(parents=True, exist_ok=True)
+            if final.exists():
+                quarantine = final.with_name(
+                    f"{final.name}.invalid-{os.getpid()}-{secrets.token_hex(4)}"
+                )
+                os.replace(final, quarantine)
+            os.replace(payload, final)
+        except Exception as exc:
+            if isinstance(exc, ManagedVisionRuntimeError):
+                detail = str(exc)
+            else:
+                detail = f"unexpected provisioning failure: {exc}"
+            raise ManagedVisionRuntimeError(
+                f"{detail}. Run the command again to retry; partial downloads were not activated."
+            ) from exc
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+
+        if not _cache_is_valid(final, contract):
+            raise ManagedVisionRuntimeError(
+                "managed vision runtime failed its post-install integrity check"
+            )
+        _activate(final, contract)
+        status("OpenAdapt: local vision runtime is ready.")
+        return final

@@ -104,6 +104,16 @@ def main() -> int:
         )
         if "Downloading the Chromium browser" in second_output:
             raise RuntimeError("warm run attempted to download the browser again")
+        if any(
+            marker in second_output
+            for marker in (
+                "preparing the separately licensed local vision runtime",
+                "downloading rapidocr-onnxruntime",
+                "downloading numpy",
+                "downloading opencv-python",
+            )
+        ):
+            raise RuntimeError("warm run attempted to download the vision runtime again")
 
         print(
             json.dumps(
