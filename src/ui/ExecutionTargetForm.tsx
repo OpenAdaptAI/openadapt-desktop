@@ -75,7 +75,11 @@ export function ExecutionTargetForm({
   const rdpMode = rdpModeForTarget(target);
 
   function selectBackend(backend: TargetBackend) {
-    onChange({ backend });
+    onChange(
+      backend === "rdp"
+        ? { backend: "rdp", rdp_host: "" }
+        : { backend },
+    );
   }
 
   function setField<K extends keyof ExecutionTarget>(

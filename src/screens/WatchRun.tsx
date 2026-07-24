@@ -25,16 +25,20 @@ type RunIssue = { message: string; preActionRefusal: boolean };
 
 export function WatchRun({
   workflowId,
+  initialTarget,
   onTeach,
 }: {
   workflowId: string;
+  initialTarget?: ExecutionTarget;
   onTeach: (id: string) => void;
 }) {
   const [report, setReport] = useState<RunReport | null>(null);
   const [running, setRunning] = useState(false);
   const [runtime, setRuntime] = useState<BrowserRuntimeStatus | null>(null);
   const [runIssue, setRunIssue] = useState<RunIssue | null>(null);
-  const [target, setTarget] = useState<ExecutionTarget>({ backend: "web" });
+  const [target, setTarget] = useState<ExecutionTarget>(
+    initialTarget ?? { backend: "web" },
+  );
   const [deploymentConfig, setDeploymentConfig] = useState("");
   const stepsRef = useRef<RunStep[]>([]);
   const fieldPrefix = useId();

@@ -57,6 +57,7 @@ class _ActiveFlowRecording:
     started_monotonic: float
     session: Any
     redactions: tuple[str, ...]
+    task: str = ""
 
 
 class EngineServices:
@@ -271,18 +272,8 @@ class EngineDispatcher:
             return self._status_dict(controller)
         if controller.is_recording:
             return self._status_dict(controller)
-        if sys.platform == "darwin" and not _mac_preflight_input_monitoring():
-            # Starting a capture is the explicit user action where macOS may
-            # present its Input Monitoring consent prompt. Passive permission
-            # checks must remain prompt-free.
-            if not _mac_request_input_monitoring():
-                message = (
-                    "Input Monitoring permission is required to record keyboard "
-                    "and mouse input. Grant it in System Settings, then try again."
-                )
-                self.emit("recording_error", {"error": message})
-                raise PermissionError(message)
-        task = str(params.get("purpose") or params.get("task") or params.get("name") or "")
+
+        target = None
         if params.get("target") is not None:
             try:
                 target, deployment_config = self._execution_target(params)
@@ -298,6 +289,46 @@ class EngineDispatcher:
                 self.emit("recording_error", {"error": message})
                 raise ValueError(message) from None
 
+        needs_native_input = target is None or target.backend != "web"
+        if (
+            sys.platform == "darwin"
+            and needs_native_input
+            and not _mac_preflight_input_monitoring()
+        ):
+            # Starting a capture is the explicit user action where macOS may
+            # present its Input Monitoring consent prompt. Passive permission
+            # checks must remain prompt-free.
+            if not _mac_request_input_monitoring():
+                message = (
+                    "Input Monitoring permission is required to record keyboard "
+                    "and mouse input. Grant it in System Settings, then try again."
+                )
+                self.emit("recording_error", {"error": message})
+                raise PermissionError(message)
+        task = str(params.get("purpose") or params.get("task") or params.get("name") or "")
+        if target is not None:
+            if target.backend == "web":
+                ensure_browser = getattr(
+                    self.services.flow_bridge,
+                    "ensure_browser_runtime",
+                    None,
+                )
+                if ensure_browser is not None:
+                    try:
+                        ensure_browser(
+                            lambda state, detail: self.emit(
+                                "browser_runtime",
+                                {
+                                    "workflow_id": "recording",
+                                    "state": state,
+                                    "detail": detail,
+                                },
+                            )
+                        )
+                    except Exception:
+                        message = "Browser setup failed before recording began"
+                        self.emit("recording_error", {"error": message})
+                        raise RuntimeError(message) from None
             capture_id = uuid.uuid4().hex[:8]
             timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
             capture_dir = self.config.data_dir / "captures" / f"{timestamp}_{capture_id}"
@@ -309,6 +340,27 @@ class EngineDispatcher:
                 prepare_flow_record_request,
                 stage_private_yaml,
             )
+
+            if target.backend == "web" and not target.url:
+                active = _ActiveFlowRecording(
+                    capture_id=capture_id,
+                    capture_dir=capture_dir,
+                    started_at=started_at,
+                    started_monotonic=time.monotonic(),
+                    session=None,
+                    redactions=(),
+                    task=task,
+                )
+                self.services.audit.log("recording_started", capture_id=capture_id)
+                self.emit("recording_started", {"capture_id": capture_id})
+                try:
+                    result = self.services.flow_bridge.demo_record(capture_dir)
+                except Exception:
+                    message = "OpenAdapt Flow could not create the bundled demonstration"
+                    self.emit("recording_error", {"error": message})
+                    self.emit("status_update", self._status_dict(controller))
+                    raise RuntimeError(message) from None
+                return self._finalize_flow_capture(active, result)
 
             prepared = prepare_flow_record_request(
                 target=target,
@@ -342,6 +394,7 @@ class EngineDispatcher:
                 started_monotonic=time.monotonic(),
                 session=session,
                 redactions=prepared.redactions,
+                task=task,
             )
             self.services.audit.log("recording_started", capture_id=capture_id)
             self.emit("recording_started", {"capture_id": capture_id})
@@ -359,56 +412,11 @@ class EngineDispatcher:
         controller = self.services.controller
         active = self._flow_recording
         if active is not None:
-            from engine.private_flow_config import redact_flow_log
-
             try:
                 result = active.session.stop()
             finally:
                 self._flow_recording = None
-            for line in (result.stdout or "").splitlines():
-                self.emit(
-                    "log_line",
-                    {"line": redact_flow_log(line, active.redactions)},
-                )
-            if not result.ok or not (active.capture_dir / "meta.json").is_file():
-                message = (
-                    "OpenAdapt Flow could not finalize a compile-ready recording; "
-                    "the incomplete local capture was retained for inspection"
-                )
-                self.emit("recording_error", {"error": message})
-                self.emit("status_update", self._status_dict(controller))
-                raise RuntimeError(message)
-
-            meta_path = active.capture_dir / "meta.json"
-            try:
-                meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                meta = {}
-            if not isinstance(meta, dict):
-                meta = {}
-            meta.setdefault("capture_id", active.capture_id)
-            meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
-            if self.services.db.get_capture(active.capture_id) is None:
-                self.services.db.insert_capture(
-                    active.capture_id,
-                    str(active.capture_dir),
-                    str(meta.get("started_at") or active.started_at),
-                    task_description=str(meta.get("task_description") or ""),
-                )
-            duration = max(0.0, time.monotonic() - active.started_monotonic)
-            metadata = {
-                "capture_id": active.capture_id,
-                "id": active.capture_id,
-                "duration": duration,
-                "event_count": 0,
-                "size_bytes": sum(
-                    path.stat().st_size for path in active.capture_dir.rglob("*") if path.is_file()
-                ),
-                "path": str(active.capture_dir),
-            }
-            self.emit("recording_stopped", metadata)
-            self.emit("status_update", self._status_dict(controller))
-            return metadata
+            return self._finalize_flow_capture(active, result)
         if not controller.is_recording:
             self.emit("recording_error", {"error": "No recording is active"})
             return {"capture_id": None, "recording": False}
@@ -416,6 +424,59 @@ class EngineDispatcher:
         self.emit("recording_stopped", metadata)
         self.emit("status_update", self._status_dict(controller))
         return {"capture_id": metadata.get("id"), **metadata}
+
+    def _finalize_flow_capture(self, active: _ActiveFlowRecording, result: Any) -> dict:
+        """Register one compile-ready Flow capture and emit its local evidence."""
+
+        from engine.private_flow_config import redact_flow_log
+
+        for line in (result.stdout or "").splitlines():
+            self.emit(
+                "log_line",
+                {"line": redact_flow_log(line, active.redactions)},
+            )
+        if not result.ok or not (active.capture_dir / "meta.json").is_file():
+            message = (
+                "OpenAdapt Flow could not finalize a compile-ready recording; "
+                "the incomplete local capture was retained for inspection"
+            )
+            self.emit("recording_error", {"error": message})
+            self.emit("status_update", self._status_dict(self.services.controller))
+            raise RuntimeError(message)
+
+        meta_path = active.capture_dir / "meta.json"
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            meta = {}
+        if not isinstance(meta, dict):
+            meta = {}
+        meta.setdefault("capture_id", active.capture_id)
+        if active.task:
+            meta["task_description"] = active.task
+        meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+        if self.services.db.get_capture(active.capture_id) is None:
+            self.services.db.insert_capture(
+                active.capture_id,
+                str(active.capture_dir),
+                str(meta.get("started_at") or active.started_at),
+                task_description=str(meta.get("task_description") or ""),
+            )
+        duration = max(0.0, time.monotonic() - active.started_monotonic)
+        metadata = {
+            "capture_id": active.capture_id,
+            "id": active.capture_id,
+            "duration": duration,
+            "event_count": 0,
+            "size_bytes": sum(
+                path.stat().st_size for path in active.capture_dir.rglob("*") if path.is_file()
+            ),
+            "path": str(active.capture_dir),
+            "recording": False,
+        }
+        self.emit("recording_stopped", metadata)
+        self.emit("status_update", self._status_dict(self.services.controller))
+        return metadata
 
     def pause_recording(self, **params: Any) -> dict:
         """Pause is not supported (stop/start instead); report current status."""

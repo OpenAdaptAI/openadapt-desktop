@@ -6,6 +6,7 @@ import os
 import stat
 from pathlib import Path
 
+import pytest
 import yaml
 
 from engine.private_flow_config import (
@@ -172,6 +173,45 @@ def test_selected_network_host_clears_stale_local_window_transport(tmp_path: Pat
 
     assert backend["rdp_host"] == "fresh.example"
     assert not ({"rdp_window", "rdp_window_title"} & backend.keys())
+
+
+def test_explicit_empty_network_mode_clears_stale_local_window_and_refuses(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "deployment.yaml"
+    source.write_text(
+        "backend:\n"
+        "  kind: rdp\n"
+        "  rdp_window: Microsoft Remote Desktop\n"
+        "  rdp_window_title: Clinical Workspace\n"
+    )
+    target = ExecutionTarget.model_validate({"backend": "rdp", "rdp_host": ""})
+
+    with pytest.raises(
+        PrivateFlowConfigError,
+        match="requires a network host or local client window",
+    ):
+        prepare_flow_config(source, target)
+
+
+def test_explicit_empty_window_mode_clears_stale_network_and_refuses(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "deployment.yaml"
+    source.write_text(
+        "backend:\n"
+        "  kind: rdp\n"
+        "  rdp_host: stale.example\n"
+        "  rdp_username: stale-user\n"
+        "  rdp_password: stale-password\n"
+    )
+    target = ExecutionTarget.model_validate({"backend": "rdp", "rdp_window": ""})
+
+    with pytest.raises(
+        PrivateFlowConfigError,
+        match="requires a network host or local client window",
+    ):
+        prepare_flow_config(source, target)
 
 
 def test_prepare_and_stage_use_one_immutable_source_snapshot(tmp_path: Path) -> None:

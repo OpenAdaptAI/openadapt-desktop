@@ -126,10 +126,18 @@ def _merged_config(
     backend.update(target.deployment_overrides())
 
     if target.backend == "rdp":
-        if target.rdp_host:
+        explicit = target.model_fields_set
+        selected_network = "rdp_host" in explicit
+        selected_window = "rdp_window" in explicit
+        if selected_network and selected_window:
+            raise PrivateFlowConfigError(
+                "Selected RDP target declares both network-host and local-window "
+                "transports; choose exactly one"
+            )
+        if selected_network:
             for key in _RDP_WINDOW_FIELDS:
                 backend.pop(key, None)
-        elif target.rdp_window:
+        elif selected_window:
             for key in _RDP_NETWORK_FIELDS:
                 backend.pop(key, None)
         elif backend.get("rdp_host") and (
@@ -138,6 +146,10 @@ def _merged_config(
             raise PrivateFlowConfigError(
                 "Selected RDP deployment contains both network-host and local-window "
                 "transports; choose exactly one"
+            )
+        if not backend.get("rdp_host") and not backend.get("rdp_window"):
+            raise PrivateFlowConfigError(
+                "Selected RDP deployment requires a network host or local client window"
             )
     elif target.backend == "citrix":
         for key in _RDP_NETWORK_FIELDS:

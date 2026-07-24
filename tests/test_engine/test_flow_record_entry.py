@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import io
 import sys
+import threading
 from pathlib import Path
 from types import ModuleType
 
@@ -69,3 +71,28 @@ def test_private_request_is_deleted_and_exact_target_reaches_flow(
             "MRN 12345",
         ]
     ]
+
+
+def test_parent_pipe_eof_interrupts_capture_exactly_once(monkeypatch) -> None:
+    interrupts: list[bool] = []
+    monkeypatch.setattr(
+        flow_record_entry._thread,
+        "interrupt_main",
+        lambda: interrupts.append(True),
+    )
+    triggered = threading.Event()
+    lock = threading.Lock()
+
+    flow_record_entry._watch_parent_stdin(
+        io.BytesIO(b""),
+        triggered,
+        lock,
+    )
+    flow_record_entry._watch_parent_stdin(
+        io.BytesIO(b""),
+        triggered,
+        lock,
+    )
+
+    assert triggered.is_set()
+    assert interrupts == [True]

@@ -54,6 +54,33 @@ def test_rdp_transport_control_uses_native_radio_semantics() -> None:
     assert 'type="radio"' in form
     assert "checked={rdpMode === mode}" in form
     assert "switchRdpTransport(target, mode)" in form
+    assert '{ backend: "rdp", rdp_host: "" }' in form
+
+
+def test_record_target_reaches_immediate_execution_without_persistent_storage() -> None:
+    app = (ROOT / "src/App.tsx").read_text()
+    record = (ROOT / "src/screens/RecordReview.tsx").read_text()
+    watch = (ROOT / "src/screens/WatchRun.tsx").read_text()
+
+    assert "onCompiled: (id: string, target: ExecutionTarget) => void" in record
+    assert "onCompiled(r.workflow_id, target)" in record
+    assert "initialTarget={route.target}" in app
+    assert 'initialTarget ?? { backend: "web" }' in watch
+    for persistent_store in ("localStorage", "sessionStorage", "indexedDB"):
+        assert persistent_store not in app
+        assert persistent_store not in record
+        assert persistent_store not in watch
+
+
+def test_record_lifecycle_uses_workflow_command_timeout() -> None:
+    sidecar = (ROOT / "src-tauri/src/sidecar.rs").read_text()
+    workflow_match = sidecar.split("let timeout = match cmd {", 1)[1].split(
+        "_ => COMMAND_TIMEOUT",
+        1,
+    )[0]
+
+    assert '"start_recording"' in workflow_match
+    assert '"stop_recording"' in workflow_match
 
 
 def test_readme_does_not_publish_hard_coded_package_version_claims() -> None:

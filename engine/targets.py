@@ -204,6 +204,16 @@ class ExecutionTarget(BaseModel):
         """
 
         self.validate_record_required()
+        if self.backend == "web" and not self.url:
+            # Flow's interactive web recorder deliberately requires an exact
+            # URL. Its separate demo-record command is the canonical bundled
+            # MockMed quickstart, so keep Desktop's blank-URL path useful
+            # without inventing an implicit public URL.
+            return [
+                "demo-record",
+                "--out",
+                str(out_dir),
+            ]
         args = [
             "record",
             "--out",

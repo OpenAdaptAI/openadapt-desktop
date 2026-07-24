@@ -287,6 +287,19 @@ class FlowBridge:
             args += ["--url", url]
         return self._run(args, out_dir=out_dir, timeout=timeout)
 
+    def demo_record(
+        self,
+        out_dir: Path,
+        timeout: float | None = None,
+    ) -> FlowResult:
+        """Generate Flow's canonical bundled demonstration recording."""
+
+        return self._run(
+            ["demo-record", "--out", str(out_dir)],
+            out_dir=out_dir,
+            timeout=timeout,
+        )
+
     def start_record(
         self,
         out_dir: Path,
@@ -299,7 +312,12 @@ class FlowBridge:
         """Start canonical Flow authoring with only a private path in argv."""
 
         if _is_frozen():
-            command = [sys.executable, EMBEDDED_FLOW_RECORD_MODE, str(request)]
+            command = [
+                sys.executable,
+                EMBEDDED_FLOW_RECORD_MODE,
+                str(request),
+                "--watch-parent-stdin",
+            ]
         else:
             if find_spec("openadapt_flow") is None:
                 raise FlowNotAvailableError(
@@ -310,10 +328,12 @@ class FlowBridge:
                 "-m",
                 "engine.flow_record_entry",
                 str(request),
+                "--watch-parent-stdin",
             ]
         logger.debug("flow record: {cmd}", cmd=_safe_command_for_log(command))
         process = self._popen(
             command,
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,

@@ -144,6 +144,133 @@ class TestRecordingCommands:
 
         assert disp.dispatch("start_recording", {})["recording"] is True
 
+    def test_mac_web_authoring_skips_input_monitoring_and_prepares_browser(
+        self, deps, monkeypatch
+    ) -> None:
+        disp, _db, events = deps
+        monkeypatch.setattr("engine.dispatch.sys.platform", "darwin")
+        monkeypatch.setattr(
+            "engine.dispatch._mac_preflight_input_monitoring",
+            lambda: pytest.fail("web authoring must not inspect Input Monitoring"),
+        )
+        monkeypatch.setattr(
+            "engine.dispatch._mac_request_input_monitoring",
+            lambda: pytest.fail("web authoring must not request Input Monitoring"),
+        )
+        calls: list[str] = []
+
+        class Session:
+            pass
+
+        class Bridge:
+            def ensure_browser_runtime(self, progress) -> None:
+                calls.append("ensure")
+                progress("checking", "Checking")
+                progress("ready", "Ready")
+
+            def start_record(self, *_args, **_kwargs):
+                calls.append("start")
+                return Session()
+
+        disp.services._flow_bridge = Bridge()
+        result = disp.dispatch(
+            "start_recording",
+            {
+                "target": {
+                    "backend": "web",
+                    "url": "https://app.example",
+                }
+            },
+        )
+
+        assert result["recording"] is True
+        assert calls == ["ensure", "start"]
+        states = [data["state"] for event, data in events if event == "browser_runtime"]
+        assert states == ["checking", "ready"]
+
+    def test_blank_web_target_generates_and_registers_bundled_demo(self, deps, monkeypatch) -> None:
+        disp, db, events = deps
+        monkeypatch.setattr("engine.dispatch.sys.platform", "linux")
+        calls: list[str] = []
+
+        class Bridge:
+            def ensure_browser_runtime(self, progress) -> None:
+                calls.append("ensure")
+                progress("ready", "Ready")
+
+            def demo_record(self, out_dir):
+                from engine.flow_bridge import FlowResult
+
+                calls.append("demo")
+                out_dir.mkdir(parents=True)
+                (out_dir / "meta.json").write_text(
+                    json.dumps(
+                        {
+                            "started_at": "2026-07-24T00:00:00+00:00",
+                            "task_description": "Bundled demo",
+                        }
+                    )
+                )
+                return FlowResult(
+                    ok=True,
+                    returncode=0,
+                    stdout="Recording written",
+                    out_dir=out_dir,
+                )
+
+            def start_record(self, *_args, **_kwargs):
+                raise AssertionError("blank web target uses demo-record directly")
+
+        disp.services._flow_bridge = Bridge()
+
+        result = disp.dispatch(
+            "start_recording",
+            {
+                "target": {"backend": "web"},
+                "purpose": "My first workflow",
+            },
+        )
+
+        assert calls == ["ensure", "demo"]
+        assert result["recording"] is False
+        assert db.get_capture(result["capture_id"])["task_description"] == ("My first workflow")
+        assert [event for event, _data in events if event.startswith("recording_")] == [
+            "recording_started",
+            "recording_stopped",
+        ]
+
+    def test_browser_setup_failure_refuses_before_record_process(self, deps, monkeypatch) -> None:
+        disp, _db, events = deps
+        monkeypatch.setattr("engine.dispatch.sys.platform", "linux")
+
+        class Bridge:
+            start_called = False
+
+            def ensure_browser_runtime(self, _progress) -> None:
+                raise RuntimeError("download failed")
+
+            def start_record(self, *_args, **_kwargs):
+                self.start_called = True
+                raise AssertionError("record process must not start")
+
+        bridge = Bridge()
+        disp.services._flow_bridge = bridge
+
+        with pytest.raises(
+            RuntimeError,
+            match="Browser setup failed before recording began",
+        ):
+            disp.dispatch(
+                "start_recording",
+                {"target": {"backend": "web"}},
+            )
+
+        assert bridge.start_called is False
+        assert (
+            "recording_error",
+            {"error": "Browser setup failed before recording began"},
+        ) in events
+
     @pytest.mark.parametrize(
         "target",
         [

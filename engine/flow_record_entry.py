@@ -19,6 +19,7 @@ import threading
 import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import BinaryIO
 
 import yaml
 
@@ -40,31 +41,84 @@ def _request(path: Path) -> tuple[ExecutionTarget, Path, str, Path, Path]:
     return target, out_dir, task, stop_path, ready_path
 
 
-def _watch_for_stop(stop_path: Path) -> None:
+def _interrupt_once(triggered: threading.Event, lock: threading.Lock) -> None:
+    """Deliver at most one graceful KeyboardInterrupt across all stop sources."""
+
+    with lock:
+        if triggered.is_set():
+            return
+        triggered.set()
+        _thread.interrupt_main()
+
+
+def _watch_for_stop(
+    stop_path: Path,
+    triggered: threading.Event,
+    lock: threading.Lock,
+) -> None:
     while not stop_path.exists():
         time.sleep(0.1)
     stop_path.unlink(missing_ok=True)
-    _thread.interrupt_main()
+    _interrupt_once(triggered, lock)
+
+
+def _watch_parent_stdin(
+    stream: BinaryIO,
+    triggered: threading.Event,
+    lock: threading.Lock,
+) -> None:
+    """Stop capture when the Desktop sidecar process disappears.
+
+    The parent owns the write end of this dedicated pipe and never writes to
+    it. Normal collection closes it, and an abrupt sidecar kill closes it at
+    the operating-system boundary. Either case yields EOF here and routes
+    through Flow's normal KeyboardInterrupt finalization instead of leaving an
+    orphan screen/input recorder running.
+    """
+
+    try:
+        stream.read(1)
+    except (OSError, ValueError):
+        # A locally closed stream is the same parent-liveness signal.
+        pass
+    _interrupt_once(triggered, lock)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Read one private request and execute Flow's own record handler."""
 
     args = list(argv if argv is not None else sys.argv[1:])
+    watch_parent = False
+    if args[-1:] == ["--watch-parent-stdin"]:
+        watch_parent = True
+        args.pop()
     if len(args) != 1:
-        raise SystemExit("private Flow record helper expects one request path")
+        raise SystemExit(
+            "private Flow record helper expects one request path and an "
+            "optional --watch-parent-stdin"
+        )
     target, out_dir, task, stop_path, ready_path = _request(Path(args[0]))
     flow_args = target.record_args(out_dir, task=task)
 
     from openadapt_flow.__main__ import main as flow_main
 
+    triggered = threading.Event()
+    interrupt_lock = threading.Lock()
     monitor = threading.Thread(
         target=_watch_for_stop,
-        args=(stop_path,),
+        args=(stop_path, triggered, interrupt_lock),
         name="flow-record-stop",
         daemon=True,
     )
     monitor.start()
+    if watch_parent:
+        parent_monitor = threading.Thread(
+            target=_watch_parent_stdin,
+            args=(sys.stdin.buffer, triggered, interrupt_lock),
+            name="flow-record-parent",
+            daemon=True,
+        )
+        parent_monitor.start()
     ready_path.touch(mode=0o600, exist_ok=False)
     try:
         return int(flow_main(flow_args))

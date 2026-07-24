@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -63,6 +64,27 @@ class TestFlowBridgeInvocation:
         # openadapt-flow compile requires --name; default it to the bundle name.
         assert "--name" in command
         assert command[command.index("--name") + 1] == "bundle"
+
+    def test_demo_record_uses_canonical_bundled_flow_command(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(
+            "engine.flow_bridge.shutil.which",
+            lambda _: "/usr/bin/openadapt-flow",
+        )
+        calls: list = []
+        bridge = FlowBridge(runner=_runner(calls, stdout="ok"))
+
+        result = bridge.demo_record(tmp_path / "recording")
+
+        assert result.ok
+        command, _env = calls[0]
+        assert command == [
+            "/usr/bin/openadapt-flow",
+            "demo-record",
+            "--out",
+            str(tmp_path / "recording"),
+        ]
 
     def test_run_builds_args(self, tmp_path: Path, monkeypatch) -> None:
         monkeypatch.setattr("engine.flow_bridge.shutil.which", lambda _: "/usr/bin/openadapt-flow")
@@ -164,7 +186,9 @@ class TestFlowBridgeInvocation:
             "-m",
             "engine.flow_record_entry",
             str(request),
+            "--watch-parent-stdin",
         ]
+        assert _kwargs["stdin"] is subprocess.PIPE
         assert "Jane Doe" not in repr(command)
         assert "rdp.internal" not in repr(command)
         assert session.out_dir == tmp_path / "recording"
@@ -214,6 +238,16 @@ class TestFlowBridgeInvocation:
         [
             (
                 ExecutionTarget(
+                    backend="windows",
+                    agent_url="http://localhost:5001",
+                ),
+                [
+                    "--agent-url",
+                    "http://localhost:5001",
+                ],
+            ),
+            (
+                ExecutionTarget(
                     backend="macos",
                     macos_app="Clinical Notes",
                     macos_window_title="Patient Jane Doe",
@@ -227,6 +261,34 @@ class TestFlowBridgeInvocation:
                     "Clinical Notes",
                     "--window-title",
                     "Patient Jane Doe",
+                ],
+            ),
+            (
+                ExecutionTarget(
+                    backend="linux",
+                    linux_app="gedit",
+                    linux_window_title="Clinical Notes",
+                    linux_allow_physical_input=True,
+                ),
+                [
+                    "--linux-app",
+                    "gedit",
+                    "--linux-window-title",
+                    "Clinical Notes",
+                    "--linux-allow-physical-input",
+                ],
+            ),
+            (
+                ExecutionTarget(
+                    backend="rdp",
+                    rdp_host="10.0.0.5",
+                    rdp_readiness_text="Patient Search",
+                ),
+                [
+                    "--rdp-host",
+                    "10.0.0.5",
+                    "--rdp-readiness-text",
+                    "Patient Search",
                 ],
             ),
             (
@@ -284,11 +346,25 @@ class TestFlowBridgeInvocation:
 
     def test_browser_authoring_preserves_flow_bundled_demo_default(self, tmp_path: Path) -> None:
         assert ExecutionTarget(backend="web").record_args(tmp_path / "recording") == [
+            "demo-record",
+            "--out",
+            str(tmp_path / "recording"),
+        ]
+
+    def test_browser_authoring_with_url_uses_exact_interactive_record_args(
+        self, tmp_path: Path
+    ) -> None:
+        assert ExecutionTarget(
+            backend="web",
+            url="https://app.example",
+        ).record_args(tmp_path / "recording") == [
             "record",
             "--out",
             str(tmp_path / "recording"),
             "--backend",
             "web",
+            "--url",
+            "https://app.example",
         ]
 
     def test_secret_flag_values_are_redacted_from_debug_command(self) -> None:
