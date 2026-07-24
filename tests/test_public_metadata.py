@@ -58,9 +58,9 @@ def test_rdp_transport_control_uses_native_radio_semantics() -> None:
 
 
 def test_record_target_reaches_immediate_execution_without_persistent_storage() -> None:
-    app = (ROOT / "src/App.tsx").read_text()
-    record = (ROOT / "src/screens/RecordReview.tsx").read_text()
-    watch = (ROOT / "src/screens/WatchRun.tsx").read_text()
+    app = (ROOT / "src/App.tsx").read_text(encoding="utf-8")
+    record = (ROOT / "src/screens/RecordReview.tsx").read_text(encoding="utf-8")
+    watch = (ROOT / "src/screens/WatchRun.tsx").read_text(encoding="utf-8")
 
     assert "onCompiled: (id: string, target: ExecutionTarget) => void" in record
     assert "onCompiled(r.workflow_id, target)" in record
