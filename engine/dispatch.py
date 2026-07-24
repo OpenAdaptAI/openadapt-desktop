@@ -1019,6 +1019,20 @@ class EngineDispatcher:
         resolved = bundle.resolve()
         if not resolved.is_relative_to(root):
             raise ValueError("Workflow bundle is outside the local Desktop bundle store")
+        # A symlinked bundle (or parent below the bundle-store root) can alias a
+        # different workflow while still resolving inside ``root``.  Reject the
+        # unresolved path itself before returning the canonical directory.
+        cursor = bundle.absolute()
+        while cursor.resolve() != root:
+            if cursor == cursor.parent or not cursor.resolve().is_relative_to(root):
+                raise ValueError(
+                    "Workflow bundle is outside the local Desktop bundle store"
+                )
+            if cursor.is_symlink():
+                raise ValueError(
+                    "Workflow bundle contains a symbolic link and cannot be edited safely"
+                )
+            cursor = cursor.parent
         if not resolved.is_dir():
             raise ValueError("Workflow bundle is unavailable")
         if any(path.is_symlink() for path in resolved.rglob("*")):
@@ -1061,10 +1075,13 @@ class EngineDispatcher:
                 risk=str(params.get("risk") or ""),
                 policy_source=policy,
             )
-            still_certified = bool((result.get("provenance") or {}).get("certified"))
             self.services.db.update_bundle(
                 workflow_id,
-                status="certified" if still_certified else "qualification_pending",
+                status=(
+                    "certified"
+                    if result.get("certification_current")
+                    else "qualification_pending"
+                ),
             )
             return result
         except Exception as exc:
@@ -1084,10 +1101,13 @@ class EngineDispatcher:
                 workflow_id=workflow_id,
                 policy_source=policy,
             )
-            passed = bool((result.get("certification_attempt") or {}).get("passed"))
             self.services.db.update_bundle(
                 workflow_id,
-                status="certified" if passed else "qualification_failed",
+                status=(
+                    "certified"
+                    if result.get("certification_current")
+                    else "qualification_failed"
+                ),
             )
             return result
         except Exception as exc:

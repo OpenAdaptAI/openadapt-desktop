@@ -20,11 +20,7 @@ function certificationState(project: QualificationProject): {
   label: string;
   tone: "ok" | "warn" | "crit";
 } {
-  if (
-    project.provenance.certified &&
-    project.provenance.policy_name === project.policy &&
-    project.certification.passed
-  ) {
+  if (project.certification_current) {
     return { label: "certified", tone: "ok" };
   }
   if (project.certification.passed) {

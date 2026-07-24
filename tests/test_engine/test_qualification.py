@@ -9,6 +9,9 @@ pytest.importorskip("openadapt_flow")
 from openadapt_flow.ir import ActionKind, Step, Workflow, lift_to_program  # noqa: E402
 from openadapt_flow.traversal import iter_workflow_steps  # noqa: E402
 
+from engine.config import EngineConfig
+from engine.db import IndexDB
+from engine.dispatch import EngineDispatcher, EngineServices
 from engine.qualification import (
     QualificationError,
     certify_bundle,
@@ -111,3 +114,48 @@ def test_successful_certification_persists_exact_provenance(tmp_path: Path) -> N
     assert result["graph"]["bundle"]["provenance"]["content_digest"] == (
         persisted.manifest.content_digest
     )
+
+
+def test_sealed_certification_must_match_live_policy(tmp_path: Path) -> None:
+    bundle = _bundle(
+        tmp_path / "bundle",
+        Step(id="settle", intent="Wait for settled state", action=ActionKind.WAIT),
+    )
+    workflow = Workflow.load(bundle)
+    workflow.stamp_certification("permissive", True)
+    workflow.save(bundle)
+
+    result = inspect_bundle(
+        bundle,
+        workflow_id="wf-1",
+        policy_source="clinical-write",
+    )
+
+    assert result["certification"]["passed"] is True
+    assert result["provenance"]["certified"] is True
+    assert result["certification_current"] is False
+
+
+def test_symlinked_bundle_alias_is_not_writable(tmp_path: Path) -> None:
+    config = EngineConfig(data_dir=tmp_path / ".openadapt", log_level="WARNING")
+    bundle_root = config.data_dir / "bundles"
+    target = _bundle(
+        bundle_root / "target",
+        Step(id="settle", intent="Wait for settled state", action=ActionKind.WAIT),
+    )
+    alias = bundle_root / "alias"
+    alias.symlink_to(target, target_is_directory=True)
+    db = IndexDB(tmp_path / "index.db")
+    db.initialize()
+    db.insert_bundle("wf-1", str(alias))
+    dispatcher = EngineDispatcher(config, services=EngineServices(config, db=db))
+    try:
+        result = dispatcher.get_qualification(
+            workflow_id="wf-1",
+            policy="clinical-write",
+        )
+    finally:
+        db.close()
+
+    assert result["ok"] is False
+    assert "symbolic link" in result["error"]

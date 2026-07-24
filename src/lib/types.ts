@@ -110,6 +110,7 @@ export interface QualificationProject {
   ok: true;
   workflow_id: string;
   policy: string;
+  certification_current: boolean;
   graph: {
     bundle: {
       name: string;

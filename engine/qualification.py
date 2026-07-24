@@ -8,6 +8,7 @@ those mechanisms so an operator does not have to edit ``workflow.json``.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -77,6 +78,31 @@ def _reset_certification(workflow) -> None:
     provenance.expires_at = None
 
 
+def _certification_is_current(provenance, *, policy_name: str, policy_passed: bool) -> bool:
+    """Return whether the sealed certification matches the live policy result."""
+
+    if (
+        provenance is None
+        or not provenance.certified
+        or provenance.certification_status != "certified"
+        or provenance.policy_name != policy_name
+        or not policy_passed
+    ):
+        return False
+    if not provenance.expires_at:
+        return True
+    try:
+        expiry_text = provenance.expires_at
+        if expiry_text.endswith("Z"):
+            expiry_text = f"{expiry_text[:-1]}+00:00"
+        expiry = datetime.fromisoformat(expiry_text)
+        if expiry.tzinfo is None:
+            return False
+        return expiry.astimezone(timezone.utc) > datetime.now(timezone.utc)
+    except (TypeError, ValueError):
+        return False
+
+
 def _actions_for_graph_ref(workflow, action_ref: str) -> list:
     """Resolve the exact action-node id emitted by Flow's graph projection."""
 
@@ -144,6 +170,11 @@ def inspect_bundle(
         "ok": True,
         "workflow_id": workflow_id,
         "policy": policy.name,
+        "certification_current": _certification_is_current(
+            provenance,
+            policy_name=policy.name,
+            policy_passed=certification.passed,
+        ),
         "graph": graph.model_dump(mode="json"),
         "lint": lint.model_dump(mode="json"),
         "certification": certification.model_dump(mode="json"),
