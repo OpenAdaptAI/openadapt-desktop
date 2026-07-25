@@ -99,6 +99,36 @@ def test_risk_change_invalidates_certification_and_reseals(tmp_path: Path) -> No
     )
 
 
+def test_risk_change_keeps_bound_effects_on_the_reviewed_classification(
+    tmp_path: Path,
+) -> None:
+    step = Step(
+        id="save",
+        intent="Save encounter",
+        action=ActionKind.CLICK,
+        risk="reversible",
+        effects=[
+            Effect(
+                kind=EffectKind.RECORD_WRITTEN,
+                match={"patient_id": "P-42"},
+                risk="reversible",
+            )
+        ],
+    )
+    bundle = _bundle(tmp_path / "bundle", step)
+
+    set_action_risk(
+        bundle,
+        workflow_id="wf-risk",
+        step_id="save",
+        risk="irreversible",
+    )
+
+    persisted = next(iter_workflow_steps(Workflow.load(bundle)))
+    assert persisted.risk == "irreversible"
+    assert [effect.risk for effect in persisted.effects] == ["irreversible"]
+
+
 def test_successful_certification_persists_exact_provenance(tmp_path: Path) -> None:
     bundle = _bundle(
         tmp_path / "bundle",

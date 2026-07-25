@@ -330,8 +330,14 @@ def set_action_risk(
         raise QualificationError(
             f"Action {step_id!r} is {detail}; no qualification change was written."
         )
-    if matches[0].risk != risk:
-        matches[0].risk = risk
+    step = matches[0]
+    if step.risk != risk or any(effect.risk != risk for effect in step.effects):
+        step.risk = risk
+        # Flow's effect runtime consults Effect.risk when deciding whether a
+        # refuted write enters governed reconciliation. Keep the action and
+        # every bound effect on the same operator-reviewed classification.
+        for effect in step.effects:
+            effect.risk = risk
         _reset_certification(workflow)
         _save(workflow, bundle_dir)
     return inspect_bundle(
