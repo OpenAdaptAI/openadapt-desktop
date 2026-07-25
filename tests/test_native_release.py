@@ -150,6 +150,13 @@ def test_security_workflows_cover_all_languages_and_pin_every_dependency() -> No
     assert all(re.fullmatch(r"[0-9a-f]{40}", revision) for revision in uses)
     for language in ("python", "javascript-typescript", "rust"):
         assert f'"{language}"' in (workflow_dir / "codeql.yml").read_text()
+    dependency_audit = (workflow_dir / "dependency-review.yml").read_text()
+    assert "uv export --quiet --locked --all-extras --no-emit-project" in dependency_audit
+    assert "pip-audit==2.10.1" in dependency_audit
+    assert "npm audit --audit-level=high --package-lock-only" in dependency_audit
+    assert "cargo install cargo-audit --version 0.22.1 --locked" in dependency_audit
+    assert "cargo audit --file src-tauri/Cargo.lock" in dependency_audit
+    assert "schedule:" in dependency_audit
     secret_scan = (workflow_dir / "secret-scan.yml").read_text()
     assert "fetch-depth: 0" in secret_scan
     assert "GITLEAKS_VERSION: 8.30.1" in secret_scan
