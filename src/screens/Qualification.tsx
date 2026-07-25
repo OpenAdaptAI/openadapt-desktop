@@ -18,6 +18,50 @@ function identityLabel(node: QualificationNode): string {
   return node.identity.reason || "not armed";
 }
 
+function actionTitle(node: QualificationNode): string {
+  if (/^(click|double click) at \(\d+,\s*\d+\)$/i.test(node.title.trim())) {
+    return node.action === "double_click"
+      ? "Double-click recorded target"
+      : "Click recorded target";
+  }
+  return node.title;
+}
+
+function TargetEvidence({ node }: { node: QualificationNode }) {
+  const rungs = node.resolution?.rungs.filter((rung) => rung.present) || [];
+  if (!rungs.length) {
+    return node.kind === "action" ? (
+      <span className="page-sub">No durable target evidence</span>
+    ) : (
+      <span className="page-sub">Not applicable</span>
+    );
+  }
+  return (
+    <div>
+      <div className="row">
+        {rungs.map((rung) => (
+          <Pill
+            key={`${node.id}-resolution-${rung.name}`}
+            tone={rung.name === node.resolution?.top_rung ? "ok" : "neutral"}
+          >
+            {rung.label}
+          </Pill>
+        ))}
+      </div>
+      {rungs
+        .filter((rung) => rung.detail)
+        .map((rung) => (
+          <div
+            className="page-sub"
+            key={`${node.id}-resolution-detail-${rung.name}`}
+          >
+            {rung.label}: <span className="mono">{rung.detail}</span>
+          </div>
+        ))}
+    </div>
+  );
+}
+
 function certificationState(project: QualificationProject): {
   label: string;
   tone: "ok" | "warn" | "crit";
@@ -491,6 +535,7 @@ export function Qualification({
                   <th className="num">#</th>
                   <th>Node</th>
                   <th>Type</th>
+                  <th>Target evidence</th>
                   <th>Next</th>
                 </tr>
               </thead>
@@ -499,7 +544,7 @@ export function Qualification({
                   <tr key={`graph-${node.id}`}>
                     <td className="num">{node.index + 1}</td>
                     <td>
-                      <strong>{node.title}</strong>
+                      <strong>{actionTitle(node)}</strong>
                       <div className="page-sub mono">{node.id}</div>
                       {node.badges.length > 0 && (
                         <div className="row" style={{ marginTop: "var(--space-1)" }}>
@@ -515,6 +560,9 @@ export function Qualification({
                       <Pill tone={node.kind === "terminal" ? "ok" : "neutral"}>
                         {node.kind}
                       </Pill>
+                    </td>
+                    <td>
+                      <TargetEvidence node={node} />
                     </td>
                     <td>
                       {(edgesBySource.get(node.id) || []).map((edge, index) => (
@@ -552,15 +600,16 @@ export function Qualification({
                 {actions.map((node) => (
                   <tr key={node.id}>
                     <td>
-                      <strong>{node.title}</strong>
+                      <strong>{actionTitle(node)}</strong>
                       <div className="page-sub mono">
                         {node.action} · {node.id}
                       </div>
+                      <TargetEvidence node={node} />
                     </td>
                     <td>
                       <select
                         className="input"
-                        aria-label={`Risk for ${node.title}`}
+                        aria-label={`Risk for ${actionTitle(node)}`}
                         value={
                           project.controls.actions[node.id]?.classification
                             ?.classification === "unknown"
@@ -643,7 +692,7 @@ export function Qualification({
                       ?.classification === "irreversible"
                       ? "Consequential: "
                       : ""}
-                    {action.title}
+                    {actionTitle(action)}
                   </option>
                 ))}
               </select>
@@ -927,6 +976,10 @@ export function Qualification({
                     {project.project.environment.runtime_version}
                   </span>
                 </div>
+              </div>
+              <div className="page-sub mono" style={{ marginTop: "var(--space-3)" }}>
+                environment contract SHA-256{" "}
+                {project.project.environment.environment_digest}
               </div>
               <table>
                 <thead>

@@ -146,6 +146,15 @@ export interface QualificationNode {
   kind: string;
   title: string;
   action?: string | null;
+  resolution?: {
+    top_rung?: string | null;
+    rungs: {
+      name: string;
+      label: string;
+      present: boolean;
+      detail: string;
+    }[];
+  } | null;
   risk?: QualificationExecutableRisk | null;
   identity?: QualificationIdentity | null;
   effects: QualificationEffect[];

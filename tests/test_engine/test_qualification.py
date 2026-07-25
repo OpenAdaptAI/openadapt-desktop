@@ -10,8 +10,10 @@ pytest.importorskip("openadapt_flow.qualification")
 from openadapt_flow.ir import (  # noqa: E402
     ActionKind,
     Anchor,
+    Landmark,
     ParamSpec,
     Step,
+    StructuralLocator,
     Workflow,
 )
 from openadapt_flow.runtime.effects.effect import Effect, EffectKind  # noqa: E402
@@ -110,6 +112,49 @@ def test_environment_identifier_digest_is_reproducible_but_explicitly_operator_d
         required_capabilities=[],
     )
     assert result["project"]["environment"]["environment_digest"] == exact_measured_digest
+
+
+def test_inspection_exposes_durable_target_evidence_without_flattening_to_coordinates(
+    tmp_path: Path,
+) -> None:
+    bundle = _bundle(
+        tmp_path / "bundle",
+        Step(
+            id="submit",
+            intent="click at (815, 369)",
+            action=ActionKind.CLICK,
+            anchor=Anchor(
+                template="submit.png",
+                region=(800, 350, 30, 38),
+                click_point=(815, 369),
+                structural=StructuralLocator(
+                    automation_id="submit-claim",
+                    role="button",
+                    name="Submit",
+                ),
+                ocr_text="Submit",
+                landmarks=[
+                    Landmark(
+                        relation="above",
+                        ocr_text="Eligibility",
+                        distance_px=120,
+                    )
+                ],
+            ),
+        ),
+    )
+
+    node = inspect_bundle(bundle, workflow_id="wf-1")["graph"]["nodes"][0]
+    assert node["resolution"]["top_rung"] == "structural"
+    evidence = {
+        rung["name"]: (rung["present"], rung["detail"])
+        for rung in node["resolution"]["rungs"]
+    }
+    assert evidence["structural"] == (True, "submit-claim")
+    assert evidence["template"] == (True, "submit.png")
+    assert evidence["ocr"] == (True, "Submit")
+    assert evidence["landmarks"] == (True, "1 landmark(s)")
+    assert "click_point" not in node["resolution"]
 
 
 def test_encrypted_bundle_inspect_mutate_and_reseal_stays_ciphertext_only(
