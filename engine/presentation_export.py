@@ -16,7 +16,7 @@ import uuid
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, Literal
 
 from openadapt_types import (
     ControlOverlayFrameV2,
@@ -29,6 +29,7 @@ TIMELINE_SCHEMA = "openadapt.control-overlay-timeline/v2"
 MAX_TIMELINE_BYTES = 8 * 1024 * 1024
 MAX_FRAME_PIXELS = 33_177_600  # 8K UHD
 MAX_MEDIA_FRAMES = 2_000_000
+PlacementCorner = Literal["bottom-left", "bottom-right"]
 
 
 @dataclass(frozen=True)
@@ -246,8 +247,8 @@ def choose_capsule_bounds(
     panel_height: int,
     margin: int,
     protected_regions: tuple[tuple[int, int, int, int], ...] = (),
-) -> tuple[tuple[int, int, int, int], str]:
-    """Choose the least-conflicting bottom corner, preferring bottom-right."""
+) -> tuple[tuple[int, int, int, int], PlacementCorner]:
+    """Choose the least-conflicting bottom corner, preferring bottom-left."""
 
     bottom = max(panel_height, height - margin)
     top = max(0, bottom - panel_height)
@@ -267,11 +268,50 @@ def choose_capsule_bounds(
     def collision_area(bounds: tuple[int, int, int, int]) -> int:
         return sum(_intersection_area(bounds, region) for region in protected_regions)
 
-    right_collision = collision_area(right_bounds)
     left_collision = collision_area(left_bounds)
-    if right_collision > 0 and left_collision < right_collision:
-        return left_bounds, "bottom-left"
-    return right_bounds, "bottom-right"
+    right_collision = collision_area(right_bounds)
+    if left_collision > 0 and right_collision < left_collision:
+        return right_bounds, "bottom-right"
+    return left_bounds, "bottom-left"
+
+
+def _capsule_bounds_for_corner(
+    *,
+    width: int,
+    height: int,
+    panel_width: int,
+    panel_height: int,
+    margin: int,
+    corner: PlacementCorner,
+) -> tuple[int, int, int, int]:
+    """Return one explicit corner without re-evaluating frame-local evidence."""
+
+    bottom = max(panel_height, height - margin)
+    top = max(0, bottom - panel_height)
+    if corner == "bottom-right":
+        return (
+            max(0, width - margin - panel_width),
+            top,
+            max(panel_width, width - margin),
+            bottom,
+        )
+    return (
+        min(margin, max(0, width - panel_width)),
+        top,
+        min(width, margin + panel_width),
+        bottom,
+    )
+
+
+def _panel_dimensions(
+    *, width: int, height: int, expanded: bool
+) -> tuple[int, int, int]:
+    margin = max(12, round(min(width, height) * 0.02))
+    available_width = max(1, width - 2 * margin)
+    available_height = max(1, height - 2 * margin)
+    panel_width = min(max(320, round(width * 0.36)), available_width)
+    panel_height = min(112 if expanded else 88, available_height)
+    return margin, panel_width, panel_height
 
 
 def _target_rect(
@@ -309,6 +349,75 @@ def _target_rect(
     return left, top, right, bottom
 
 
+def _step_key(frame: ControlOverlayFrameV2) -> tuple[int | None, int | None]:
+    return frame.step.current, frame.step.total
+
+
+def build_step_placement_plan(
+    timeline: ControlOverlayTimelineV2,
+    *,
+    width: int,
+    height: int,
+    media_sha256: str,
+) -> dict[int, PlacementCorner]:
+    """Bind one collision-aware corner to each contiguous workflow-step segment.
+
+    Placement may use only exact target geometry retained for an inventoried
+    media frame. Once selected, it remains stable for every event in that step
+    segment. The target rectangle itself is still rendered only on its exact
+    bound frame; this plan never persists or interpolates target evidence.
+    """
+
+    placements: dict[int, PlacementCorner] = {}
+    events = timeline.events
+    segment_start = 0
+    while segment_start < len(events):
+        segment_key = _step_key(events[segment_start].frame)
+        segment_end = segment_start + 1
+        while (
+            segment_end < len(events)
+            and _step_key(events[segment_end].frame) == segment_key
+        ):
+            segment_end += 1
+        segment = events[segment_start:segment_end]
+        exact_targets = tuple(
+            target
+            for event in segment
+            if event.frame.visible
+            for target in (
+                _target_rect(
+                    event.frame,
+                    frame_index=event.media_frame_index,
+                    media_sha256=media_sha256,
+                    width=width,
+                    height=height,
+                ),
+            )
+            if target is not None
+        )
+        expanded = any(
+            event.frame.visible and _expanded_phase(event.frame.phase.value)
+            for event in segment
+        )
+        margin, panel_width, panel_height = _panel_dimensions(
+            width=width,
+            height=height,
+            expanded=expanded,
+        )
+        _, corner = choose_capsule_bounds(
+            width=width,
+            height=height,
+            panel_width=panel_width,
+            panel_height=panel_height,
+            margin=margin,
+            protected_regions=exact_targets,
+        )
+        for event in segment:
+            placements[event.media_frame_index] = corner
+        segment_start = segment_end
+    return placements
+
+
 def render_presentation_frame(
     image: Image.Image,
     frame: ControlOverlayFrameV2,
@@ -316,6 +425,7 @@ def render_presentation_frame(
     frame_index: int,
     media_sha256: str,
     protected_regions: tuple[tuple[int, int, int, int], ...] = (),
+    placement_corner: PlacementCorner | None = None,
 ) -> Image.Image:
     """Render one canonical status frame and an optional exactly bound target."""
 
@@ -324,11 +434,11 @@ def render_presentation_frame(
         return output
     draw = ImageDraw.Draw(output, "RGBA")
     width, height = output.size
-    margin = max(12, round(min(width, height) * 0.02))
-    available_width = max(1, width - 2 * margin)
-    available_height = max(1, height - 2 * margin)
-    panel_width = min(max(320, round(width * 0.36)), available_width)
-    panel_height = min(112 if _expanded_phase(frame.phase.value) else 88, available_height)
+    margin, panel_width, panel_height = _panel_dimensions(
+        width=width,
+        height=height,
+        expanded=_expanded_phase(frame.phase.value),
+    )
     target = _target_rect(
         frame,
         frame_index=frame_index,
@@ -337,14 +447,25 @@ def render_presentation_frame(
         height=height,
     )
     avoidance = protected_regions + ((target,) if target is not None else ())
-    (left, top, right, bottom), _corner = choose_capsule_bounds(
-        width=width,
-        height=height,
-        panel_width=panel_width,
-        panel_height=panel_height,
-        margin=margin,
-        protected_regions=avoidance,
-    )
+    if placement_corner is None:
+        bounds, _corner = choose_capsule_bounds(
+            width=width,
+            height=height,
+            panel_width=panel_width,
+            panel_height=panel_height,
+            margin=margin,
+            protected_regions=avoidance,
+        )
+    else:
+        bounds = _capsule_bounds_for_corner(
+            width=width,
+            height=height,
+            panel_width=panel_width,
+            panel_height=panel_height,
+            margin=margin,
+            corner=placement_corner,
+        )
+    left, top, right, bottom = bounds
     accent = _phase_color(frame.phase.value)
     draw.rounded_rectangle(
         (left, top, right, bottom),
@@ -495,7 +616,14 @@ def export_presentation_video(capture_dir: Path) -> dict[str, object]:
         raise RuntimeError("could not open the direct video-composition pipe")
 
     events = {event.media_frame_index: event for event in timeline.events}
+    placement_plan = build_step_placement_plan(
+        timeline,
+        width=width,
+        height=height,
+        media_sha256=plan.media_sha256,
+    )
     current = timeline.events[0].frame
+    placement_corner = placement_plan[timeline.events[0].media_frame_index]
     try:
         for frame_index in range(timeline.media_frame_count):
             raw = _read_exact(decoder.stdout, frame_bytes)
@@ -507,11 +635,13 @@ def export_presentation_video(capture_dir: Path) -> dict[str, object]:
             event = events.get(frame_index)
             if event is not None:
                 current = event.frame
+                placement_corner = placement_plan[event.media_frame_index]
             rendered = render_presentation_frame(
                 Image.frombytes("RGBA", (width, height), raw),
                 current,
                 frame_index=frame_index,
                 media_sha256=plan.media_sha256,
+                placement_corner=placement_corner,
             )
             encoder.stdin.write(rendered.tobytes())
         if decoder.stdout.read(1):
@@ -570,5 +700,5 @@ def export_presentation_video(capture_dir: Path) -> dict[str, object]:
         "source_media_sha256": plan.media_sha256,
         "media_frame_count": timeline.media_frame_count,
         "raw_media_unchanged": True,
-        "placement_policy": "collision-aware-bottom-corner",
+        "placement_policy": "step-stable-collision-aware-bottom-corner",
     }

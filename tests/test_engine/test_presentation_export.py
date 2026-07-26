@@ -23,6 +23,7 @@ from openadapt_types import (
 from PIL import Image
 
 from engine.presentation_export import (
+    build_step_placement_plan,
     choose_capsule_bounds,
     export_presentation_video,
     inspect_capture_for_presentation,
@@ -40,14 +41,19 @@ def _frame(
     media_sha256: str,
     frame_index: int,
     target: bool = False,
+    current_step: int | None = None,
+    source_width: int = 64,
+    source_height: int = 64,
+    target_rect: ControlOverlayNormalizedRectV2 | None = None,
 ) -> ControlOverlayFrameV2:
     tracking = None
     if target:
         tracking = ControlOverlayTargetTrackingV2(
-            rect=ControlOverlayNormalizedRectV2(x=0.1, y=0.2, width=0.3, height=0.4),
+            rect=target_rect
+            or ControlOverlayNormalizedRectV2(x=0.1, y=0.2, width=0.3, height=0.4),
             source_viewport=ControlOverlaySourceViewportV2(
-                width_css_px=64,
-                height_css_px=64,
+                width_css_px=source_width,
+                height_css_px=source_height,
                 device_pixel_ratio=1.0,
             ),
             binding=ControlOverlayMediaFrameBindingV2(
@@ -63,7 +69,7 @@ def _frame(
         visible=True,
         phase=ControlOverlayPhase.EXECUTING,
         mode=ControlOverlayMode.GOVERNED,
-        current_step=sequence + 1,
+        current_step=current_step if current_step is not None else sequence + 1,
         total_steps=3,
         target_tracking=tracking,
     )
@@ -140,19 +146,19 @@ def test_target_renders_only_when_full_viewport_mapping_is_proven() -> None:
     assert wrong_frame.getpixel((6, 24)) == baseline.getpixel((6, 24))
 
 
-def test_capsule_moves_left_only_for_exact_bottom_right_conflict() -> None:
-    right_target = (560, 430, 790, 590)
+def test_capsule_moves_right_only_for_exact_bottom_left_conflict() -> None:
+    left_target = (10, 430, 300, 590)
     bounds, corner = choose_capsule_bounds(
         width=800,
         height=600,
         panel_width=300,
         panel_height=90,
         margin=12,
-        protected_regions=(right_target,),
+        protected_regions=(left_target,),
     )
 
-    assert corner == "bottom-left"
-    assert bounds[0] == 12
+    assert corner == "bottom-right"
+    assert bounds[2] == 788
 
     default_bounds, default_corner = choose_capsule_bounds(
         width=800,
@@ -161,8 +167,65 @@ def test_capsule_moves_left_only_for_exact_bottom_right_conflict() -> None:
         panel_height=90,
         margin=12,
     )
-    assert default_corner == "bottom-right"
-    assert default_bounds[2] == 788
+    assert default_corner == "bottom-left"
+    assert default_bounds[0] == 12
+
+
+def test_exact_target_collision_selects_one_corner_for_the_whole_step() -> None:
+    digest = "a" * 64
+    frames = (
+        _frame(
+            sequence=0,
+            media_sha256=digest,
+            frame_index=0,
+            current_step=1,
+        ),
+        _frame(
+            sequence=1,
+            media_sha256=digest,
+            frame_index=1,
+            target=True,
+            current_step=1,
+            source_width=800,
+            source_height=600,
+            target_rect=ControlOverlayNormalizedRectV2(
+                x=0.0,
+                y=0.72,
+                width=0.4,
+                height=0.27,
+            ),
+        ),
+        _frame(
+            sequence=2,
+            media_sha256=digest,
+            frame_index=2,
+            current_step=1,
+        ),
+    )
+    timeline = ControlOverlayTimelineV2(
+        data_classification=ControlOverlayDataClassification.SYNTHETIC,
+        evidence_pack_id="placement-test",
+        media_sha256=digest,
+        media_frame_count=3,
+        duration_ms=600,
+        events=tuple(
+            ControlOverlayTimelineEventV2(
+                at_ms=index * 200,
+                media_frame_index=index,
+                frame=frame,
+            )
+            for index, frame in enumerate(frames)
+        ),
+    )
+
+    plan = build_step_placement_plan(
+        timeline,
+        width=800,
+        height=600,
+        media_sha256=digest,
+    )
+
+    assert plan == {0: "bottom-right", 1: "bottom-right", 2: "bottom-right"}
 
 
 @pytest.mark.skipif(
@@ -214,7 +277,10 @@ def test_direct_rawvideo_export_preserves_source(tmp_path: Path, monkeypatch) ->
     result = export_presentation_video(capture)
 
     assert result["raw_media_unchanged"] is True
-    assert result["placement_policy"] == "collision-aware-bottom-corner"
+    assert (
+        result["placement_policy"]
+        == "step-stable-collision-aware-bottom-corner"
+    )
     assert _sha256(media) == source_hash
     output = Path(str(result["path"]))
     assert output.is_file()

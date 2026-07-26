@@ -473,7 +473,7 @@ export interface PresentationExportResult {
   source_media_sha256: string;
   media_frame_count: number;
   raw_media_unchanged: true;
-  placement_policy: "collision-aware-bottom-corner";
+  placement_policy: "step-stable-collision-aware-bottom-corner";
 }
 
 // Runner lane (EXPERIMENTAL — outbound dispatch loop, spec §2).

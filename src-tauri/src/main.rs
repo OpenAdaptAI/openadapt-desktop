@@ -38,7 +38,7 @@ fn place_control_overlay(app: &tauri::AppHandle) {
     let monitor_position = monitor.position();
     let monitor_size = monitor.size();
     let margin = (24.0 * monitor.scale_factor()).round() as i32;
-    let x = monitor_position.x + monitor_size.width as i32 - overlay_size.width as i32 - margin;
+    let x = monitor_position.x + margin;
     let y = monitor_position.y + monitor_size.height as i32 - overlay_size.height as i32 - margin;
     let _ = overlay.set_position(Position::Physical(PhysicalPosition::new(x, y)));
 }
@@ -96,8 +96,8 @@ fn main() {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
             }
-            // Anchor at the bottom-right of the monitor containing Desktop.
-            // Exact presentation-frame renderers can switch to bottom-left
+            // Anchor at the bottom-left of the monitor containing Desktop.
+            // Exact presentation-frame renderers can switch to bottom-right
             // when a retained target or protected region conflicts. The user
             // can still drag the native capsule, and show/hide transitions
             // never reposition or focus it.
