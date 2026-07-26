@@ -107,10 +107,9 @@ it("shows only authoritative compact execution details in plain language", () =>
   expect(details).toEqual([
     "Citrix",
     "1:05",
-    "Separate read-only check (Tier 2)",
-    "Identity checked",
+    "Effect evidence: separate read-only session (Tier 2)",
     "0 model calls",
-    "No external data egress",
+    "No external network calls",
   ]);
 });
 

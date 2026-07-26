@@ -400,14 +400,13 @@ export function overlaySecondaryItems(
   if (effectTiers.length) {
     const tier = Math.min(...effectTiers);
     const phrase = {
-      1: "Independent system check",
-      2: "Separate read-only check",
-      3: "Persisted-state recheck",
-      4: "On-screen confirmation",
+      1: "independent system interface",
+      2: "separate read-only session",
+      3: "persisted-state reacquisition",
+      4: "immediate screen confirmation",
     }[tier];
-    items.push(`${phrase} (Tier ${tier})`);
+    items.push(`Effect evidence: ${phrase} (Tier ${tier})`);
   }
-  if (state.evidenceClasses.includes("identity")) items.push("Identity checked");
   if (state.modelCalls !== null) {
     items.push(
       state.modelCalls === 0
@@ -418,10 +417,10 @@ export function overlaySecondaryItems(
   if (state.externalNetworkCalls !== null) {
     items.push(
       state.externalNetworkCalls === "none"
-        ? "No external data egress"
+        ? "No external network calls"
         : state.externalNetworkCalls === "observed"
-          ? "External data egress observed"
-          : "External data egress unknown",
+          ? "External network calls observed"
+          : "External network-call status unknown",
     );
   }
   return items;
