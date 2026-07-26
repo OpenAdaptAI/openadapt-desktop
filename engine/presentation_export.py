@@ -187,6 +187,93 @@ def _phase_color(phase: str) -> tuple[int, int, int, int]:
     return (99, 102, 241, 255)
 
 
+def _plain_status(phase: str) -> str:
+    return {
+        "idle": "Ready",
+        "observing": "Resolving target",
+        "recording": "Recording demonstration",
+        "executing": "Running workflow",
+        "pausing": "Pausing safely",
+        "paused": "Paused safely",
+        "resuming": "Resuming safely",
+        "stopping": "Stopping safely",
+        "verifying": "Verifying result",
+        "verified": "Outcome verified",
+        "completed_unverified": "Needs verification",
+        "halted": "Stopped safely",
+        "failed": "Run failed",
+        "rolled_back": "Change rolled back",
+    }[phase]
+
+
+def _safety_label(phase: str) -> str:
+    return {
+        "verified": "VERIFIED",
+        "completed_unverified": "UNVERIFIED",
+        "halted": "HALTED",
+        "failed": "FAILED",
+        "rolled_back": "ROLLED BACK",
+        "paused": "PAUSED",
+        "recording": "LOCAL CAPTURE",
+        "observing": "LOCAL CAPTURE",
+    }.get(phase, "CHECKS ACTIVE")
+
+
+def _expanded_phase(phase: str) -> bool:
+    return phase in {
+        "paused",
+        "verified",
+        "completed_unverified",
+        "halted",
+        "failed",
+        "rolled_back",
+    }
+
+
+def _intersection_area(
+    first: tuple[int, int, int, int], second: tuple[int, int, int, int]
+) -> int:
+    width = max(0, min(first[2], second[2]) - max(first[0], second[0]))
+    height = max(0, min(first[3], second[3]) - max(first[1], second[1]))
+    return width * height
+
+
+def choose_capsule_bounds(
+    *,
+    width: int,
+    height: int,
+    panel_width: int,
+    panel_height: int,
+    margin: int,
+    protected_regions: tuple[tuple[int, int, int, int], ...] = (),
+) -> tuple[tuple[int, int, int, int], str]:
+    """Choose the least-conflicting bottom corner, preferring bottom-right."""
+
+    bottom = max(panel_height, height - margin)
+    top = max(0, bottom - panel_height)
+    right_bounds = (
+        max(0, width - margin - panel_width),
+        top,
+        max(panel_width, width - margin),
+        bottom,
+    )
+    left_bounds = (
+        min(margin, max(0, width - panel_width)),
+        top,
+        min(width, margin + panel_width),
+        bottom,
+    )
+
+    def collision_area(bounds: tuple[int, int, int, int]) -> int:
+        return sum(_intersection_area(bounds, region) for region in protected_regions)
+
+    right_collision = collision_area(right_bounds)
+    left_collision = collision_area(left_bounds)
+    if right_collision > 0 and left_collision < right_collision:
+        return left_bounds, "bottom-left"
+    return right_bounds, "bottom-right"
+
+
 def _target_rect(
     frame: ControlOverlayFrameV2,
     *,
@@ -228,6 +315,7 @@ def render_presentation_frame(
     *,
     frame_index: int,
     media_sha256: str,
+    protected_regions: tuple[tuple[int, int, int, int], ...] = (),
 ) -> Image.Image:
     """Render one canonical status frame and an optional exactly bound target."""
 
@@ -237,36 +325,10 @@ def render_presentation_frame(
     draw = ImageDraw.Draw(output, "RGBA")
     width, height = output.size
     margin = max(12, round(min(width, height) * 0.02))
-    panel_width = min(max(280, round(width * 0.32)), max(280, width - 2 * margin))
-    panel_height = min(88, max(64, round(height * 0.11)))
-    left = max(margin, width - margin - panel_width)
-    top = margin
-    right = width - margin
-    bottom = top + panel_height
-    accent = _phase_color(frame.phase.value)
-    draw.rounded_rectangle(
-        (left, top, right, bottom),
-        radius=16,
-        fill=(13, 18, 28, 226),
-    )
-    draw.rounded_rectangle((left, top, left + 8, bottom), radius=4, fill=accent)
-    font = ImageFont.load_default(size=max(12, round(panel_height * 0.18)))
-    draw.text(
-        (left + 22, top + 14),
-        frame.workflow_label.value,
-        fill=(245, 247, 250, 255),
-        font=font,
-    )
-    step = ""
-    if frame.step.current is not None and frame.step.total is not None:
-        step = f"  Step {frame.step.current}/{frame.step.total}"
-    draw.text(
-        (left + 22, top + 42),
-        f"{frame.status}{step}",
-        fill=(205, 211, 221, 255),
-        font=font,
-    )
-
+    available_width = max(1, width - 2 * margin)
+    available_height = max(1, height - 2 * margin)
+    panel_width = min(max(320, round(width * 0.36)), available_width)
+    panel_height = min(112 if _expanded_phase(frame.phase.value) else 88, available_height)
     target = _target_rect(
         frame,
         frame_index=frame_index,
@@ -274,6 +336,58 @@ def render_presentation_frame(
         width=width,
         height=height,
     )
+    avoidance = protected_regions + ((target,) if target is not None else ())
+    (left, top, right, bottom), _corner = choose_capsule_bounds(
+        width=width,
+        height=height,
+        panel_width=panel_width,
+        panel_height=panel_height,
+        margin=margin,
+        protected_regions=avoidance,
+    )
+    accent = _phase_color(frame.phase.value)
+    draw.rounded_rectangle(
+        (left, top, right, bottom),
+        radius=16,
+        fill=(13, 18, 28, 226),
+    )
+    draw.rounded_rectangle((left, top, left + 8, bottom), radius=4, fill=accent)
+    font = ImageFont.load_default(size=max(11, min(15, round(panel_height * 0.16))))
+    draw.text(
+        (left + 22, top + 14),
+        _plain_status(frame.phase.value),
+        fill=(245, 247, 250, 255),
+        font=font,
+    )
+    step = "Step pending"
+    if frame.step.current is not None and frame.step.total is not None:
+        step = f"Step {frame.step.current} of {frame.step.total}"
+    elif frame.step.current is not None:
+        step = f"Step {frame.step.current}"
+    elif frame.step.total is not None:
+        step = f"{frame.step.total} steps"
+    draw.text(
+        (left + 22, top + 42),
+        f"{step}  ·  {_safety_label(frame.phase.value)}",
+        fill=(205, 211, 221, 255),
+        font=font,
+    )
+    if frame.phase.value not in {"idle", "observing", "recording"} and bottom - top >= 70:
+        draw.text(
+            (left + 22, top + 66),
+            "Resolve  —  Act  —  Verify",
+            fill=(139, 148, 163, 255),
+            font=font,
+        )
+    if _expanded_phase(frame.phase.value) and bottom - top >= 98:
+        profile = f" · {frame.profile.value} profile" if frame.profile is not None else ""
+        draw.text(
+            (left + 22, top + 88),
+            f"{frame.workflow_label.value}{profile}",
+            fill=(177, 185, 198, 255),
+            font=font,
+        )
+
     if target is not None:
         line_width = max(3, round(min(width, height) * 0.006))
         draw.rounded_rectangle(target, radius=8, outline=accent, width=line_width)
@@ -456,4 +570,5 @@ def export_presentation_video(capture_dir: Path) -> dict[str, object]:
         "source_media_sha256": plan.media_sha256,
         "media_frame_count": timeline.media_frame_count,
         "raw_media_unchanged": True,
+        "placement_policy": "collision-aware-bottom-corner",
     }

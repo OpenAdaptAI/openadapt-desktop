@@ -39,7 +39,7 @@ fn place_control_overlay(app: &tauri::AppHandle) {
     let monitor_size = monitor.size();
     let margin = (24.0 * monitor.scale_factor()).round() as i32;
     let x = monitor_position.x + monitor_size.width as i32 - overlay_size.width as i32 - margin;
-    let y = monitor_position.y + margin;
+    let y = monitor_position.y + monitor_size.height as i32 - overlay_size.height as i32 - margin;
     let _ = overlay.set_position(Position::Physical(PhysicalPosition::new(x, y)));
 }
 
@@ -96,9 +96,11 @@ fn main() {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
             }
-            // Anchor to the monitor containing the Desktop window. The user can
-            // drag the overlay to any other monitor, and subsequent show/hide
-            // transitions never reposition or focus it.
+            // Anchor at the bottom-right of the monitor containing Desktop.
+            // Exact presentation-frame renderers can switch to bottom-left
+            // when a retained target or protected region conflicts. The user
+            // can still drag the native capsule, and show/hide transitions
+            // never reposition or focus it.
             place_control_overlay(app.handle());
 
             // Spawn the frozen Python engine sidecar. Guarded: if the binary is

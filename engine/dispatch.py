@@ -842,6 +842,22 @@ class EngineDispatcher:
                 ),
                 "current_step": len(report.get("steps") or []) or None,
                 "total_steps": report.get("total_steps"),
+                "duration_s": (report.get("metrics") or {}).get("duration_s"),
+                "evidence_classes": (
+                    report.get("outcome_details", {}).get("evidence_classes")
+                    if isinstance(report.get("outcome_details"), dict)
+                    else []
+                ),
+                "model_calls": (
+                    report.get("outcome_details", {}).get("model_calls")
+                    if isinstance(report.get("outcome_details"), dict)
+                    else None
+                ),
+                "external_network_calls": (
+                    report.get("outcome_details", {}).get("external_network_calls")
+                    if isinstance(report.get("outcome_details"), dict)
+                    else None
+                ),
             },
         )
         return report

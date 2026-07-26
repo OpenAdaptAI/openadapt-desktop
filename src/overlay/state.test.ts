@@ -2,6 +2,8 @@ import { expect, it } from "vitest";
 import type { ReplayProgress } from "../lib/types";
 import {
   EMPTY_OVERLAY_STATE,
+  overlayExpands,
+  overlaySecondaryItems,
   reduceControlOverlay,
 } from "./state";
 import {
@@ -52,6 +54,7 @@ it("preserves precise terminal outcomes and bounded step progress", () => {
   const active = reduceControlOverlay(EMPTY_OVERLAY_STATE, {
     kind: "replay-progress",
     progress: running,
+    observedAtUnixMs: 1_000,
   });
   const halted = reduceControlOverlay(active, {
     kind: "replay-progress",
@@ -69,6 +72,8 @@ it("preserves precise terminal outcomes and bounded step progress", () => {
     mode: "governed",
     totalSteps: 7,
     currentStep: null,
+    surface: "citrix",
+    startedAtUnixMs: 1_000,
   });
   expect(halted).toMatchObject({
     phase: "halted",
@@ -76,6 +81,37 @@ it("preserves precise terminal outcomes and bounded step progress", () => {
     currentStep: 3,
     totalSteps: 7,
   });
+});
+
+it("keeps active execution compact and expands only safe boundaries", () => {
+  expect(overlayExpands("executing")).toBe(false);
+  expect(overlayExpands("verifying")).toBe(false);
+  expect(overlayExpands("paused")).toBe(true);
+  expect(overlayExpands("halted")).toBe(true);
+  expect(overlayExpands("verified")).toBe(true);
+});
+
+it("shows only authoritative compact execution details in plain language", () => {
+  const details = overlaySecondaryItems(
+    {
+      ...EMPTY_OVERLAY_STATE,
+      surface: "citrix",
+      startedAtUnixMs: 1_000,
+      evidenceClasses: ["identity", "effect_tier_2"],
+      modelCalls: 0,
+      externalNetworkCalls: "none",
+    },
+    66_000,
+  );
+
+  expect(details).toEqual([
+    "Citrix",
+    "1:05",
+    "Separate read-only check (Tier 2)",
+    "Identity checked",
+    "0 model calls",
+    "No external data egress",
+  ]);
 });
 
 it("keeps workflow identifiers and names out of shared overlay state", () => {

@@ -38,7 +38,9 @@ it("keeps an active overlay capture-excluded and hides its controls", async () =
 
   render(<ControlOverlay />);
 
-  expect(await screen.findByText("Watching your demonstration")).toBeTruthy();
+  expect(await screen.findByText("Recording demonstration")).toBeTruthy();
+  expect(screen.getByText("Step pending")).toBeTruthy();
+  expect(screen.getByText("LOCAL CAPTURE")).toBeTruthy();
   await waitFor(() =>
     expect(ensureControlOverlayCaptureExcluded).toHaveBeenCalledOnce(),
   );

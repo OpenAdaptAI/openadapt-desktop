@@ -23,6 +23,7 @@ from openadapt_types import (
 from PIL import Image
 
 from engine.presentation_export import (
+    choose_capsule_bounds,
     export_presentation_video,
     inspect_capture_for_presentation,
     render_presentation_frame,
@@ -139,6 +140,31 @@ def test_target_renders_only_when_full_viewport_mapping_is_proven() -> None:
     assert wrong_frame.getpixel((6, 24)) == baseline.getpixel((6, 24))
 
 
+def test_capsule_moves_left_only_for_exact_bottom_right_conflict() -> None:
+    right_target = (560, 430, 790, 590)
+    bounds, corner = choose_capsule_bounds(
+        width=800,
+        height=600,
+        panel_width=300,
+        panel_height=90,
+        margin=12,
+        protected_regions=(right_target,),
+    )
+
+    assert corner == "bottom-left"
+    assert bounds[0] == 12
+
+    default_bounds, default_corner = choose_capsule_bounds(
+        width=800,
+        height=600,
+        panel_width=300,
+        panel_height=90,
+        margin=12,
+    )
+    assert default_corner == "bottom-right"
+    assert default_bounds[2] == 788
+
+
 @pytest.mark.skipif(
     shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
     reason="system FFmpeg is not installed",
@@ -188,6 +214,7 @@ def test_direct_rawvideo_export_preserves_source(tmp_path: Path, monkeypatch) ->
     result = export_presentation_video(capture)
 
     assert result["raw_media_unchanged"] is True
+    assert result["placement_policy"] == "collision-aware-bottom-corner"
     assert _sha256(media) == source_hash
     output = Path(str(result["path"]))
     assert output.is_file()

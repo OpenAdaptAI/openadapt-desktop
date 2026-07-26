@@ -2,6 +2,7 @@ import type {
   EngineStatus,
   ReplayProgress,
   RunnerStatus,
+  TargetBackend,
 } from "../lib/types";
 import {
   CONTROL_OVERLAY_STATUS_BY_PHASE,
@@ -34,6 +35,12 @@ export interface ControlOverlayState {
   currentStep: number | null;
   totalSteps: number | null;
   controls: OverlayControls;
+  surface: TargetBackend | "configured" | null;
+  startedAtUnixMs: number | null;
+  elapsedSeconds: number | null;
+  evidenceClasses: string[];
+  modelCalls: number | null;
+  externalNetworkCalls: "none" | "observed" | "unknown" | null;
 }
 
 export type ControlOverlayInput =
@@ -41,7 +48,11 @@ export type ControlOverlayInput =
   | { kind: "recording-started" }
   | { kind: "recording-stopped" }
   | { kind: "recording-error" }
-  | { kind: "replay-progress"; progress: ReplayProgress }
+  | {
+      kind: "replay-progress";
+      progress: ReplayProgress;
+      observedAtUnixMs?: number;
+    }
   | { kind: "runner-state"; status: RunnerStatus }
   | { kind: "workflow-metadata"; ordinal: number; totalSteps: number }
   | { kind: "step"; index: number; total?: number | null }
@@ -58,6 +69,12 @@ export const EMPTY_OVERLAY_STATE: ControlOverlayState = {
   currentStep: null,
   totalSteps: null,
   controls: { pause: false, resume: false, stop: false },
+  surface: null,
+  startedAtUnixMs: null,
+  elapsedSeconds: null,
+  evidenceClasses: [],
+  modelCalls: null,
+  externalNetworkCalls: null,
 };
 
 /** Only states with no in-flight observation or actuation may receive input. */
@@ -86,6 +103,8 @@ function recordingState(status: EngineStatus): ControlOverlayState {
     localWorkflowLabel: "New demonstration",
     mode: "demonstration",
     controls: capabilities,
+    elapsedSeconds:
+      typeof status.duration_secs === "number" ? status.duration_secs : null,
   };
 }
 
@@ -170,7 +189,25 @@ export function reduceControlOverlay(
         visible: true,
         phase: terminalPhase(progress),
         mode,
+        surface: progress.backend,
         profile: progress.profile ?? state.profile,
+        startedAtUnixMs:
+          progress.state === "running"
+            ? state.startedAtUnixMs ?? input.observedAtUnixMs ?? null
+            : state.startedAtUnixMs,
+        elapsedSeconds:
+          typeof progress.duration_s === "number"
+            ? progress.duration_s
+            : state.elapsedSeconds,
+        evidenceClasses: Array.isArray(progress.evidence_classes)
+          ? [...progress.evidence_classes]
+          : state.evidenceClasses,
+        modelCalls:
+          typeof progress.model_calls === "number"
+            ? progress.model_calls
+            : state.modelCalls,
+        externalNetworkCalls:
+          progress.external_network_calls ?? state.externalNetworkCalls,
         currentStep:
           typeof progress.current_step === "number"
             ? progress.current_step
@@ -191,6 +228,7 @@ export function reduceControlOverlay(
           visible: true,
           phase: "executing",
           mode: "managed",
+          surface: state.surface,
           localWorkflowLabel: "Managed workflow",
           controls: { pause: false, resume: false, stop: false },
         };
@@ -253,4 +291,138 @@ export function reduceControlOverlay(
 
 export function overlayStatusText(state: ControlOverlayState): string {
   return CONTROL_OVERLAY_STATUS_BY_PHASE[state.phase];
+}
+
+export function overlayExpands(phase: OverlayPhase): boolean {
+  return (
+    phase === "paused" ||
+    phase === "verified" ||
+    phase === "completed_unverified" ||
+    phase === "halted" ||
+    phase === "failed" ||
+    phase === "rolled_back"
+  );
+}
+
+const SURFACE_LABEL: Record<TargetBackend | "configured", string> = {
+  web: "Browser",
+  windows: "Windows",
+  macos: "macOS",
+  linux: "Linux",
+  rdp: "RDP",
+  citrix: "Citrix",
+  configured: "Configured surface",
+};
+
+export function overlaySafetyLabel(phase: OverlayPhase): string {
+  switch (phase) {
+    case "verified":
+      return "VERIFIED";
+    case "completed_unverified":
+      return "UNVERIFIED";
+    case "halted":
+      return "HALTED";
+    case "failed":
+      return "FAILED";
+    case "rolled_back":
+      return "ROLLED BACK";
+    case "paused":
+      return "PAUSED";
+    case "recording":
+    case "observing":
+      return "LOCAL CAPTURE";
+    default:
+      return "CHECKS ACTIVE";
+  }
+}
+
+export function overlayPlainStatus(phase: OverlayPhase): string {
+  switch (phase) {
+    case "idle":
+      return "Ready";
+    case "observing":
+      return "Resolving target";
+    case "recording":
+      return "Recording demonstration";
+    case "executing":
+      return "Running workflow";
+    case "pausing":
+      return "Pausing safely";
+    case "paused":
+      return "Paused safely";
+    case "resuming":
+      return "Resuming safely";
+    case "stopping":
+      return "Stopping safely";
+    case "verifying":
+      return "Verifying result";
+    case "verified":
+      return "Outcome verified";
+    case "completed_unverified":
+      return "Needs verification";
+    case "halted":
+      return "Stopped safely";
+    case "failed":
+      return "Run failed";
+    case "rolled_back":
+      return "Change rolled back";
+  }
+}
+
+export function overlayShowsExecutionRail(phase: OverlayPhase): boolean {
+  return !["idle", "observing", "recording"].includes(phase);
+}
+
+function compactDuration(seconds: number): string {
+  const rounded = Math.max(0, Math.floor(seconds));
+  const minutes = Math.floor(rounded / 60);
+  const remainder = rounded % 60;
+  return `${minutes}:${String(remainder).padStart(2, "0")}`;
+}
+
+export function overlaySecondaryItems(
+  state: ControlOverlayState,
+  nowUnixMs: number,
+): string[] {
+  const items: string[] = [];
+  if (state.surface) items.push(SURFACE_LABEL[state.surface]);
+  const elapsed =
+    state.elapsedSeconds ??
+    (state.startedAtUnixMs === null
+      ? null
+      : Math.max(0, (nowUnixMs - state.startedAtUnixMs) / 1000));
+  if (elapsed !== null) items.push(compactDuration(elapsed));
+
+  const effectTiers = state.evidenceClasses
+    .map((item) => /^effect_tier_([1-4])$/.exec(item)?.[1] ?? null)
+    .filter((item): item is string => item !== null)
+    .map(Number);
+  if (effectTiers.length) {
+    const tier = Math.min(...effectTiers);
+    const phrase = {
+      1: "Independent system check",
+      2: "Separate read-only check",
+      3: "Persisted-state recheck",
+      4: "On-screen confirmation",
+    }[tier];
+    items.push(`${phrase} (Tier ${tier})`);
+  }
+  if (state.evidenceClasses.includes("identity")) items.push("Identity checked");
+  if (state.modelCalls !== null) {
+    items.push(
+      state.modelCalls === 0
+        ? "0 model calls"
+        : `${state.modelCalls} model ${state.modelCalls === 1 ? "call" : "calls"}`,
+    );
+  }
+  if (state.externalNetworkCalls !== null) {
+    items.push(
+      state.externalNetworkCalls === "none"
+        ? "No external data egress"
+        : state.externalNetworkCalls === "observed"
+          ? "External data egress observed"
+          : "External data egress unknown",
+    );
+  }
+  return items;
 }

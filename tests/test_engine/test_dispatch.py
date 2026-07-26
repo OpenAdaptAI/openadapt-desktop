@@ -896,6 +896,9 @@ class TestLibraryCommands:
         assert states == ["running", progress_state]
         terminal = [data for event, data in events if event == "replay_progress"][-1]
         assert terminal["outcome"] == outcome
+        assert terminal["evidence_classes"] == details["evidence_classes"]
+        assert terminal["model_calls"] == 0
+        assert terminal["external_network_calls"] == "none"
         assert db.list_runs(limit=1)[0]["status"] == outcome
         if outcome == "HALTED":
             assert result["halt"]["reason"]
