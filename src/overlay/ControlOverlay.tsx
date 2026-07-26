@@ -1,14 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { emit, listen } from "@tauri-apps/api/event";
+import { emit } from "@tauri-apps/api/event";
 import {
   CMD,
   EVT,
   engineInvoke,
   engineTry,
+  ensureControlOverlayCaptureExcluded,
   inTauri,
   onEngineEvent,
   setControlOverlayInteractive,
-  setControlOverlayPresentation,
   setControlOverlayVisible,
 } from "../lib/engine";
 import type {
@@ -18,7 +18,6 @@ import type {
   RunStep,
   Workflow,
 } from "../lib/types";
-import { overlayPresentationEnabled } from "./preferences";
 import { buildControlOverlayFrame } from "./contract";
 import {
   EMPTY_OVERLAY_STATE,
@@ -47,9 +46,6 @@ function modeLabel(
 
 export function ControlOverlay() {
   const [state, setState] = useState(EMPTY_OVERLAY_STATE);
-  const [presentation, setPresentation] = useState(
-    overlayPresentationEnabled,
-  );
   const [busy, setBusy] = useState(false);
   const [controlError, setControlError] = useState(false);
   const [capturePolicyReady, setCapturePolicyReady] = useState(false);
@@ -61,7 +57,7 @@ export function ControlOverlay() {
 
   useEffect(() => {
     let cancelled = false;
-    void setControlOverlayPresentation(presentation)
+    void ensureControlOverlayCaptureExcluded()
       .then(() => {
         if (!cancelled) setCapturePolicyReady(true);
       })
@@ -122,19 +118,10 @@ export function ControlOverlay() {
       }),
     ];
 
-    if (inTauri()) {
-      unsubs.push(
-        listen<boolean>("overlay://presentation", (event) =>
-          setPresentation(Boolean(event.payload)),
-        ),
-      );
-    }
-
     return () => {
       cancelled = true;
       unsubs.forEach((promise) => promise.then((stop) => stop()).catch(() => {}));
     };
-    // The native presentation event owns subsequent updates.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -173,13 +160,13 @@ export function ControlOverlay() {
 
   const displayFrame = useMemo(
     () => {
-      return buildControlOverlayFrame(state, presentation, {
+      return buildControlOverlayFrame(state, {
         event_sequence: 0,
         observed_at_unix_ms: 0,
         observed_at_monotonic_ms: 0,
       });
     },
-    [presentation, state],
+    [state],
   );
 
   useEffect(() => {
@@ -188,7 +175,7 @@ export function ControlOverlay() {
     // video compositor can consume this exact event without seeing the local
     // workflow label, even when the local overlay itself is content-protected.
     frameSequence.current += 1;
-    const safeFrame = buildControlOverlayFrame(state, true, {
+    const safeFrame = buildControlOverlayFrame(state, {
       event_sequence: frameSequence.current,
       observed_at_unix_ms: Date.now(),
       observed_at_monotonic_ms: Math.round(performance.now() * 1000) / 1000,
@@ -246,14 +233,13 @@ export function ControlOverlay() {
 
   return (
     <section
-      className={`control-overlay phase-${state.phase} ${presentation ? "presentation" : ""}`}
+      className={`control-overlay phase-${state.phase}`}
       aria-label="OpenAdapt automation controls"
     >
       <div className="overlay-main" data-tauri-drag-region>
         <div className="overlay-mark" aria-label="OpenAdapt">
           <span className="overlay-open">Open</span>
           <strong>Adapt</strong>
-          {presentation && <span className="demo-badge">demo view</span>}
         </div>
         <div className="overlay-copy" data-tauri-drag-region>
           <div className="overlay-meta" data-tauri-drag-region>

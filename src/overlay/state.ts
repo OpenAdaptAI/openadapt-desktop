@@ -3,22 +3,14 @@ import type {
   ReplayProgress,
   RunnerStatus,
 } from "../lib/types";
+import {
+  CONTROL_OVERLAY_STATUS_BY_PHASE,
+  type OverlayMode,
+  type OverlayPhase,
+  type OverlayProfile,
+} from "./generated/contract";
 
-export type OverlayPhase =
-  | "idle"
-  | "observing"
-  | "recording"
-  | "pausing"
-  | "paused"
-  | "resuming"
-  | "stopping"
-  | "executing"
-  | "verifying"
-  | "verified"
-  | "completed_unverified"
-  | "halted"
-  | "failed"
-  | "rolled_back";
+export type { OverlayPhase } from "./generated/contract";
 
 export interface OverlayControls {
   pause: boolean;
@@ -37,8 +29,8 @@ export interface ControlOverlayState {
   visible: boolean;
   phase: OverlayPhase;
   localWorkflowLabel: string;
-  mode: "demonstration" | "replay" | "governed" | "managed";
-  profile: "demo" | "standard" | "regulated" | null;
+  mode: OverlayMode;
+  profile: OverlayProfile | null;
   currentStep: number | null;
   totalSteps: number | null;
   controls: OverlayControls;
@@ -260,34 +252,5 @@ export function reduceControlOverlay(
 }
 
 export function overlayStatusText(state: ControlOverlayState): string {
-  switch (state.phase) {
-    case "recording":
-      return "Watching your demonstration";
-    case "observing":
-      return "Observing the application";
-    case "pausing":
-      return "Pausing at a safe boundary";
-    case "paused":
-      return "Execution paused";
-    case "resuming":
-      return "Resuming at a safe boundary";
-    case "stopping":
-      return "Stopping at a safe boundary";
-    case "executing":
-      return "Executing with verification gates";
-    case "verifying":
-      return "Verifying the intended result";
-    case "verified":
-      return "Outcome verified";
-    case "completed_unverified":
-      return "Completed without sufficient verification";
-    case "halted":
-      return "Halted instead of guessing";
-    case "failed":
-      return "Execution failed";
-    case "rolled_back":
-      return "Compensating action completed";
-    default:
-      return "Ready";
-  }
+  return CONTROL_OVERLAY_STATUS_BY_PHASE[state.phase];
 }

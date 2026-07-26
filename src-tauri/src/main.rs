@@ -120,7 +120,7 @@ fn main() {
             commands::open_external,
             commands::set_control_overlay_visible,
             commands::set_control_overlay_interactive,
-            commands::set_control_overlay_presentation,
+            commands::ensure_control_overlay_capture_excluded,
             ffmpeg::ffmpeg_status,
             ffmpeg::retry_ffmpeg_provisioning,
             // typed convenience commands (forward to the sidecar)

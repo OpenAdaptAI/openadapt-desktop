@@ -150,7 +150,7 @@ it("exports a deterministic presentation frame without the local workflow label"
     currentStep: 2,
     totalSteps: 5,
   };
-  const frame = buildControlOverlayFrame(local, true, {
+  const frame = buildControlOverlayFrame(local, {
     event_sequence: 4,
     observed_at_unix_ms: 1785000000123,
     observed_at_monotonic_ms: 1234.5,
@@ -159,7 +159,7 @@ it("exports a deterministic presentation frame without the local workflow label"
   expect(frame).toEqual({
     schema_version: CONTROL_OVERLAY_FRAME_VERSION,
     state_id:
-      "visible:executing:governed:regulated:2:5:no-pause:no-resume:no-stop",
+      "visible:executing:governed:regulated:2:5:no-pause:no-resume:no-stop:no-target",
     event_sequence: 4,
     observed_at_unix_ms: 1785000000123,
     observed_at_monotonic_ms: 1234.5,
@@ -171,6 +171,7 @@ it("exports a deterministic presentation frame without the local workflow label"
     step: { current: 2, total: 5 },
     controls: { pause: false, resume: false, stop: false },
     status: "Executing with verification gates",
+    target_tracking: null,
     presentation: true,
   });
   expect(JSON.stringify(frame)).not.toContain("Jane Doe");

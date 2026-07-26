@@ -455,6 +455,22 @@ export interface FfmpegRuntimeStatus {
   detail?: string | null;
 }
 
+export interface PresentationExportStatus {
+  ready: boolean;
+  reason?: string | null;
+  media_sha256?: string;
+  media_frame_count?: number;
+}
+
+export interface PresentationExportResult {
+  ok: true;
+  path: string;
+  sha256: string;
+  source_media_sha256: string;
+  media_frame_count: number;
+  raw_media_unchanged: true;
+}
+
 // Runner lane (EXPERIMENTAL — outbound dispatch loop, spec §2).
 
 export type RunnerState =
