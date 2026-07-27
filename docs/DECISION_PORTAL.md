@@ -193,11 +193,16 @@ same `private_flow_config` call the portal uses, starts the frozen console with
 parsed**, and only then drives every portal route. A future Flow that began
 re-reading the path would fail that smoke.
 
-Where a local remote-display window backend exists (macOS, Windows) that runs
-end to end. On Linux, Flow requires an injected `WindowClient` for that backend
-by design, so no attended session can attach on a headless runner; the Linux leg
-instead proves the frozen binary read the staged file's bytes, by staging a
-config whose unique `backend.kind` marker Flow echoes back verbatim.
+Whether an attended session can attach is classified from **Flow's own
+refusal**, not from a hardcoded platform list. Flow implements a window-scoped
+replay client on macOS (Quartz) and Windows (Win32) and refuses elsewhere by
+design, so on Linux the smoke records `console_attended_session:
+"no-host-window-client"`. Any *other* startup failure still fails the smoke —
+a genuinely broken frozen build cannot be mistaken for an unsupported host.
+
+Every platform, including Linux, still proves the frozen binary **read** the
+staged file: the smoke stages a config whose `backend.kind` marker exists
+nowhere in Flow, and Flow echoes it back verbatim.
 
 One upstream seam is worth closing: the attended console generates its bearer
 capability inside `serve()` and only prints it on stdout, so

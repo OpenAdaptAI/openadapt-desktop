@@ -102,10 +102,28 @@ def _console_command(
 #: output is proof the frozen binary read the staged file's bytes.
 CONFIG_READ_PROBE = "openadapt-portal-config-probe"
 
-#: ``backend.kind: citrix`` drives a local remote-display window and builds
-#: without a network peer, a display, or an installed extra -- but only where a
-#: default ``WindowClient`` exists. Flow refuses it on Linux by design.
-ATTENDED_SESSION_PLATFORMS = ("darwin", "win32")
+#: Flow's exact refusals when the *host* has no window-scoped replay client.
+#: ``backend.kind: citrix`` builds without a network peer, a display, or an
+#: installed extra, but only where a default ``WindowClient`` exists -- Flow
+#: implements one on macOS (Quartz) and Windows (Win32) and refuses elsewhere by
+#: design. Classifying on Flow's own message rather than on a hardcoded platform
+#: list means a genuinely broken frozen build cannot be mistaken for an
+#: unsupported host: any other failure still fails this smoke.
+#: Both current wordings mention ``WindowClient``; nothing else in a frozen
+#: startup failure does, so the bare word is the stable discriminator.
+NO_HOST_WINDOW_CLIENT = (
+    "WindowClient",
+    "no host WindowClient exists for platform",
+    "requires an injected WindowClient",
+)
+
+
+class ConsoleNeverStarted(RuntimeError):
+    """The console exited (or hung) without announcing a capability banner."""
+
+    def __init__(self, message: str, *, diagnostics: str) -> None:
+        super().__init__(message)
+        self.diagnostics = diagnostics
 
 
 def _stage_portal_config(directory: Path, deployment: dict) -> Any:
@@ -160,10 +178,11 @@ def _await_console_banner(process: subprocess.Popen) -> tuple[int, str]:
     except queue.Empty:
         parsed = None
     if parsed is None:
-        raise RuntimeError(
+        raise ConsoleNeverStarted(
             "the frozen attended console never announced a capability banner; "
             "the mobile decision portal reads that exact line from a pipe: "
-            + " | ".join(diagnostics)
+            + " | ".join(diagnostics),
+            diagnostics=" | ".join(diagnostics),
         )
     return parsed
 
@@ -365,13 +384,6 @@ def _verify_portal_deployment_target(
         "console_read_staged_config": True,
     }
 
-    if sys.platform not in ATTENDED_SESSION_PLATFORMS:
-        # Honest, not skipped-and-silent: Flow requires an injected WindowClient
-        # for this backend on Linux, so no attended session can attach on a
-        # headless runner. The exact-main macOS and Windows legs carry it.
-        result["console_attended_session"] = "unsupported-platform"
-        return result
-
     deployment = {
         "backend": {
             "kind": "citrix",
@@ -381,7 +393,6 @@ def _verify_portal_deployment_target(
             "rdp_readiness_text": "frozen-console-smoke",
         }
     }
-    process: subprocess.Popen | None = None
     with _stage_portal_config(staging, deployment) as config_path:
         staged = Path(config_path)
         if not staged.is_file():  # pragma: no cover - defensive
@@ -406,6 +417,14 @@ def _verify_portal_deployment_target(
                 raise RuntimeError(
                     "the staged deployment config outlived the console banner"
                 )
+        except ConsoleNeverStarted as exc:
+            # Only one reason is acceptable: this host has no window-scoped
+            # replay client at all, which Flow refuses by design (Linux). Any
+            # other failure is a real frozen-build defect and still fails here.
+            if not any(marker in exc.diagnostics for marker in NO_HOST_WINDOW_CLIENT):
+                raise
+            result["console_attended_session"] = "no-host-window-client"
+            return result
         finally:
             _stop(process)
 
