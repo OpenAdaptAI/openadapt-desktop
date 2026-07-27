@@ -130,25 +130,74 @@ parser, and drives `/api/session`, `/api/attention`,
 `/api/attention/{run_id}`, and an unauthenticated probe through
 `engine.portal.flow_client`.
 
-### Runtime: two gaps remain before a phone can decide anything
+### Runtime: wired
 
-Both are portal-side wiring, not packaging, and both fail closed today:
+Both remaining portal-side gaps are closed, and both still fail closed.
 
-1. **No deployment target is passed to the console.** `PortalService`
-   always spawns `console --attend --allow-actions`, and Flow deliberately
-   refuses attended mutations that are not bound to a deployment: `console
-   --attend --allow-actions requires an explicit --config or --backend target`.
-   The console exits 1 and `portal_start` reports "The local decision service
-   did not start." Desktop already resolves a governed deployment config for
-   runs (`data_dir/deployment.json`, staged privately by
-   `engine.private_flow_config`); the portal must pass the same one, and a
-   human should decide whether that staged file may live for a whole portal
-   session rather than a single run.
-2. **The readiness check races the console.** Flow prints the banner *before*
-   `uvicorn.run()` binds, so `PortalService.start`'s immediate
-   `flow.request("session")` can hit a closed port and raise "The local
-   decision service started but did not answer." It needs a short bounded
-   retry.
+1. **The console is bound to the operator's deployment target.**
+   `PortalService` spawns `console --attend --allow-actions --config <staged>`.
+   Flow deliberately refuses attended mutations with no target (`requires an
+   explicit --config or --backend target`), and that refusal is still asserted
+   against the frozen binary. Desktop supplies the same governed config its runs
+   use, `data_dir/deployment.json`, staged privately through
+   `engine.private_flow_config`. A missing or unparseable config refuses on
+   Desktop's side of the wire, before anything is spawned, so the operator is
+   told which file to write instead of seeing "the console did not start".
+2. **Readiness is a bounded wait, not a sleep.** Flow prints the banner
+   *before* `uvicorn.run()` binds, so the first `flow.request("session")` can
+   legitimately hit a closed port. `PortalService._await_console_session` polls
+   until the console answers, bounded by `CONSOLE_READY_TIMEOUT_S`, and gives up
+   immediately if the console process exited rather than burning the deadline.
+
+### How long the staged deployment config lives, and why
+
+The staged file is **not** session-lived. `data_dir/deployment.json` carries
+reusable credentials — `rdp_password`, `rdp_username`, `rdp_domain`,
+`agent_token`, `agent_tls_pin` — alongside PHI-capable window/URL selectors;
+`private_flow_config` already treats every `password`/`token`/`secret` key as
+sensitive when it derives log redactions. A file like that is not eligible to
+sit on disk for the hours a portal session can last.
+
+Re-staging it per run would also be theatre. In the pinned
+`openadapt-flow==1.25.0`, `_attended_service_from_args` resolves `--config`
+eagerly through `load_deployment` **before** it yields, and
+`AttendedActionService` is built from the parsed `DeploymentConfig` object and
+never sees the path again. Rewriting the file later changes nothing about what
+the console executes with; it only writes the same secret to disk more times.
+
+So the lifetime is set to the only thing it can usefully bound: **the console's
+startup**. The config is staged 0600, the console is spawned, and the file is
+removed the instant the capability banner arrives. `serve()` prints that banner
+strictly downstream of the config load, in the same `with` statement, so the
+banner is a happens-after proof rather than a timing guess. What this actually
+protects against is a same-user backup, file-sync client, crash reporter, or
+support bundle sweeping the staged copy — duration is the whole exposure there,
+and it drops from hours to about five seconds. It does not protect against an
+attacker with same-user code execution, who already has the operator's own
+`deployment.json` and the console's in-memory copy; no file lifetime changes
+that, and this one does not pretend to.
+
+Removal is guaranteed by the `finally` in
+`private_flow_config.stage_private_yaml`, which covers normal exit, a console
+that never announces itself, an unparseable config, and any raised exception.
+The one thing a `finally` cannot survive is `SIGKILL`, so portal start also
+sweeps `.deployment-*.yaml` files older than `STALE_STAGING_AGE_S` from its
+staging directory. The age bound is deliberate: a config belonging to a console
+that is still starting is younger than the start timeout, so a concurrent start
+can never have its own file deleted out from under it.
+
+`scripts/smoke_test_frozen_flow.py` proves this against the built artifact
+rather than asserting it from a code reading. It stages a config through the
+same `private_flow_config` call the portal uses, starts the frozen console with
+`--allow-actions --config`, **deletes the staged file the moment the banner is
+parsed**, and only then drives every portal route. A future Flow that began
+re-reading the path would fail that smoke.
+
+Where a local remote-display window backend exists (macOS, Windows) that runs
+end to end. On Linux, Flow requires an injected `WindowClient` for that backend
+by design, so no attended session can attach on a headless runner; the Linux leg
+instead proves the frozen binary read the staged file's bytes, by staging a
+config whose unique `backend.kind` marker Flow echoes back verbatim.
 
 One upstream seam is worth closing: the attended console generates its bearer
 capability inside `serve()` and only prints it on stdout, so

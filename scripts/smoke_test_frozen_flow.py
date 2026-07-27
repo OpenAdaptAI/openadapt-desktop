@@ -23,6 +23,7 @@ import threading
 import time
 from collections import deque
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -66,17 +67,20 @@ def _seed_halted_run(runs_root: Path) -> None:
     )
 
 
-def _console_command(executable: Path, root: Path, port: int) -> list[str]:
-    """The exact shape ``engine.portal.service`` spawns, minus mutations.
+def _console_command(
+    executable: Path, root: Path, port: int, config: Path | None = None
+) -> list[str]:
+    """The exact shape ``engine.portal.service`` spawns.
 
-    ``--allow-actions`` is exercised separately: Flow deliberately refuses
+    With ``config`` this is the full portal command, mutations included. Without
+    it, the same command minus ``--allow-actions``: Flow deliberately refuses
     attended mutations that are not bound to a deployment target, and that
     refusal is asserted rather than worked around.
     """
 
     # Flow refuses a root that traverses a symlink, and a macOS temporary
     # directory reaches ``/private/var`` through one.
-    return [
+    command = [
         str(executable),
         "__openadapt_flow__",
         "console",
@@ -88,6 +92,40 @@ def _console_command(executable: Path, root: Path, port: int) -> list[str]:
         "--port",
         str(port),
     ]
+    if config is not None:
+        command += ["--allow-actions", "--config", str(config)]
+    return command
+
+
+#: A marker that exists nowhere but inside the staged deployment config. Flow
+#: echoes an unknown ``backend.kind`` verbatim, so seeing it in the console's
+#: output is proof the frozen binary read the staged file's bytes.
+CONFIG_READ_PROBE = "openadapt-portal-config-probe"
+
+#: ``backend.kind: citrix`` drives a local remote-display window and builds
+#: without a network peer, a display, or an installed extra -- but only where a
+#: default ``WindowClient`` exists. Flow refuses it on Linux by design.
+ATTENDED_SESSION_PLATFORMS = ("darwin", "win32")
+
+
+def _stage_portal_config(directory: Path, deployment: dict) -> Any:
+    """Stage a deployment config exactly the way ``PortalService`` does.
+
+    Serialization, the ``.deployment-`` prefix, the 0600 mode, and removal on
+    exit all come from ``engine.private_flow_config`` -- the same module and the
+    same call the portal uses -- so this exercises the real staging path rather
+    than a hand-written file.
+    """
+
+    import yaml
+
+    from engine.private_flow_config import PreparedPrivateYaml, stage_private_yaml
+
+    directory.mkdir(parents=True, exist_ok=True)
+    prepared = PreparedPrivateYaml(
+        payload=yaml.safe_dump(deployment, sort_keys=False), redactions=()
+    )
+    return stage_private_yaml(directory, prepared=prepared)
 
 
 def _await_console_banner(process: subprocess.Popen) -> tuple[int, str]:
@@ -130,19 +168,134 @@ def _await_console_banner(process: subprocess.Popen) -> tuple[int, str]:
     return parsed
 
 
-def _verify_attended_console(executable: Path, root: Path, env: dict[str, str]) -> dict:
-    """Prove the frozen sidecar serves the portal's decision surface."""
+def _drive_portal_surface(
+    process: subprocess.Popen,
+    *,
+    on_banner: Any = None,
+) -> dict:
+    """Drive every portal route against a started console.
+
+    ``on_banner`` runs the moment the capability banner is parsed, before the
+    first request. The portal uses that exact point to delete the staged
+    deployment config, so passing the deletion here proves the console serves
+    the whole decision surface with the file already gone.
+    """
 
     import urllib.error
     import urllib.request
 
     from engine.portal.flow_client import FlowConsoleClient, FlowConsoleUnavailable
-    from engine.portal.notifications import assert_generic_notification, notification_from_upstream
+    from engine.portal.notifications import (
+        assert_generic_notification,
+        notification_from_upstream,
+    )
+
+    started = time.monotonic()
+    port, access_token = _await_console_banner(process)
+    banner_seconds = time.monotonic() - started
+    if on_banner is not None:
+        on_banner()
+    flow = FlowConsoleClient(port=port, access_token=access_token)
+
+    deadline = time.monotonic() + CONSOLE_READY_TIMEOUT_S
+    while True:
+        try:
+            session = flow.request("session")
+            break
+        except FlowConsoleUnavailable:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.25)
+    if session.status != 200 or not isinstance(session.json, dict):
+        raise RuntimeError(f"frozen console did not serve a session: {session.status}")
+    flow.csrf_token = str(session.json.get("csrf_token") or "")
+    if not flow.csrf_token:
+        raise RuntimeError("frozen console served no CSRF capability")
+    if session.json.get("attend") is not True:
+        raise RuntimeError("frozen console did not start attention-first")
+
+    notification = flow.request("notification")
+    if notification.status != 200:
+        raise RuntimeError(f"attention notification is absent: {notification.status}")
+    assert_generic_notification(notification_from_upstream(notification.json))
+
+    tasks = flow.request("tasks")
+    payload = tasks.json
+    items = payload.get("items") if isinstance(payload, dict) else payload
+    if tasks.status != 200 or not isinstance(items, list) or not items:
+        raise RuntimeError(f"frozen console projected no attention queue: {tasks.status}")
+    run_id = str(items[0].get("id") or "")
+
+    detail = flow.request("task_detail", run_id=run_id)
+    if detail.status != 200 or not isinstance(detail.json, dict):
+        raise RuntimeError(f"frozen console served no decision detail: {detail.status}")
+    # ``item``/``task``/``task_digest``/``presentation`` is the shape
+    # ``openadapt_flow.console.human_decisions.decision_detail`` returns.
+    # Flow 1.23.0 -- the version this installer used to freeze -- returned a
+    # bare attention item here, and the portal shell renders none of it.
+    missing = [
+        key
+        for key in ("item", "task", "task_digest", "presentation")
+        if key not in detail.json
+    ]
+    if missing:
+        raise RuntimeError(
+            "frozen console did not serve the human-decision projection; "
+            f"missing: {', '.join(missing)}"
+        )
+    presentation = detail.json.get("presentation")
+    if not isinstance(presentation, dict) or not presentation.get("question"):
+        raise RuntimeError("decision detail carried no operator question")
+
+    # The capability is load-bearing: a phone reaches the portal, never the
+    # console, and an unauthenticated caller must get nothing at all.
+    try:
+        urllib.request.urlopen(f"http://127.0.0.1:{port}/api/session", timeout=10)
+    except urllib.error.HTTPError as exc:
+        if exc.code != 401:
+            raise RuntimeError(f"console answered an unauthenticated caller: {exc.code}")
+    else:
+        raise RuntimeError("console served an unauthenticated caller")
+
+    return {
+        "console_banner_seconds": round(banner_seconds, 3),
+        "console_decision_question": bool(presentation.get("question")),
+        "console_unauthenticated_status": 401,
+    }
+
+
+def _stop(process: subprocess.Popen) -> None:
+    process.terminate()
+    try:
+        process.wait(timeout=30)
+    except subprocess.TimeoutExpired:  # pragma: no cover - defensive
+        process.kill()
+
+
+def _verify_attended_console(executable: Path, root: Path, env: dict[str, str]) -> dict:
+    """Prove the frozen sidecar serves the portal's decision surface.
+
+    Three separate facts, because the portal needs all three and each has
+    shipped broken before:
+
+    1.  The read-only attended console starts frozen and serves every route the
+        portal relays.
+    2.  ``--allow-actions`` with **no** deployment target is still refused. That
+        is a safety invariant, not an inconvenience.
+    3.  ``--allow-actions --config`` -- the shape ``PortalService`` now spawns --
+        gets past that refusal and the frozen binary demonstrably *reads the
+        staged file's bytes*.
+
+    Where a local remote-display window backend exists (macOS, Windows), (3) is
+    carried all the way to a live portal surface with the staged config deleted
+    the instant the banner appears. Flow refuses that backend on Linux by
+    design, so the Linux leg proves the config read rather than pretending an
+    attended session can attach to a headless runner.
+    """
 
     (root / "console-bundles").mkdir(parents=True, exist_ok=True)
     _seed_halted_run(root / "console-runs")
 
-    started = time.monotonic()
     process = subprocess.Popen(
         _console_command(executable, root, _free_port()),
         stdout=subprocess.PIPE,
@@ -151,75 +304,9 @@ def _verify_attended_console(executable: Path, root: Path, env: dict[str, str]) 
         env=env,
     )
     try:
-        port, access_token = _await_console_banner(process)
-        banner_seconds = time.monotonic() - started
-        flow = FlowConsoleClient(port=port, access_token=access_token)
-
-        deadline = time.monotonic() + CONSOLE_READY_TIMEOUT_S
-        while True:
-            try:
-                session = flow.request("session")
-                break
-            except FlowConsoleUnavailable:
-                if time.monotonic() >= deadline:
-                    raise
-                time.sleep(0.25)
-        if session.status != 200 or not isinstance(session.json, dict):
-            raise RuntimeError(f"frozen console did not serve a session: {session.status}")
-        flow.csrf_token = str(session.json.get("csrf_token") or "")
-        if not flow.csrf_token:
-            raise RuntimeError("frozen console served no CSRF capability")
-        if session.json.get("attend") is not True:
-            raise RuntimeError("frozen console did not start attention-first")
-
-        notification = flow.request("notification")
-        if notification.status != 200:
-            raise RuntimeError(f"attention notification is absent: {notification.status}")
-        assert_generic_notification(notification_from_upstream(notification.json))
-
-        tasks = flow.request("tasks")
-        payload = tasks.json
-        items = payload.get("items") if isinstance(payload, dict) else payload
-        if tasks.status != 200 or not isinstance(items, list) or not items:
-            raise RuntimeError(f"frozen console projected no attention queue: {tasks.status}")
-        run_id = str(items[0].get("id") or "")
-
-        detail = flow.request("task_detail", run_id=run_id)
-        if detail.status != 200 or not isinstance(detail.json, dict):
-            raise RuntimeError(f"frozen console served no decision detail: {detail.status}")
-        # ``item``/``task``/``task_digest``/``presentation`` is the shape
-        # ``openadapt_flow.console.human_decisions.decision_detail`` returns.
-        # Flow 1.23.0 -- the version this installer used to freeze -- returned a
-        # bare attention item here, and the portal shell renders none of it.
-        missing = [
-            key
-            for key in ("item", "task", "task_digest", "presentation")
-            if key not in detail.json
-        ]
-        if missing:
-            raise RuntimeError(
-                "frozen console did not serve the human-decision projection; "
-                f"missing: {', '.join(missing)}"
-            )
-        presentation = detail.json.get("presentation")
-        if not isinstance(presentation, dict) or not presentation.get("question"):
-            raise RuntimeError("decision detail carried no operator question")
-
-        # The capability is load-bearing: a phone reaches the portal, never the
-        # console, and an unauthenticated caller must get nothing at all.
-        try:
-            urllib.request.urlopen(f"http://127.0.0.1:{port}/api/session", timeout=10)
-        except urllib.error.HTTPError as exc:
-            if exc.code != 401:
-                raise RuntimeError(f"console answered an unauthenticated caller: {exc.code}")
-        else:
-            raise RuntimeError("console served an unauthenticated caller")
+        result = _drive_portal_surface(process)
     finally:
-        process.terminate()
-        try:
-            process.wait(timeout=30)
-        except subprocess.TimeoutExpired:  # pragma: no cover - defensive
-            process.kill()
+        _stop(process)
 
     refusal = subprocess.run(
         _console_command(executable, root, _free_port()) + ["--allow-actions"],
@@ -235,13 +322,97 @@ def _verify_attended_console(executable: Path, root: Path, env: dict[str, str]) 
             "the frozen console no longer refuses attended mutations without a "
             f"deployment target (exit {refusal.returncode}): {combined[-1000:]}"
         )
+    result["console_refuses_unbound_mutations"] = True
 
-    return {
-        "console_banner_seconds": round(banner_seconds, 3),
-        "console_decision_question": bool(presentation.get("question")),
-        "console_unauthenticated_status": 401,
-        "console_refuses_unbound_mutations": True,
+    result.update(_verify_portal_deployment_target(executable, root, env))
+    return result
+
+
+def _verify_portal_deployment_target(
+    executable: Path, root: Path, env: dict[str, str]
+) -> dict:
+    """Prove ``--config`` reaches the frozen binary and is actually read."""
+
+    staging = root / "portal-staging"
+
+    # A kind that exists nowhere in Flow. Flow echoes it verbatim, so finding
+    # the marker in the console's own output is proof the frozen binary opened
+    # and parsed the staged file rather than falling back to a default.
+    with _stage_portal_config(
+        staging, {"backend": {"kind": CONFIG_READ_PROBE}}
+    ) as probe_config:
+        probed = subprocess.run(
+            _console_command(executable, root, _free_port(), probe_config),
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=False,
+            env=env,
+        )
+    output = probed.stdout + probed.stderr
+    if "requires an explicit --config" in output:
+        raise RuntimeError(
+            "the frozen console did not accept the portal's staged --config: "
+            f"{output[-1000:]}"
+        )
+    if CONFIG_READ_PROBE not in output:
+        raise RuntimeError(
+            "the frozen console never read the staged deployment config; its "
+            f"contents did not reach Flow: {output[-1000:]}"
+        )
+    result: dict[str, Any] = {
+        "console_accepts_staged_config": True,
+        "console_read_staged_config": True,
     }
+
+    if sys.platform not in ATTENDED_SESSION_PLATFORMS:
+        # Honest, not skipped-and-silent: Flow requires an injected WindowClient
+        # for this backend on Linux, so no attended session can attach on a
+        # headless runner. The exact-main macOS and Windows legs carry it.
+        result["console_attended_session"] = "unsupported-platform"
+        return result
+
+    deployment = {
+        "backend": {
+            "kind": "citrix",
+            "rdp_window": "OpenAdapt Frozen Console Smoke",
+            # A credential-shaped value, because that is exactly why the staged
+            # file is not allowed to outlive the console's startup.
+            "rdp_readiness_text": "frozen-console-smoke",
+        }
+    }
+    process: subprocess.Popen | None = None
+    with _stage_portal_config(staging, deployment) as config_path:
+        staged = Path(config_path)
+        if not staged.is_file():  # pragma: no cover - defensive
+            raise RuntimeError("the portal config was not staged")
+        process = subprocess.Popen(
+            _console_command(executable, root, _free_port(), staged),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+        try:
+            # Delete the staged config the moment the banner proves Flow has
+            # already read it -- exactly what ``PortalService`` does -- and only
+            # then drive the portal. Every route below is served with the
+            # secret-bearing file already gone from disk.
+            attended = _drive_portal_surface(
+                process,
+                on_banner=lambda: staged.unlink(missing_ok=True),
+            )
+            if staged.exists():
+                raise RuntimeError(
+                    "the staged deployment config outlived the console banner"
+                )
+        finally:
+            _stop(process)
+
+    result["console_attended_session"] = True
+    result["console_serves_without_staged_config"] = True
+    result["console_attended_banner_seconds"] = attended["console_banner_seconds"]
+    return result
 
 
 def _run(command: list[str], *, env: dict[str, str], timeout: float = 900) -> tuple[str, float]:
