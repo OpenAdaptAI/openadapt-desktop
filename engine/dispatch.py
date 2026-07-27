@@ -1597,11 +1597,22 @@ class EngineDispatcher:
             run = self.services.db.get_run(run_id)
             if not run or not run.get("run_path"):
                 raise ValueError("Qualification run did not retain a local evidence directory")
+            raw_report_path = Path(str(run["run_path"])) / "report.json"
+            if not raw_report_path.is_file() or raw_report_path.is_symlink():
+                raise ValueError("Qualification run did not retain a valid report")
+            raw_report_bytes = raw_report_path.read_bytes()
+            try:
+                raw_report = json.loads(raw_report_bytes)
+            except json.JSONDecodeError as exc:
+                raise ValueError("Qualification run report is not valid JSON") from exc
+            if not isinstance(raw_report, dict):
+                raise ValueError("Qualification run report must be a JSON object")
             evidence = retain_run_evidence(
                 bundle,
                 case_id=case_id,
                 run_id=run_id,
                 run_dir=Path(str(run["run_path"])),
+                report_bytes=raw_report_bytes,
             )
             from openadapt_flow.traversal import iter_workflow_steps
 
@@ -1613,9 +1624,6 @@ class EngineDispatcher:
             )
             from engine.qualification_keys import KEY_ID, qualification_signer
 
-            raw_report_path = Path(str(run["run_path"])) / "report.json"
-            raw_report_bytes = raw_report_path.read_bytes()
-            raw_report = FlowBridge.read_report(Path(str(run["run_path"])))
             precise_outcome = str(execution.get("outcome") or "unknown")
             if (
                 precise_outcome

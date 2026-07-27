@@ -105,19 +105,23 @@ def retain_run_evidence(
     case_id: str,
     run_id: str,
     run_dir: Path,
+    report_bytes: bytes | None = None,
 ) -> list[dict[str, str]]:
     """Retain a privacy-safe receipt bound to the exact local run report."""
 
     case_id = validate_case_id(case_id)
     run_id = validate_path_token(run_id, label="Run id")
     source = run_dir / "report.json"
-    if not source.is_file() or source.is_symlink():
+    if report_bytes is None and (not source.is_file() or source.is_symlink()):
         return []
-    report_bytes = source.read_bytes()
+    if report_bytes is None:
+        report_bytes = source.read_bytes()
     try:
         report = json.loads(report_bytes)
     except json.JSONDecodeError as exc:
         raise QualificationLifecycleError("Run report is not valid JSON") from exc
+    if not isinstance(report, dict):
+        raise QualificationLifecycleError("Run report must be a JSON object")
     envelope = report.get("outcome_envelope") or {}
     receipt = {
         "schema": "openadapt.qualification-run-receipt/v1",

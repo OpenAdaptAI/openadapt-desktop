@@ -1030,6 +1030,12 @@ def test_dispatcher_signs_observed_capabilities_instead_of_requirements(
         "engine.qualification_keys.qualification_signer",
         lambda: (private_raw, b64encode(public_raw).decode("ascii")),
     )
+    monkeypatch.setattr(
+        "engine.flow_bridge.FlowBridge.read_report",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("qualification must parse the exact retained report bytes")
+        ),
+    )
 
     run_dir = config.data_dir / "runs" / "run-1"
     run_dir.mkdir(parents=True)
