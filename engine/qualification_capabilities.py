@@ -217,6 +217,11 @@ def current_signed_capability_observations(
             or observation.environment_contract_sha256 != environment_contract_sha256
             or observation.environment_digest != project.environment.environment_digest
             or observation.runtime_version != project.environment.runtime_version
+            or observation.expected_target_kind != project.environment.target_kind
+            or (
+                project.environment.required_capabilities
+                and observation.execution_profile not in {"standard", "regulated"}
+            )
             or observation.case_id != path.parent.parent.name
             or observation.run_id != path.parent.name
             or run_receipt.get("schema") != "openadapt.qualification-run-receipt/v1"
@@ -257,6 +262,13 @@ def collect_qualification_capabilities(
     lets a successful physical-input step prove actuation without treating a
     successful WAIT as an action-delivery receipt.
     """
+
+    from openadapt_flow.ir import RunReport
+
+    # Capability evidence is a certification input, so derive it only from
+    # Flow's closed report schema.  A plausible-looking arbitrary mapping must
+    # not be able to mint identity, effect, or actuation capabilities.
+    report = RunReport.model_validate(report).model_dump(mode="json")
 
     raw_target = report.get("execution_target_kind")
     observed_target: QualificationTargetKind | None = (

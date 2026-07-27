@@ -422,19 +422,20 @@ def _capability_coverage(
         current_results = [
             item for item in case.results if item.project_revision == project.revision
         ]
-        linked_results = [
-            result
-            for result in current_results
-            if receipt_relative_path is not None
+        latest_result = current_results[-1] if current_results else None
+        latest = (
+            latest_result
+            if latest_result is not None
+            and receipt_relative_path is not None
             and receipt_sha256 is not None
-            and set(result.runner_capabilities) == observed
+            and set(latest_result.runner_capabilities) == observed
             and any(
                 evidence.relative_path == receipt_relative_path
                 and evidence.sha256 == receipt_sha256
-                for evidence in result.evidence
+                for evidence in latest_result.evidence
             )
-        ]
-        latest = linked_results[-1] if linked_results else None
+            else None
+        )
         observed_by_all = (
             set(observed) if observed_by_all is None else observed_by_all.intersection(observed)
         )

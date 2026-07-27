@@ -6,6 +6,7 @@ from base64 import b64encode
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -22,45 +23,123 @@ def _sha() -> str:
     return hashlib.sha256(b"exact run report").hexdigest()
 
 
+def _report(
+    *,
+    target_kind: str = "web",
+    profile: str | None = None,
+    results: list[dict] | None = None,
+    evidence_classes: list[str] | None = None,
+) -> dict:
+    report = {
+        "workflow_name": "qualification-test",
+        "started_at": "2026-07-27T12:00:00+00:00",
+        "execution_target_kind": target_kind,
+        "results": results or [],
+    }
+    if profile is not None:
+        report.update(
+            {
+                "execution_profile": profile,
+                "execution_outcome": "VERIFIED",
+                "production_eligible": True,
+                "execution_completed": True,
+                "success": True,
+                "external_network_calls": "none",
+                "outcome_envelope": {
+                    "outcome": "VERIFIED",
+                    "profile": profile,
+                    "production_eligible": True,
+                    "execution_completed": True,
+                    "required_contracts": {
+                        "authorization": 1,
+                        "identity": 0,
+                        "postcondition": 0,
+                        "effect": 0,
+                    },
+                    "passed_contracts": {
+                        "authorization": 1,
+                        "identity": 0,
+                        "postcondition": 0,
+                        "effect": 0,
+                    },
+                    "evidence_classes": evidence_classes or ["authorization"],
+                    "model_calls": 0,
+                    "external_network_calls": "none",
+                    "compensation_actions": 0,
+                },
+            }
+        )
+    return report
+
+
 def test_capabilities_are_derived_from_exact_run_evidence() -> None:
     observation = collect_qualification_capabilities(
-        {
-            "execution_target_kind": "web",
-            "execution_profile": "standard",
-            "outcome_envelope": {
-                "profile": "standard",
-                "evidence_classes": [
-                    "authorization",
-                    "identity",
-                    "postcondition",
-                    "effect_tier_1",
-                ],
-            },
-            "results": [
+        _report(
+            profile="standard",
+            evidence_classes=[
+                "authorization",
+                "identity",
+                "postcondition",
+                "effect_tier_1",
+            ],
+            results=[
                 {
                     "step_id": "submit",
+                    "intent": "Submit",
                     "ok": True,
-                    "resolution": {"rung": "structural"},
+                    "resolution": {
+                        "rung": "structural",
+                        "point": [10, 10],
+                        "confidence": 1.0,
+                        "elapsed_ms": 1.0,
+                    },
                     "before_png": "steps/submit.before.png",
-                    "delivery_receipt": {"operation": "dom_click"},
+                    "delivery_receipt": {
+                        "receipt_id": "receipt-1",
+                        "operation": "dom_click",
+                        "native": True,
+                        "delivered_at": "2026-07-27T12:00:01+00:00",
+                    },
                     "identity": {
                         "status": "verified",
+                        "mode": "signal_quorum",
                         "signal_evidence": [
-                            {"source": "session", "verdict": "verified"},
-                            {"source": "application", "verdict": "verified"},
-                            {"source": "workflow_state", "verdict": "verified"},
+                            {
+                                "signal": "session",
+                                "source": "session",
+                                "verdict": "verified",
+                                "evidence_class": "session_identity",
+                                "match": "exact",
+                            },
+                            {
+                                "signal": "application",
+                                "source": "application",
+                                "verdict": "verified",
+                                "evidence_class": "application_identity",
+                                "match": "exact",
+                            },
+                            {
+                                "signal": "workflow_state",
+                                "source": "workflow_state",
+                                "verdict": "verified",
+                                "evidence_class": "workflow_state_identity",
+                                "match": "exact",
+                            },
                         ],
                     },
                     "postconditions_ok": True,
                     "effect_evidence": [
                         {
+                            "effect_contract_hash": "sha256:" + "1" * 64,
+                            "substrate": "rest",
                             "verification_tier": 1,
+                            "initial_verdict": "confirmed",
                             "final_verdict": "confirmed",
                         }
                     ],
                 }
             ],
-        },
+        ),
         expected_target_kind="web",
         runtime_version="1.24.0",
         report_sha256=_sha(),
@@ -86,23 +165,34 @@ def test_capabilities_are_derived_from_exact_run_evidence() -> None:
 
 def test_wrong_substrate_cannot_satisfy_declared_capabilities() -> None:
     observation = collect_qualification_capabilities(
-        {
-            "execution_target_kind": "windows",
-            "execution_profile": "standard",
-            "outcome_envelope": {
-                "profile": "standard",
-                "evidence_classes": ["authorization", "effect_tier_1"],
-            },
-            "results": [
+        _report(
+            target_kind="windows",
+            profile="standard",
+            evidence_classes=["authorization", "effect_tier_1"],
+            results=[
                 {
                     "step_id": "submit",
+                    "intent": "Submit",
                     "ok": True,
-                    "resolution": {"rung": "structural"},
+                    "resolution": {
+                        "rung": "structural",
+                        "point": [10, 10],
+                        "confidence": 1.0,
+                        "elapsed_ms": 1.0,
+                    },
                     "postconditions_ok": True,
-                    "effect_evidence": [{"verification_tier": 1}],
+                    "effect_evidence": [
+                        {
+                            "effect_contract_hash": "sha256:" + "1" * 64,
+                            "substrate": "rest",
+                            "verification_tier": 1,
+                            "initial_verdict": "confirmed",
+                            "final_verdict": "confirmed",
+                        }
+                    ],
                 }
             ],
-        },
+        ),
         expected_target_kind="citrix",
         runtime_version="1.24.0",
         report_sha256=_sha(),
@@ -117,17 +207,22 @@ def test_retained_capability_receipt_is_typed_bounded_and_hash_bound(
     tmp_path: Path,
 ) -> None:
     observation = collect_qualification_capabilities(
-        {
-            "execution_target_kind": "web",
-            "results": [
+        _report(
+            results=[
                 {
                     "step_id": "submit",
+                    "intent": "Submit",
                     "ok": True,
-                    "resolution": {"rung": "structural"},
+                    "resolution": {
+                        "rung": "structural",
+                        "point": [10, 10],
+                        "confidence": 1.0,
+                        "elapsed_ms": 1.0,
+                    },
                     "patient_name": "Sensitive Person",
                 }
             ],
-        },
+        ),
         expected_target_kind="web",
         runtime_version="1.24.0",
         report_sha256=_sha(),
@@ -197,6 +292,8 @@ def test_current_capability_receipt_rejects_tampering(tmp_path: Path) -> None:
     environment = SimpleNamespace(
         environment_digest="4" * 64,
         runtime_version="1.24.0",
+        target_kind="web",
+        required_capabilities=[],
         contract_sha256=lambda: "3" * 64,
     )
     project = SimpleNamespace(
@@ -207,16 +304,21 @@ def test_current_capability_receipt_rejects_tampering(tmp_path: Path) -> None:
         contract_sha256=lambda: "1" * 64,
     )
     observation = collect_qualification_capabilities(
-        {
-            "execution_target_kind": "web",
-            "results": [
+        _report(
+            results=[
                 {
                     "step_id": "submit",
+                    "intent": "Submit",
                     "ok": True,
-                    "resolution": {"rung": "structural"},
+                    "resolution": {
+                        "rung": "structural",
+                        "point": [10, 10],
+                        "confidence": 1.0,
+                        "elapsed_ms": 1.0,
+                    },
                 }
             ],
-        },
+        ),
         expected_target_kind="web",
         runtime_version="1.24.0",
         report_sha256=_sha(),
@@ -260,6 +362,27 @@ def test_current_capability_receipt_rejects_tampering(tmp_path: Path) -> None:
     )
     assert current == {"representative": signed}
 
+    environment.target_kind = "citrix"
+    assert (
+        current_signed_capability_observations(
+            tmp_path,
+            workflow_contract_sha256="2" * 64,
+            project=project,
+        )
+        == {}
+    )
+    environment.target_kind = "web"
+    environment.required_capabilities = ["actuation"]
+    assert (
+        current_signed_capability_observations(
+            tmp_path,
+            workflow_contract_sha256="2" * 64,
+            project=project,
+        )
+        == {}
+    )
+    environment.required_capabilities = []
+
     tampered = json.loads(receipt_path.read_text())
     tampered["observations"].append({"name": "session_continuity", "source": "identity"})
     receipt_path.write_text(json.dumps(tampered), encoding="utf-8")
@@ -271,3 +394,14 @@ def test_current_capability_receipt_rejects_tampering(tmp_path: Path) -> None:
         )
         == {}
     )
+
+
+def test_untyped_step_evidence_cannot_mint_capabilities() -> None:
+    with pytest.raises(ValueError):
+        collect_qualification_capabilities(
+            _report(results=[{"step_id": "submit", "ok": True, "identity": {}}]),
+            expected_target_kind="web",
+            runtime_version="1.24.0",
+            report_sha256=_sha(),
+            action_kinds={"submit": "click"},
+        )

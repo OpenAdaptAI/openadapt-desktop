@@ -49,7 +49,7 @@ from openadapt_flow.ir import (  # noqa: E402
     StructuralLocator,
     Workflow,
 )
-from openadapt_flow.qualification import IdentitySignalPolicy  # noqa: E402
+from openadapt_flow.qualification import IdentitySignalPolicy, sign_case_result  # noqa: E402
 from openadapt_flow.runtime.effects.effect import Effect, EffectKind  # noqa: E402
 from openadapt_flow.traversal import iter_workflow_steps  # noqa: E402
 
@@ -182,13 +182,54 @@ def test_local_case_run_is_signed_and_bound_to_exact_retained_evidence(
     run_dir = tmp_path / "run-1"
     run_dir.mkdir()
     raw_report = {
+        "workflow_name": "qualification-test",
+        "started_at": "2026-07-27T12:00:00+00:00",
         "execution_target_kind": "web",
+        "execution_profile": "standard",
+        "execution_outcome": "VERIFIED",
+        "production_eligible": True,
+        "execution_completed": True,
+        "success": True,
+        "external_network_calls": "none",
+        "outcome_envelope": {
+            "outcome": "VERIFIED",
+            "profile": "standard",
+            "production_eligible": True,
+            "execution_completed": True,
+            "required_contracts": {
+                "authorization": 1,
+                "identity": 0,
+                "postcondition": 0,
+                "effect": 0,
+            },
+            "passed_contracts": {
+                "authorization": 1,
+                "identity": 0,
+                "postcondition": 0,
+                "effect": 0,
+            },
+            "evidence_classes": ["authorization"],
+            "model_calls": 0,
+            "external_network_calls": "none",
+            "compensation_actions": 0,
+        },
         "results": [
             {
                 "step_id": "submit",
+                "intent": "Submit",
                 "ok": True,
-                "resolution": {"rung": "structural"},
-                "delivery_receipt": {"operation": "dom_click"},
+                "resolution": {
+                    "rung": "structural",
+                    "point": [10, 10],
+                    "confidence": 1.0,
+                    "elapsed_ms": 1.0,
+                },
+                "delivery_receipt": {
+                    "receipt_id": "receipt-1",
+                    "operation": "dom_click",
+                    "native": True,
+                    "delivered_at": "2026-07-27T12:00:01+00:00",
+                },
             }
         ],
     }
@@ -246,6 +287,36 @@ def test_local_case_run_is_signed_and_bound_to_exact_retained_evidence(
     assert result["project"]["revision"] == revision
     assert case["results"][0]["status"] == "passed"
     assert case["results"][0]["attestation_signature"]
+
+    persisted = Workflow.load(bundle)
+    assert persisted.qualification is not None
+    persisted_case = next(
+        item
+        for item in persisted.qualification.cases
+        if item.id == "representative-local"
+    )
+    linked_result = persisted_case.results[-1]
+    later_unlinked = sign_case_result(
+        linked_result.model_copy(
+            update={
+                "evidence": [
+                    item for item in linked_result.evidence if item.kind == "run_report"
+                ],
+                "attestation_signature": "",
+            }
+        ),
+        private_key=private_raw,
+    )
+    persisted_case.results.append(later_unlinked)
+    persisted.save(bundle)
+
+    coverage = inspect_bundle(bundle, workflow_id="wf-1")["capability_coverage"]
+    case_coverage = next(
+        item for item in coverage["cases"] if item["case_id"] == "representative-local"
+    )
+    assert case_coverage["has_current_receipt"] is True
+    assert case_coverage["has_current_result"] is False
+    assert coverage["satisfied"] is False
 
 
 def test_retained_case_receipt_binds_report_without_copying_sensitive_body(
@@ -965,6 +1036,8 @@ def test_dispatcher_signs_observed_capabilities_instead_of_requirements(
     (run_dir / "report.json").write_text(
         json.dumps(
             {
+                "workflow_name": "qualification-test",
+                "started_at": "2026-07-27T12:00:00+00:00",
                 "execution_target_kind": "web",
                 "execution_profile": "standard",
                 "execution_outcome": "VERIFIED",
@@ -998,9 +1071,20 @@ def test_dispatcher_signs_observed_capabilities_instead_of_requirements(
                 "results": [
                     {
                         "step_id": "submit",
+                        "intent": "Submit",
                         "ok": True,
-                        "resolution": {"rung": "structural"},
-                        "delivery_receipt": {"operation": "dom_click"},
+                        "resolution": {
+                            "rung": "structural",
+                            "point": [10, 10],
+                            "confidence": 1.0,
+                            "elapsed_ms": 1.0,
+                        },
+                        "delivery_receipt": {
+                            "receipt_id": "receipt-1",
+                            "operation": "dom_click",
+                            "native": True,
+                            "delivered_at": "2026-07-27T12:00:01+00:00",
+                        },
                     }
                 ],
             }
