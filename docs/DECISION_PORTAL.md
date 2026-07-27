@@ -117,23 +117,38 @@ the dispatcher, and again in the shell before the plugin is called.
 
 ## Current wiring status
 
-The portal works today against a development install of Flow with its console
-extra:
+### Packaging: done
 
-```bash
-uv sync --extra dev
-pip install 'openadapt-flow[console]>=1.24.0'
-```
+The frozen sidecar now carries the console. `pyproject.toml` pins
+`openadapt-flow[browser,console]==1.25.0`, `scripts/build_frozen_engine.py`
+collects uvicorn's run-time string imports and `openadapt_flow.console`, and
+the executable is built unbuffered so the console's one-time capability banner
+survives the pipe the portal reads it from. `scripts/smoke_test_frozen_flow.py`
+proves this behaviourally against the built artifact on every sidecar build: it
+starts the frozen attended console, parses the banner with the portal's own
+parser, and drives `/api/session`, `/api/attention`,
+`/api/attention/{run_id}`, and an unauthenticated probe through
+`engine.portal.flow_client`.
 
-Two prerequisites are **not** met by the packaged Desktop installer yet, and
-both are packaging changes deliberately kept out of this feature:
+### Runtime: two gaps remain before a phone can decide anything
 
-1. `pyproject.toml` pins `openadapt-flow==1.23.0` in the `build` extra, which
-   predates `openadapt_flow/console/human_decisions.py` (added in 1.24.0).
-2. That pin does not request the `console` extra, so `fastapi` and `uvicorn`
-   are absent from the frozen sidecar and `openadapt-flow console` exits with
-   an install hint. Freezing `uvicorn` also needs PyInstaller collection flags
-   in `scripts/build_frozen_engine.py`.
+Both are portal-side wiring, not packaging, and both fail closed today:
+
+1. **No deployment target is passed to the console.** `PortalService`
+   always spawns `console --attend --allow-actions`, and Flow deliberately
+   refuses attended mutations that are not bound to a deployment: `console
+   --attend --allow-actions requires an explicit --config or --backend target`.
+   The console exits 1 and `portal_start` reports "The local decision service
+   did not start." Desktop already resolves a governed deployment config for
+   runs (`data_dir/deployment.json`, staged privately by
+   `engine.private_flow_config`); the portal must pass the same one, and a
+   human should decide whether that staged file may live for a whole portal
+   session rather than a single run.
+2. **The readiness check races the console.** Flow prints the banner *before*
+   `uvicorn.run()` binds, so `PortalService.start`'s immediate
+   `flow.request("session")` can hit a closed port and raise "The local
+   decision service started but did not answer." It needs a short bounded
+   retry.
 
 One upstream seam is worth closing: the attended console generates its bearer
 capability inside `serve()` and only prints it on stdout, so
