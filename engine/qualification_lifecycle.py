@@ -61,9 +61,7 @@ def store_case_parameters(
         raise QualificationLifecycleError("Case parameters must be a JSON object")
     forbidden = set(payload) & (forbidden_keys or set())
     if forbidden:
-        env_names = ", ".join(
-            secret_environment_reference(name) for name in sorted(forbidden)
-        )
+        env_names = ", ".join(secret_environment_reference(name) for name in sorted(forbidden))
         raise QualificationLifecycleError(
             "Secret values cannot be stored in qualification cases. "
             f"Configure these runner secret references instead: {env_names}"
@@ -151,6 +149,40 @@ def retain_run_evidence(
             "relative_path": relative.as_posix(),
         }
     ]
+
+
+def retain_capability_observation(
+    bundle_dir: Path,
+    *,
+    case_id: str,
+    run_id: str,
+    observation: dict[str, Any],
+) -> dict[str, str]:
+    """Retain a canonical PHI-free signed capability receipt."""
+
+    from engine.qualification_capabilities import (
+        SignedQualificationCapabilityObservation,
+    )
+
+    case_id = validate_case_id(case_id)
+    run_id = validate_path_token(run_id, label="Run id")
+    validated = SignedQualificationCapabilityObservation.model_validate(observation)
+    relative = Path(case_id) / run_id / "capability-observation.json"
+    destination = bundle_dir / "qualification-evidence" / relative
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(
+        json.dumps(
+            validated.model_dump(mode="json", by_alias=True),
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+    return {
+        "kind": "other",
+        "sha256": hashlib.sha256(destination.read_bytes()).hexdigest(),
+        "relative_path": relative.as_posix(),
+    }
 
 
 def copy_bundle_version(source: Path, destination: Path) -> None:
