@@ -116,8 +116,14 @@ def validate_frozen_notice_inventory(
     *,
     members: set[str],
     extract_member,
+    capture_floor: str | None = None,
 ) -> tuple[str, ...]:
-    """Validate the generated notice inventory against exact archive bytes."""
+    """Validate the generated notice inventory against exact archive bytes.
+
+    ``capture_floor`` defaults to the bound the bundled Flow distribution
+    declares for its ``capture`` extra, read from installed metadata. Only a
+    caller without that distribution installed -- a unit test -- supplies it.
+    """
 
     try:
         inventory = json.loads(inventory_payload)
@@ -179,7 +185,7 @@ def validate_frozen_notice_inventory(
     capture_package = package_index.get(CAPTURE_DISTRIBUTION)
     if capture_package is None:
         raise ValueError(f"frozen runtime closure omits {CAPTURE_DISTRIBUTION}")
-    capture_floor = declared_capture_floor()
+    capture_floor = capture_floor or declared_capture_floor()
     capture_version = str(capture_package["version"])
     if not capture_floor_is_satisfied(capture_version, capture_floor):
         raise ValueError(

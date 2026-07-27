@@ -306,10 +306,15 @@ def test_frozen_notice_inventory_binds_concrete_archive_bytes(
         }
     ).encode()
 
+    # Supplied explicitly because this job installs Desktop without the build
+    # extra, so there is no bundled Flow distribution to read the floor from.
+    # The real gate reads it from Flow's own metadata; that path is covered by
+    # ``test_bundled_capture_floor_comes_from_the_frozen_flow_runtime``.
     build_only_roots = verify.validate_frozen_notice_inventory(
         inventory,
         members=set(payloads),
         extract_member=payloads.__getitem__,
+        capture_floor="1.2.0",
     )
     assert build_only_roots == ("PyInstaller",)
 
@@ -326,6 +331,7 @@ def test_frozen_notice_inventory_binds_concrete_archive_bytes(
             json.dumps(skewed).encode(),
             members=set(payloads),
             extract_member=payloads.__getitem__,
+            capture_floor="1.2.0",
         )
 
 
@@ -519,6 +525,14 @@ def test_bundled_capture_floor_comes_from_the_frozen_flow_runtime() -> None:
     """The floor is read from Flow's metadata, never restated in this repo."""
 
     from scripts import frozen_notices
+
+    try:
+        metadata.distribution(frozen_notices.FLOW_DISTRIBUTION)
+    except metadata.PackageNotFoundError:
+        pytest.skip(
+            "the bundled openadapt-flow runtime is installed by the build "
+            "extra; the qualification-contract job supplies it"
+        )
 
     floor = frozen_notices.declared_capture_floor()
     assert frozen_notices.capture_floor_is_satisfied(floor, floor)
