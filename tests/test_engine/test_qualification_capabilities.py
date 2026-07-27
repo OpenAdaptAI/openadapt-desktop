@@ -10,6 +10,8 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+pytest.importorskip("openadapt_flow.ir")
+
 from engine.qualification_capabilities import (
     collect_qualification_capabilities,
     current_signed_capability_observations,
