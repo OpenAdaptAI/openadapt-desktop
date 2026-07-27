@@ -238,7 +238,7 @@ class PortalApp:
             if run_id is None:
                 return self._refusal(404, "not_found", "No such decision.")
             artifact_id = (query.get("id") or [""])[0]
-            if not _ARTIFACT_ID.fullmatch(artifact_id):
+            if not _ARTIFACT_ID.fullmatch(artifact_id) or ".." in artifact_id:
                 return self._refusal(400, "bad_request", "Invalid evidence reference.")
             return self._relay(
                 "task_evidence", run_id=run_id, params={"id": artifact_id}
@@ -333,13 +333,44 @@ class _Handler(BaseHTTPRequestHandler):
     server_version = "OpenAdaptPortal"
     sys_version = ""
 
+    # socketserver only calls settimeout() when this is not None, so without it
+    # every read blocks forever and a handful of half-open sockets from a
+    # hostile network can pin every worker thread indefinitely.
+    timeout = 15
+
+    # HTTP/1.0 semantics close each connection, so an over-long body that we
+    # refuse cannot desync into the next request on the same socket.
+    protocol_version = "HTTP/1.0"
+
     @property
     def _app(self) -> PortalApp:
         return self.server.app  # type: ignore[attr-defined]
 
     def _respond(self, method: str) -> None:
-        length = int(self.headers.get("content-length") or 0)
-        body = self.rfile.read(length) if 0 < length <= _MAX_BODY_BYTES else b""
+        try:
+            length = int(self.headers.get("content-length") or 0)
+        except (TypeError, ValueError):
+            # A malformed Content-Length must be a refusal, not a traceback on
+            # stderr from socketserver's error handler.
+            length = -1
+        if length < 0:
+            status, headers, payload = PortalApp._refusal(
+                400, "bad_request", "Invalid request."
+            )
+            self._write(method, status, headers, payload)
+            return
+        if length > _MAX_BODY_BYTES:
+            # Refuse before reading. The connection closes either way, so the
+            # unread bytes cannot become the next request.
+            status, headers, payload = PortalApp._refusal(
+                413, "bad_request", "Request body is too large."
+            )
+            self._write(method, status, headers, payload)
+            return
+        try:
+            body = self.rfile.read(length) if length else b""
+        except OSError:
+            return
         try:
             status, headers, payload = self._app.handle(
                 method, self.path, self.headers, body
@@ -348,13 +379,21 @@ class _Handler(BaseHTTPRequestHandler):
             status, headers, payload = PortalApp._refusal(
                 500, "error", "The portal could not complete that request."
             )
-        self.send_response(status)
-        for name, value in headers.items():
-            self.send_header(name, value)
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        if method != "HEAD":
-            self.wfile.write(payload)
+        self._write(method, status, headers, payload)
+
+    def _write(
+        self, method: str, status: int, headers: dict[str, str], payload: bytes
+    ) -> None:
+        try:
+            self.send_response(status)
+            for name, value in headers.items():
+                self.send_header(name, value)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            if method != "HEAD":
+                self.wfile.write(payload)
+        except OSError:  # pragma: no cover - client vanished mid-response
+            pass
 
     def do_GET(self) -> None:  # noqa: N802
         self._respond("GET")

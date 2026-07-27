@@ -133,7 +133,9 @@ def test_the_full_local_loop_over_a_real_socket(portal) -> None:
     )
     assert status == 200
     claim = json.loads(claimed)
-    assert claim["match_code"] == pairing.match_code
+    # The confirmation code exists only on the phone; nothing the operator can
+    # read before this point contains it.
+    assert claim["confirm_code"] and "confirm_code" not in pairing.public()
 
     auth = {"Authorization": f"Bearer {claim['session_token']}", "Origin": origin}
 
@@ -142,8 +144,8 @@ def test_the_full_local_loop_over_a_real_socket(portal) -> None:
     assert status == 202
     assert json.loads(waiting)["reason"] == "pending_approval"
 
-    # 5. The operator matches the code on the computer and approves.
-    pairings.approve(claim["pairing_id"])
+    # 5. The operator types the code the phone is showing and approves.
+    pairings.approve(claim["pairing_id"], claim["confirm_code"])
 
     # 6. The queue and the task projection come through verbatim.
     status, headers, listed = call(port, "/api/portal/tasks", headers=auth)

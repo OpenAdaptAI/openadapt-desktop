@@ -25,6 +25,7 @@ guessing.
 
 from __future__ import annotations
 
+import queue
 import re
 import subprocess
 import threading
@@ -48,7 +49,8 @@ from engine.portal.server import PortalApp, PortalServer
 
 #: The exact banner ``openadapt_flow.console.server.serve`` prints.
 _CONSOLE_BANNER = re.compile(
-    r"^\s*http://(?:127\.0\.0\.1|localhost):(?P<port>\d{1,5})/#token=(?P<token>[A-Za-z0-9_-]{16,})\s*$"
+    r"^\s*http://(?:127\.0\.0\.1|localhost):(?P<port>\d{1,5})/#token="
+    r"(?P<token>[A-Za-z0-9_-]{16,})\s*$"
 )
 
 #: How long to wait for the console to announce itself before failing loud.
@@ -57,6 +59,58 @@ CONSOLE_START_TIMEOUT_S = 60.0
 
 class PortalError(RuntimeError):
     """The portal could not be started or is not in a state to serve."""
+
+
+def _terminate(process: Any) -> None:
+    """Stop a console process without leaving a zombie behind."""
+    try:
+        process.terminate()
+        process.wait(timeout=10)
+    except Exception:  # pragma: no cover - defensive
+        try:
+            process.kill()
+            process.wait(timeout=5)
+        except Exception:
+            pass
+
+
+def _drain(stream: Any) -> None:
+    """Consume a pipe forever so the child never blocks writing to it."""
+    if stream is None:  # pragma: no cover - defensive
+        return
+    try:
+        for _line in iter(stream.readline, ""):
+            pass
+    except (OSError, ValueError):  # pragma: no cover - pipe closed
+        pass
+
+
+def _drain_for_banner(stream: Any, found: "queue.Queue") -> None:
+    """Publish the console's capability banner, then keep draining stdout.
+
+    When the stream ends without a banner -- the console exited, or printed an
+    install hint instead -- a ``None`` sentinel is published so the caller
+    fails immediately instead of waiting out the whole start timeout.
+    """
+    published = False
+    try:
+        if stream is not None:
+            for line in iter(stream.readline, ""):
+                if not published:
+                    parsed = _parse_console_banner(line)
+                    if parsed is not None:
+                        published = True
+                        try:
+                            found.put_nowait(parsed)
+                        except queue.Full:  # pragma: no cover - defensive
+                            pass
+    except (OSError, ValueError):  # pragma: no cover - pipe closed
+        pass
+    if not published:
+        try:
+            found.put_nowait(None)
+        except queue.Full:  # pragma: no cover - defensive
+            pass
 
 
 def _parse_console_banner(line: str) -> tuple[int, str] | None:
@@ -80,14 +134,7 @@ class ConsoleProcess:
     def stop(self) -> None:
         if not self.alive():
             return
-        try:
-            self.process.terminate()
-            self.process.wait(timeout=10)
-        except Exception:  # pragma: no cover - defensive
-            try:
-                self.process.kill()
-            except Exception:
-                pass
+        _terminate(self.process)
 
 
 class PortalService:
@@ -143,12 +190,29 @@ class PortalService:
             if self._server is not None:
                 return self._status_locked()
             try:
+                # Fail closed before spawning anything: a misconfigured
+                # ingress must never start a console it cannot serve.
+                resolve_ingress(self.config)
+            except IngressError as exc:
+                self._last_error = str(exc)
+                raise PortalError(str(exc)) from exc
+
+        # Spawning and waiting for the console happens outside the lock: a
+        # console that starts but never announces itself must not be able to
+        # wedge status(), stop(), or any portal command for the whole timeout.
+        console_process = self._start_console()
+
+        with self._lock:
+            if self._server is not None:  # pragma: no cover - concurrent start
+                console_process.stop()
+                return self._status_locked()
+            try:
                 ingress = resolve_ingress(self.config)
             except IngressError as exc:
                 self._last_error = str(exc)
                 raise PortalError(str(exc)) from exc
 
-            console = self._start_console()
+            console = console_process
             flow = FlowConsoleClient(
                 port=console.port, access_token=console.access_token
             )
@@ -233,21 +297,23 @@ class PortalService:
             text=True,
             env=_subprocess_env(),
         )
-        deadline = time.monotonic() + CONSOLE_START_TIMEOUT_S
-        while time.monotonic() < deadline:
-            if process.stdout is None:  # pragma: no cover - defensive
-                break
-            line = process.stdout.readline()
-            if not line:
-                break
-            parsed = _parse_console_banner(line)
-            if parsed is not None:
-                port, token = parsed
-                return ConsoleProcess(process=process, port=port, access_token=token)
+        # Both pipes are drained for the process's lifetime. A blocking
+        # readline() here would ignore the timeout entirely (it is only checked
+        # between lines) and would wedge the caller's lock; an undrained stderr
+        # or stdout would block the console itself once its pipe buffer filled.
+        banner: queue.Queue = queue.Queue(maxsize=1)
+        threading.Thread(
+            target=_drain_for_banner, args=(process.stdout, banner), daemon=True
+        ).start()
+        threading.Thread(target=_drain, args=(process.stderr,), daemon=True).start()
         try:
-            process.terminate()
-        except Exception:  # pragma: no cover - defensive
-            pass
+            parsed = banner.get(timeout=CONSOLE_START_TIMEOUT_S)
+        except queue.Empty:
+            parsed = None
+        port, token = parsed if parsed is not None else (0, "")
+        if token and 1 <= port <= 65535:
+            return ConsoleProcess(process=process, port=port, access_token=token)
+        _terminate(process)
         raise PortalError(
             "The local decision service did not start. It requires "
             "openadapt-flow with the 'console' extra (fastapi and uvicorn) and a "
@@ -313,23 +379,24 @@ class PortalService:
         """Mint one QR pairing.  The secret rides in the link's fragment only."""
         with self._lock:
             pairings = self._require_pairings()
-            assert self._ingress is not None
+            ingress = self._ingress
+            assert ingress is not None
             pairing = pairings.create(
-                self._ingress.public_origin,
-                reachable_from_phone=self._ingress.reachable_from_phone,
+                ingress.public_origin,
+                reachable_from_phone=ingress.reachable_from_phone,
             )
         result = pairing.public()
         result["qr_svg"] = _qr_svg(pairing.url)
-        if not self._ingress.reachable_from_phone:
+        if not ingress.reachable_from_phone:
             result["note"] = (
                 "This portal is loopback-only, so a phone cannot reach this link. "
                 "Configure your organization's HTTPS or VPN ingress to publish it."
             )
         return result
 
-    def approve_pairing(self, pairing_id: str) -> dict[str, Any]:
+    def approve_pairing(self, pairing_id: str, confirm_code: Any) -> dict[str, Any]:
         with self._lock:
-            return self._require_pairings().approve(pairing_id)
+            return self._require_pairings().approve(pairing_id, confirm_code)
 
     def cancel_pairing(self, pairing_id: str) -> dict[str, Any]:
         with self._lock:
@@ -367,25 +434,29 @@ class PortalService:
 
 
 def _qr_svg(url: str) -> str | None:
-    """Render the pairing link as an inline SVG, when a QR encoder is present.
+    """Render the pairing link as an inert PNG data URI, if segno is present.
 
-    Rendering happens locally and the result is handed straight to the Desktop
-    window.  When the optional encoder is unavailable the caller still has the
-    URL and the matching code, so pairing degrades to typing rather than
-    failing.
+    A ``data:`` image is deliberate.  The QR encodes the one-use pairing
+    secret, so returning raw SVG markup for the Desktop window to inject would
+    make this a raw-HTML sink for a secret-bearing value.  A base64 PNG cannot
+    carry script, needs no sanitizing, and renders identically.
+
+    Rendering happens locally; the link is never sent anywhere to be encoded.
+    When segno is unavailable the caller still has the URL, so pairing degrades
+    to opening a link rather than failing.
     """
     try:
         import segno
     except ImportError:  # pragma: no cover - optional dependency
         return None
     try:
+        import base64
         import io
 
-        buffer = io.StringIO()
-        segno.make(url, error="m").save(
-            buffer, kind="svg", scale=6, border=2, xmldecl=False, svgns=True
-        )
-        return buffer.getvalue()
+        buffer = io.BytesIO()
+        segno.make(url, error="m").save(buffer, kind="png", scale=6, border=2)
+        encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+        return f"data:image/png;base64,{encoded}"
     except Exception:  # pragma: no cover - defensive
         return None
 

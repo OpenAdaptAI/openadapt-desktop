@@ -60,6 +60,20 @@ def test_the_fetch_handler_is_an_allowlist_that_bails_before_responding() -> Non
     assert "startsWith(PROTECTED_PREFIX)" not in handler
 
 
+def test_shell_assets_are_served_network_first_so_a_fix_can_reach_a_phone() -> None:
+    """Cache-first would pin the shell installed the first time a phone paired.
+
+    A browser only reinstalls a worker when ``sw.js`` itself changes bytes, so
+    a cache-first handler would keep serving an old ``app.js`` forever. The
+    cached copy must be the offline fallback, not the preferred answer.
+    """
+    handler = SW[SW.index('addEventListener("fetch"') :]
+    network = handler.index("fetch(request)")
+    cache = handler.index("caches.match(request)")
+    assert network < cache
+    assert ".catch(" in handler
+
+
 def test_the_shell_never_persists_a_credential_beyond_the_tab() -> None:
     assert "localStorage" not in APP
     assert "window.sessionStorage" in APP

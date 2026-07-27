@@ -50,8 +50,8 @@ suite exercises the shipped loopback configuration on a real socket.
 
 ## Pairing a phone
 
-Desktop shows a QR code plus a short matching code. Following RFC 8628's
-device-flow shape:
+Desktop shows a QR code; the phone shows a short code back. Following RFC
+8628's device-flow shape:
 
 - The QR link is `https://<your-ingress>/pair#c=<secret>`. The secret rides in
   the **fragment**, which browsers never transmit, so it cannot land in a proxy
@@ -60,16 +60,30 @@ device-flow shape:
   capability, no tenant, run, or pause identifier.
 - The secret is **claimable exactly once**, atomically. Two phones scanning the
   same code cannot both pair; the second is refused with `already_claimed`.
-- It **expires in five minutes**, enforced server-side from a monotonic clock.
-  A wall-clock change cannot extend it and no UI countdown is involved.
-- Claiming yields a session that is **unusable until approved**. Phone and
-  Desktop both display the same six-character code; the operator approves only
-  if they match. A phished QR scanned elsewhere therefore stalls.
+- It **expires in five minutes**, enforced server-side and re-checked at
+  approval. Both clocks are consulted: monotonic so a wall-clock change cannot
+  extend a deadline, and wall time because `CLOCK_MONOTONIC` stalls while a
+  machine is suspended. No UI countdown is involved.
+- Claiming yields a session that is **unusable until approved**. The
+  confirmation code is generated **at claim time** and returned only to the
+  claiming device; Desktop asks the operator to type what their phone is
+  showing. Attempts are bounded, and exhausting them cancels the pairing.
+
+  The direction matters. If the code were derived from the pairing and shown on
+  Desktop, an attacker who photographed the QR from across the room and claimed
+  it first would be shown the very code the operator's screen was displaying —
+  the "matching code" would confirm the attacker. Minting per claim means a
+  remote attacker's phone shows a code the operator cannot see.
+- Showing a new QR retires every earlier unapproved pairing, including one that
+  has already been claimed, so a stolen code cannot sit latent waiting for a
+  mis-click.
 - Secrets and session tokens are stored only as SHA-256 digests and compared
   in constant time. The portal secret prefix (`oapp_`) is deliberately distinct
   from the Cloud local-bridge prefix (`oap_`), and neither surface accepts the
   other's credential.
 - Devices are listed and revocable; sessions expire after twelve hours.
+- The QR is rendered locally as an inert `data:image/png` URI rather than raw
+  SVG markup, so a secret-bearing value is never injected as HTML.
 
 ## Protected evidence
 
@@ -78,8 +92,16 @@ Task projections, decision outcomes, and evidence crops are served
 cache by the shell. The service worker in `engine/portal/shell/sw.js` precaches
 one frozen literal list of shell assets, has no after-the-fact cache write, and
 its fetch handler is an allowlist that returns without intercepting anything
-else — so a newly added protected route is excluded by default.
+else — so a newly added protected route is excluded by default. Shell assets
+themselves are served network-first with the precached copy only as an offline
+fallback, so a fix shipped in `app.js` still reaches an already-paired phone.
 `tests/test_portal/test_shell.py` asserts each of those clauses structurally.
+
+Only raster crops are relayed: `image/png`, `image/jpeg`, and `image/webp`.
+`image/svg+xml` is refused, because an SVG is an active document rather than a
+screenshot. Upstream 5xx bodies are replaced with a fixed message so a
+traceback or deployment path cannot reach a phone; 4xx refusals from Flow are
+passed through intact because they are operator-actionable.
 
 The phone never receives Flow's console bearer capability. It authenticates
 with a portal session token bound to the runner and the approved pairing.

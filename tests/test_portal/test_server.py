@@ -47,7 +47,7 @@ def build(flow: object | None = None) -> tuple[PortalApp, DevicePairingStore]:
 def paired(app: PortalApp, pairings: DevicePairingStore) -> dict[str, str]:
     pairing = pairings.create(ORIGIN, reachable_from_phone=True)
     claim = pairings.claim(pairing.secret, "Phone")
-    pairings.approve(claim["pairing_id"])
+    pairings.approve(claim["pairing_id"], claim["confirm_code"])
     return {
         "authorization": f"Bearer {claim['session_token']}",
         "origin": ORIGIN,
@@ -232,7 +232,7 @@ def test_the_phone_never_receives_the_flow_console_capability() -> None:
     app, pairings = build(flow)
     pairing = pairings.create(ORIGIN, reachable_from_phone=True)
     claim = pairings.claim(pairing.secret)
-    pairings.approve(claim["pairing_id"])
+    pairings.approve(claim["pairing_id"], claim["confirm_code"])
     _, _, body = app.handle(
         "GET",
         "/api/portal/session",
@@ -306,3 +306,114 @@ def test_the_portal_keeps_no_access_log() -> None:
     from engine.portal import server as module
 
     assert module._Handler.log_message(object(), "%s", "x") is None
+
+
+# ------------------------------------------- regressions from security review
+
+
+def test_the_handler_sets_a_socket_timeout() -> None:
+    """Without one, every read blocks forever and idle sockets pin threads."""
+    from engine.portal import server as module
+
+    assert module._Handler.timeout is not None
+    assert 0 < module._Handler.timeout <= 60
+    # HTTP/1.0 closes each connection, so a refused over-long body cannot
+    # desync into the next request on the same socket.
+    assert module._Handler.protocol_version == "HTTP/1.0"
+
+
+def test_an_oversized_or_malformed_body_is_refused_not_silently_emptied() -> None:
+    app, pairings = build(FakeFlow())
+    headers = paired(app, pairings)
+    status, _, body = app.handle(
+        "POST",
+        "/api/portal/tasks/run-1/actions/continue",
+        headers,
+        b"x" * (16 * 1024 + 1),
+    )
+    assert status == 413
+    assert json.loads(body)["reason"] == "bad_request"
+
+
+def test_an_evidence_id_cannot_traverse_even_though_it_has_no_separator() -> None:
+    app, pairings = build(FakeFlow())
+    status, _, _ = app.handle(
+        "GET", "/api/portal/tasks/run-1/evidence?id=a..b", paired(app, pairings), b""
+    )
+    assert status == 400
+
+
+def test_an_active_image_format_is_not_relayed_to_a_phone() -> None:
+    """An SVG is a document, not a crop."""
+    import httpx
+
+    from engine.portal.flow_client import FlowConsoleClient
+
+    def transport(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=b"<svg onload=alert(1)>",
+            headers={"content-type": "image/svg+xml"},
+        )
+
+    client = FlowConsoleClient(
+        port=7863,
+        access_token="t",
+        client=httpx.Client(transport=httpx.MockTransport(transport)),
+    )
+    with pytest.raises(FlowConsoleUnavailable) as refused:
+        client.request("task_evidence", run_id="r", params={"id": "frame-a"})
+    assert refused.value.reason == "artifact_type_refused"
+
+    # The portal turns that into a refusal, never a rendered document.
+    app, pairings = build(client)
+    status, _, body = app.handle(
+        "GET", "/api/portal/tasks/r/evidence?id=frame-a", paired(app, pairings), b""
+    )
+    assert status == 503
+    assert b"<svg" not in body
+
+
+def test_an_upstream_server_error_body_is_not_forwarded_to_a_phone() -> None:
+    """A 5xx can carry a traceback or a deployment path; a 4xx carries a refusal."""
+    import httpx
+
+    from engine.portal.flow_client import FlowConsoleClient
+
+    def transport(request: httpx.Request) -> httpx.Response:
+        if "actions" in str(request.url):
+            return httpx.Response(
+                500, json={"detail": 'File "/srv/phi/openemr/run.py", line 42'}
+            )
+        return httpx.Response(409, json={"detail": "the pause is no longer current"})
+
+    client = FlowConsoleClient(
+        port=7863,
+        access_token="t",
+        client=httpx.Client(transport=httpx.MockTransport(transport)),
+    )
+    crash = client.request("task_action", run_id="r", action_id="continue")
+    assert crash.status == 500
+    assert "/srv/phi" not in json.dumps(crash.json)
+
+    # An operator-actionable refusal still reaches the phone intact.
+    refusal = client.request("task_detail", run_id="r")
+    assert refusal.json["detail"] == "the pause is no longer current"
+
+
+def test_the_relay_refuses_an_identifier_the_http_surface_would_have_rejected() -> None:
+    """Defense in depth: the two boundaries cannot silently drift apart."""
+    from engine.portal.flow_client import FlowConsoleClient
+
+    client = FlowConsoleClient(port=7863, access_token="t")
+    for kwargs in (
+        {"run_id": "../etc/passwd"},
+        {"run_id": "a/b"},
+        {"run_id": ""},
+    ):
+        with pytest.raises(FlowConsoleUnavailable) as refused:
+            client.request("task_detail", **kwargs)
+        assert refused.value.reason == "bad_identifier"
+    with pytest.raises(FlowConsoleUnavailable) as refused:
+        client.request("task_action", run_id="ok", action_id="DROP TABLE")
+    assert refused.value.reason == "bad_identifier"

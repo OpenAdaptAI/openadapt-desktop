@@ -91,10 +91,10 @@ async function claimPairing(secret) {
   store.setItem("portal_csrf", body.csrf_token);
   render(
     `<section class="card match">
-       <h1>Check this code</h1>
-       <p class="muted">Approve this phone on the computer running OpenAdapt only if
-       it shows the same code.</p>
-       <p class="code">${esc(body.match_code)}</p>
+       <h1>Type this code</h1>
+       <p class="muted">Enter this code on the computer running OpenAdapt to
+       finish pairing. Only this phone can see it.</p>
+       <p class="code">${esc(body.confirm_code)}</p>
        <p class="muted" id="wait">Waiting for approval…</p>
      </section>`,
   );
@@ -239,7 +239,12 @@ async function loadFrame(runId, image) {
     { headers: { Authorization: `Bearer ${token}` }, cache: "no-store", credentials: "omit" },
   );
   if (!response.ok) return;
-  image.src = URL.createObjectURL(await response.blob());
+  // Revoke any previous object URL so a protected crop is not left reachable
+  // for the life of the document.
+  if (image.src.startsWith("blob:")) URL.revokeObjectURL(image.src);
+  const url = URL.createObjectURL(await response.blob());
+  image.src = url;
+  image.addEventListener("load", () => URL.revokeObjectURL(url), { once: true });
 }
 
 function renderActions(runId, detail) {

@@ -829,18 +829,22 @@ select.input:focus {
   background: #fff;
   padding: var(--space-3);
   border-radius: 10px;
-  line-height: 0;
+  width: 196px;
+  height: 196px;
+  image-rendering: pixelated;
 }
-.pairing-qr svg {
-  width: 180px;
-  height: 180px;
-}
-.pairing-code {
+.pairing-input {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 30px;
+  font-size: 26px;
   font-weight: 600;
   letter-spacing: 0.12em;
-  margin: 0;
+  text-transform: uppercase;
+  width: 8ch;
+  padding: var(--space-2) var(--space-3);
+  border-radius: 8px;
+  border: 1px solid var(--line-strong);
+  background: var(--bg, #10151a);
+  color: inherit;
 }
 .list {
   list-style: none;

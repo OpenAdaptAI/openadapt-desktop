@@ -177,8 +177,11 @@ def test_a_loopback_pairing_says_a_phone_cannot_reach_it(monkeypatch) -> None:
         assert pairing["url"].startswith("http://127.0.0.1:")
         assert "#c=oapp_" in pairing["url"]
         assert "secret" not in pairing
-        # The QR is rendered locally; the link never leaves this machine.
-        assert pairing["qr_svg"] is None or pairing["qr_svg"].startswith("<svg")
+        # The QR is rendered locally as an inert data URI, never as raw markup
+        # the Desktop window would have to inject.
+        qr = pairing["qr_svg"]
+        assert qr is None or qr.startswith("data:image/png;base64,")
+        assert qr is None or "<svg" not in qr
     finally:
         service.stop()
 
@@ -187,7 +190,7 @@ def test_pairing_operations_require_a_running_portal() -> None:
     service = PortalService(config())
     for call in (
         service.create_pairing,
-        lambda: service.approve_pairing("x"),
+        lambda: service.approve_pairing("x", "ABC-123"),
         lambda: service.cancel_pairing("x"),
         lambda: service.pairing_status("x"),
         lambda: service.revoke_device("x"),

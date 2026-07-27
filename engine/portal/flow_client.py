@@ -25,6 +25,7 @@ not implement a route yet, the seam surfaces a structured
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any, Literal
 from urllib.parse import quote
@@ -41,6 +42,15 @@ FLOW_TIMEOUT_S = 20.0
 MAX_ARTIFACT_BYTES = 8 * 1024 * 1024
 
 MAX_DECISION_BODY_BYTES = 16 * 1024
+
+#: Image types the portal will relay to a phone. Deliberately excludes
+#: ``image/svg+xml``, which is an active document rather than a raster crop.
+ALLOWED_IMAGE_TYPES = frozenset({"image/png", "image/jpeg", "image/webp"})
+
+#: Identifiers must match the same shapes the HTTP surface validated. Asserted
+#: here too so the two boundaries cannot silently drift apart.
+_SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_SAFE_ACTION_ID = re.compile(r"^[a-z][a-z_]{0,39}$")
 
 RouteMethod = Literal["GET", "POST"]
 
@@ -162,8 +172,16 @@ class FlowConsoleClient:
             )
         path = spec.template
         if "{run_id}" in path:
+            if not _SAFE_RUN_ID.fullmatch(str(run_id)):
+                raise FlowConsoleUnavailable(
+                    "refusing an unexpected run identifier", reason="bad_identifier"
+                )
             path = path.replace("{run_id}", quote(str(run_id), safe=""))
         if "{action_id}" in path:
+            if not _SAFE_ACTION_ID.fullmatch(str(action_id)):
+                raise FlowConsoleUnavailable(
+                    "refusing an unexpected action identifier", reason="bad_identifier"
+                )
             path = path.replace("{action_id}", quote(str(action_id), safe=""))
         mutation = spec.method == "POST"
         if mutation:
@@ -191,6 +209,11 @@ class FlowConsoleClient:
 
         media_type = str(response.headers.get("content-type", "")).split(";")[0].strip()
         if media_type.startswith("image/"):
+            if media_type not in ALLOWED_IMAGE_TYPES:
+                raise FlowConsoleUnavailable(
+                    "that evidence format cannot be shown on a phone",
+                    reason="artifact_type_refused",
+                )
             content = response.content
             if len(content) > MAX_ARTIFACT_BYTES:
                 raise FlowConsoleUnavailable(
@@ -202,6 +225,14 @@ class FlowConsoleClient:
             payload = response.json()
         except (ValueError, TypeError):
             payload = None
+        if response.status_code >= 500:
+            # A 4xx from the console carries an operator-actionable refusal
+            # ("the pause is no longer current") worth showing. A 5xx can carry
+            # a traceback, an internal path, or a deployment detail, so the
+            # phone gets a fixed message instead.
+            payload = {
+                "detail": "The local decision service could not complete that request."
+            }
         return FlowResponse(
             response.status_code,
             payload,

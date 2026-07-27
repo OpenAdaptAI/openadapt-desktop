@@ -37,7 +37,6 @@ type PortalStatus = {
 
 type Pairing = {
   pairing_id: string;
-  match_code: string;
   url: string;
   expires_in_s: number;
   reachable_from_phone: boolean;
@@ -47,8 +46,8 @@ type Pairing = {
 
 type PairingStatus = {
   state: "pending" | "claimed" | "approved" | "expired" | "cancelled";
-  match_code: string;
   expires_in_s: number;
+  attempts_remaining: number;
   device_label?: string | null;
 };
 
@@ -58,6 +57,7 @@ export function DecisionPortal() {
   const [status, setStatus] = useState<PortalStatus>(STOPPED);
   const [pairing, setPairing] = useState<Pairing | null>(null);
   const [scan, setScan] = useState<PairingStatus | null>(null);
+  const [confirmCode, setConfirmCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -188,7 +188,7 @@ export function DecisionPortal() {
         <CardHead
           eyebrow="Pair a phone"
           title="One code, one phone, five minutes"
-          sub="The code can be used once. Approve it only if the phone shows the same letters."
+          sub="Scan, then finish by typing the code the phone shows you."
         />
         {!status.running && <p className="page-sub">Start the portal first.</p>}
         {status.running && !pairing && (
@@ -207,40 +207,66 @@ export function DecisionPortal() {
         {pairing && (
           <div className="pairing-panel">
             {pairing.qr_svg ? (
-              <div
+              // An inert data-URI image, rendered locally by the engine from
+              // the pairing link. The link never leaves this machine, and an
+              // image element cannot execute anything the encoder produced.
+              <img
                 className="pairing-qr"
-                aria-label="Pairing QR code"
-                // Rendered locally by the engine from the pairing link; it is
-                // never fetched from or sent to a network service.
-                dangerouslySetInnerHTML={{ __html: pairing.qr_svg }}
+                alt="Pairing QR code"
+                src={pairing.qr_svg}
               />
             ) : (
               <p className="page-sub">
                 Open this link on the phone: <code>{pairing.url}</code>
               </p>
             )}
-            <p className="pairing-code">{pairing.match_code}</p>
-            <p className="page-sub">
-              {scan?.state === "claimed"
-                ? `A device (${scan.device_label ?? "phone"}) scanned this code. Approve it only if it shows ${pairing.match_code}.`
-                : "Scan this on the phone. The code expires in five minutes and works once."}
-            </p>
+            {scan?.state === "claimed" ? (
+              <div className="stack">
+                <p className="page-sub">
+                  A device ({scan.device_label ?? "phone"}) scanned this code.
+                  Type the code it is showing you. If the phone in your hand is
+                  not showing a code, do not approve — cancel instead.
+                </p>
+                <input
+                  className="pairing-input"
+                  aria-label="Code shown on the phone"
+                  autoComplete="off"
+                  spellCheck={false}
+                  maxLength={7}
+                  placeholder="ABC-123"
+                  value={confirmCode}
+                  onChange={(event) => setConfirmCode(event.target.value)}
+                />
+                {scan.attempts_remaining < 3 && (
+                  <span className="page-sub">
+                    {scan.attempts_remaining} attempt
+                    {scan.attempts_remaining === 1 ? "" : "s"} left.
+                  </span>
+                )}
+              </div>
+            ) : (
+              <p className="page-sub">
+                Scan this on the phone. It expires in five minutes and works once.
+              </p>
+            )}
             {pairing.note && <Callout tone="info">{pairing.note}</Callout>}
             <div className="row">
               <Button
                 variant="primary"
-                disabled={busy || scan?.state !== "claimed"}
+                disabled={busy || scan?.state !== "claimed" || !confirmCode}
                 onClick={() =>
                   act(async () => {
                     await engineInvoke(CMD.PORTAL_APPROVE_PAIRING, {
                       pairing_id: pairing.pairing_id,
+                      confirm_code: confirmCode,
                     });
                     setPairing(null);
                     setScan(null);
+                    setConfirmCode("");
                   })
                 }
               >
-                Codes match — approve
+                Approve this phone
               </Button>
               <Button
                 variant="ghost"
@@ -252,6 +278,7 @@ export function DecisionPortal() {
                     });
                     setPairing(null);
                     setScan(null);
+                    setConfirmCode("");
                   })
                 }
               >

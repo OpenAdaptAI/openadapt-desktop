@@ -8,6 +8,7 @@ import pytest
 
 from engine.auth.pairing import PAIRING_SECRET_RE as CLOUD_SECRET_RE
 from engine.portal.pairing import (
+    MAX_CONFIRM_ATTEMPTS,
     PAIRING_TTL_S,
     PORTAL_PAIRING_SECRET_RE,
     SESSION_TTL_S,
@@ -41,7 +42,6 @@ def test_a_pairing_secret_is_claimable_exactly_once() -> None:
 
     first = pairings.claim(pairing.secret, "Phone A")
     assert first["state"] == "pending_approval"
-    assert first["match_code"] == pairing.match_code
 
     with pytest.raises(PairingRefused) as refused:
         pairings.claim(pairing.secret, "Phone B")
@@ -76,7 +76,7 @@ def test_concurrent_scans_of_one_qr_produce_exactly_one_session() -> None:
     assert len(winners) == 1
     assert all(r == "already_claimed" for r in results if not isinstance(r, dict))
     # Exactly one device session exists, approved or not.
-    pairings.approve(winners[0]["pairing_id"])
+    pairings.approve(winners[0]["pairing_id"], winners[0]["confirm_code"])
     assert len(pairings.devices()) == 1
 
 
@@ -103,21 +103,21 @@ def test_expiry_is_five_minutes_and_enforced_by_the_server() -> None:
 
 def test_expiry_uses_a_monotonic_clock_not_the_wall_clock(monkeypatch) -> None:
     """Moving the system clock backwards must not extend a pairing."""
+    import datetime as real
+
+    import engine.portal.pairing as module
+
     clock = Clock()
     pairings = store(clock)
     pairing = pairings.create(ORIGIN, reachable_from_phone=True)
     clock.advance(PAIRING_TTL_S + 1)
 
-    import engine.portal.pairing as module
-
-    class FrozenDatetime:
-        @staticmethod
-        def now(tz=None):
-            import datetime as real
-
+    class RewoundDatetime(real.datetime):
+        @classmethod
+        def now(cls, tz=None):
             return real.datetime(1999, 1, 1, tzinfo=real.timezone.utc)
 
-    monkeypatch.setattr(module, "datetime", FrozenDatetime)
+    monkeypatch.setattr(module, "datetime", RewoundDatetime)
     with pytest.raises(PairingRefused) as refused:
         pairings.claim(pairing.secret)
     assert refused.value.reason == "expired"
@@ -132,7 +132,7 @@ def test_a_claimed_session_is_unusable_until_the_operator_matches_the_code() -> 
         pairings.authenticate(claim["session_token"])
     assert refused.value.reason == "pending_approval"
 
-    approved = pairings.approve(claim["pairing_id"])
+    approved = pairings.approve(claim["pairing_id"], claim["confirm_code"])
     assert approved["state"] == "approved"
     session = pairings.authenticate(claim["session_token"])
     assert session.runner_id == "runner_test"
@@ -151,7 +151,7 @@ def test_cancelling_a_pairing_revokes_the_session_it_minted() -> None:
     pairings = store()
     pairing = pairings.create(ORIGIN, reachable_from_phone=True)
     claim = pairings.claim(pairing.secret)
-    pairings.approve(claim["pairing_id"])
+    pairings.approve(claim["pairing_id"], claim["confirm_code"])
     assert pairings.authenticate(claim["session_token"]) is not None
 
     pairings.cancel(claim["pairing_id"])
@@ -165,7 +165,7 @@ def test_a_device_session_expires_and_can_be_revoked() -> None:
     pairings = store(clock)
     pairing = pairings.create(ORIGIN, reachable_from_phone=True)
     claim = pairings.claim(pairing.secret)
-    pairings.approve(claim["pairing_id"])
+    pairings.approve(claim["pairing_id"], claim["confirm_code"])
 
     session = pairings.authenticate(claim["session_token"])
     pairings.revoke(session.session_id)
@@ -175,7 +175,7 @@ def test_a_device_session_expires_and_can_be_revoked() -> None:
     second = store(clock)
     other = second.create(ORIGIN, reachable_from_phone=True)
     other_claim = second.claim(other.secret)
-    second.approve(other_claim["pairing_id"])
+    second.approve(other_claim["pairing_id"], other_claim["confirm_code"])
     clock.advance(SESSION_TTL_S + 1)
     with pytest.raises(PairingRefused) as refused:
         second.authenticate(other_claim["session_token"])
@@ -227,8 +227,8 @@ def test_the_desktop_view_of_a_pairing_never_leaks_a_session_credential() -> Non
     assert set(status) == {
         "pairing_id",
         "state",
-        "match_code",
         "expires_in_s",
+        "attempts_remaining",
         "device_label",
     }
 
@@ -237,7 +237,7 @@ def test_listed_devices_never_include_a_token_or_digest() -> None:
     pairings = store()
     pairing = pairings.create(ORIGIN, reachable_from_phone=True)
     claim = pairings.claim(pairing.secret, "Ward phone")
-    pairings.approve(claim["pairing_id"])
+    pairings.approve(claim["pairing_id"], claim["confirm_code"])
     (device,) = pairings.devices()
     assert set(device) == {"session_id", "device_label", "approved", "expires_in_s"}
     assert device["device_label"] == "Ward phone"
@@ -250,22 +250,140 @@ def test_a_hostile_device_label_is_sanitized() -> None:
     assert claim["device_label"] == "Paired phone"
 
 
-def test_the_matching_code_is_unambiguous_and_shown_to_both_devices() -> None:
+def test_the_confirmation_code_is_minted_per_claim_not_per_pairing() -> None:
+    """The whole anti-phishing property.
+
+    An attacker who photographs the QR and claims it first must not be handed
+    the code the operator's screen is showing. The code is created at claim
+    time, so the operator can only obtain it from the phone in their hand.
+    """
+    pairings = store()
+    pairing = pairings.create(ORIGIN, reachable_from_phone=True)
+    # Nothing the operator can see before a claim contains a code.
+    assert "confirm_code" not in pairing.public()
+    assert "match_code" not in pairing.public()
+    assert not hasattr(pairing, "match_code")
+
+    attacker = pairings.claim(pairing.secret, "Phone")
+    status = pairings.pairing_status(pairing.pairing_id)
+    # ...and it is not readable from the pairing state either.
+    assert "confirm_code" not in status
+    assert "match_code" not in status
+    assert attacker["confirm_code"] not in str(status)
+
+    body = attacker["confirm_code"].replace("-", "")
+    assert len(body) == 6
+    # Characters that are read wrong when typed are excluded.
+    assert not set(body) & set("01IOL")
+
+
+def test_approval_requires_the_code_the_phone_displayed() -> None:
     pairings = store()
     pairing = pairings.create(ORIGIN, reachable_from_phone=True)
     claim = pairings.claim(pairing.secret)
-    assert claim["match_code"] == pairing.match_code
-    body = pairing.match_code.replace("-", "")
-    assert len(body) == 6
-    # Characters that are read wrong across a room are excluded.
-    assert not set(body) & set("01IOL")
+
+    with pytest.raises(PairingRefused) as refused:
+        pairings.approve(claim["pairing_id"], "AAA-AAA")
+    assert refused.value.reason == "wrong_code"
+    # The session is still unusable.
+    with pytest.raises(PairingRefused):
+        pairings.authenticate(claim["session_token"])
+
+    pairings.approve(claim["pairing_id"], claim["confirm_code"])
+    assert pairings.authenticate(claim["session_token"]).runner_id == "runner_test"
+
+
+def test_the_code_is_accepted_regardless_of_case_or_separator() -> None:
+    pairings = store()
+    pairing = pairings.create(ORIGIN, reachable_from_phone=True)
+    claim = pairings.claim(pairing.secret)
+    typed = claim["confirm_code"].replace("-", "").lower()
+    assert pairings.approve(claim["pairing_id"], typed)["state"] == "approved"
+
+
+def test_guessing_the_code_cancels_the_pairing() -> None:
+    pairings = store()
+    pairing = pairings.create(ORIGIN, reachable_from_phone=True)
+    claim = pairings.claim(pairing.secret)
+    for _ in range(MAX_CONFIRM_ATTEMPTS - 1):
+        with pytest.raises(PairingRefused):
+            pairings.approve(claim["pairing_id"], "AAA-AAA")
+    with pytest.raises(PairingRefused) as refused:
+        pairings.approve(claim["pairing_id"], "AAA-AAA")
+    assert refused.value.reason == "wrong_code"
+    # Exhausted: even the correct code no longer works, and the session is dead.
+    with pytest.raises(PairingRefused) as after:
+        pairings.approve(claim["pairing_id"], claim["confirm_code"])
+    assert after.value.reason == "not_claimed"
+    with pytest.raises(PairingRefused):
+        pairings.authenticate(claim["session_token"])
+
+
+def test_a_claimed_pairing_still_expires_after_five_minutes() -> None:
+    """Expiring only `pending` would let a stale claim be approved hours later."""
+    clock = Clock()
+    pairings = store(clock)
+    pairing = pairings.create(ORIGIN, reachable_from_phone=True)
+    claim = pairings.claim(pairing.secret)
+
+    clock.advance(PAIRING_TTL_S + 1)
+    with pytest.raises(PairingRefused) as refused:
+        pairings.approve(claim["pairing_id"], claim["confirm_code"])
+    assert refused.value.reason == "expired"
+    assert pairings.pairing_status(claim["pairing_id"])["state"] == "expired"
+    with pytest.raises(PairingRefused):
+        pairings.authenticate(claim["session_token"])
+
+
+def test_showing_a_new_code_also_retires_an_already_claimed_one() -> None:
+    """A stolen-and-claimed code must not survive the operator retrying."""
+    pairings = store()
+    stolen = pairings.create(ORIGIN, reachable_from_phone=True)
+    attacker = pairings.claim(stolen.secret, "Phone")
+
+    pairings.create(ORIGIN, reachable_from_phone=True)
+
+    with pytest.raises(PairingRefused) as refused:
+        pairings.approve(attacker["pairing_id"], attacker["confirm_code"])
+    assert refused.value.reason == "not_claimed"
+    with pytest.raises(PairingRefused):
+        pairings.authenticate(attacker["session_token"])
+
+
+def test_a_suspended_machine_cannot_extend_a_session(monkeypatch) -> None:
+    """Monotonic time stalls across suspend, so wall time is a ceiling too."""
+    import datetime as real
+
+    import engine.portal.pairing as module
+
+    clock = Clock()
+    pairings = store(clock)
+    pairing = pairings.create(ORIGIN, reachable_from_phone=True)
+    claim = pairings.claim(pairing.secret)
+    pairings.approve(claim["pairing_id"], claim["confirm_code"])
+    assert pairings.authenticate(claim["session_token"]) is not None
+
+    # The monotonic clock has not moved at all -- as if the laptop slept.
+    later = real.datetime.now(real.timezone.utc) + real.timedelta(
+        seconds=SESSION_TTL_S + 60
+    )
+
+    class SleptDatetime(real.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return later
+
+    monkeypatch.setattr(module, "datetime", SleptDatetime)
+    with pytest.raises(PairingRefused) as refused:
+        pairings.authenticate(claim["session_token"])
+    assert refused.value.reason == "expired"
 
 
 def test_csrf_is_bound_to_the_exact_session() -> None:
     pairings = store()
     pairing = pairings.create(ORIGIN, reachable_from_phone=True)
     claim = pairings.claim(pairing.secret)
-    pairings.approve(claim["pairing_id"])
+    pairings.approve(claim["pairing_id"], claim["confirm_code"])
     session = pairings.authenticate(claim["session_token"])
     assert pairings.verify_csrf(session, claim["csrf_token"]) is True
     assert pairings.verify_csrf(session, "not-the-token") is False

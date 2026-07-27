@@ -2419,8 +2419,10 @@ class EngineDispatcher:
         return self._portal_service().pairing_status(params.get("pairing_id", ""))
 
     def portal_approve_pairing(self, **params: Any) -> dict:
-        """Approve a scanned phone after the operator matched both codes."""
-        return self._portal_service().approve_pairing(params.get("pairing_id", ""))
+        """Approve a scanned phone using the code that phone is displaying."""
+        return self._portal_service().approve_pairing(
+            params.get("pairing_id", ""), params.get("confirm_code", "")
+        )
 
     def portal_cancel_pairing(self, **params: Any) -> dict:
         """Cancel a pairing and revoke any session it minted."""

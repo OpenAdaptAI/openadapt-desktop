@@ -13,6 +13,12 @@
 //      projection, decision, and evidence image under /api/portal/ -- go to the
 //      network untouched by this worker and are never read from or written to
 //      a cache.
+//   4. Shell assets are served NETWORK-FIRST, with the precached copy only as
+//      an offline fallback. Cache-first would pin whatever shell was installed
+//      the first time a phone paired: a browser only reinstalls a worker when
+//      sw.js itself changes bytes, so a fix shipped in app.js would never
+//      reach an already-paired device. Network-first keeps that patch path
+//      open without adding a post-fetch cache write.
 //
 // The protected prefix is named here only so the guard can be asserted; the
 // guard itself is an allowlist, so a new protected route is excluded by
@@ -58,6 +64,8 @@ self.addEventListener("fetch", (event) => {
   // everything under PROTECTED_PREFIX -- is left entirely to the network.
   if (!SHELL_ASSETS.includes(url.pathname)) return;
   event.respondWith(
-    caches.match(request).then((hit) => hit || fetch(request)),
+    fetch(request).catch(() =>
+      caches.match(request).then((hit) => hit || Response.error()),
+    ),
   );
 });
