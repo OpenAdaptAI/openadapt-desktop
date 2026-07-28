@@ -1,8 +1,17 @@
 # The mobile decision portal
 
 When a governed run cannot confirm something, OpenAdapt halts instead of
-guessing. This portal is how that question reaches a staff member's phone
-without moving protected evidence off the runner.
+guessing. This portal is how that question reaches a staff member's phone with
+**full evidence** -- the screen crops, the gated control label, the whole halt
+detail -- without moving any of it off the runner.
+
+It is not the only way to reach a phone, and it is not the right one for a
+customer with no IT department. Serving full evidence to a phone requires an
+HTTPS origin the customer terminates themselves, which a dental practice will
+not stand up. For them, Flow's hosted lane dials **out** to the control plane
+and needs nothing on their network; it carries the signed PHI-free task and the
+closed halt context, never pixels. See
+[Answering a halt with no ingress](#answering-a-halt-with-no-ingress).
 
 Desktop owns the **lifecycle, the network boundary, device pairing, and the
 generic notification**. It owns no decision semantics: the question, the
@@ -47,6 +56,37 @@ The rules, all enforced in `engine/portal/ingress.py` and all fail-closed:
 
 There is no self-signed-certificate bypass and no test-only wide bind. The test
 suite exercises the shipped loopback configuration on a real socket.
+
+## Answering a halt with no ingress
+
+Everything above is about publishing **this** surface, which serves protected
+evidence. A customer who does not operate an ingress uses Flow's hosted lane
+instead: the engine makes outbound HTTPS requests only, so there is no inbound
+port, no port forward, no certificate, no reverse proxy and no static address,
+and it works behind NAT.
+
+Desktop turns it on when the operator's `deployment.json` sets
+`human_decisions.remote.enabled: true`. It then passes `--remote-decisions` to
+the attended console and hands it the runner credential from the keychain in the
+child process's environment -- never in `argv`, where it would sit in the
+process table for every user on the machine.
+
+Two things are checked **before** the console is spawned, because afterwards the
+failure is an opaque "the local decision service did not start":
+
+- this computer must be registered with the control plane, or Desktop refuses
+  and names the host; and
+- the resolved Flow must be at least `MIN_FLOW_FOR_REMOTE_DECISIONS`
+  (`engine/portal/service.py`), because an older one exits on the unknown flag
+  before printing its capability banner.
+
+`enabled` must be literally `true`. A truthy string or a `1` means no. Neither
+check degrades: a lane that looks on and is not is worse than one that is
+plainly off, because nothing on either surface would say the phone will never
+ring.
+
+The two paths are independent. A deployment may run the local portal, the hosted
+lane, both, or neither.
 
 ## Pairing a phone
 
