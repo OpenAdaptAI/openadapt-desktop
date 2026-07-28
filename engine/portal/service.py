@@ -71,6 +71,7 @@ from typing import Any, Callable
 
 from loguru import logger
 
+from engine.auth.store import load_runner_credential
 from engine.flow_bridge import FLOW_BIN, _flow_command, _subprocess_env
 from engine.portal.flow_client import FlowConsoleClient, FlowConsoleUnavailable
 from engine.portal.ingress import IngressError, PortalIngress, resolve_ingress
@@ -95,6 +96,17 @@ _CONSOLE_BANNER = re.compile(
 
 #: How long to wait for the console to announce itself before failing loud.
 CONSOLE_START_TIMEOUT_S = 60.0
+
+#: The first Flow release whose attended console accepts ``--remote-decisions``.
+#: Passing the flag to an older Flow makes argparse exit before the banner, so
+#: the operator would see "the console did not start" instead of the real cause.
+#: Checking the version first turns that into a sentence that names the fix.
+MIN_FLOW_FOR_REMOTE_DECISIONS = (1, 26, 0)
+
+#: Environment variable ``openadapt_flow.console.decision_relay`` reads the
+#: runner credential from. It is passed to the child process only, never
+#: written to a file and never logged.
+RUNNER_TOKEN_ENV = "OPENADAPT_RUNNER_TOKEN"
 
 #: How long uvicorn may take to bind *after* the banner is printed.  Flow
 #: prints the capability immediately before ``uvicorn.run()``, so the first
@@ -415,9 +427,67 @@ class PortalService:
         # The staged secret-bearing config lives only until the banner proves
         # Flow has read it; leaving this ``with`` block removes the file.
         with stage_private_yaml(staging_dir, prepared=prepared) as config_path:
-            return self._spawn_console(prefix, config_path)
+            return self._spawn_console(
+                prefix, config_path, remote_decisions=prepared.remote_decisions
+            )
 
-    def _spawn_console(self, prefix: list[str], config_path: Path) -> ConsoleProcess:
+    def _remote_decision_env(self) -> dict[str, str]:
+        """The child's environment with the runner credential, or a refusal.
+
+        A deployment that enabled remote decisions and has no runner credential
+        must stop here. Starting the console without the credential would give
+        the operator a working local portal and a phone lane that is silently
+        absent -- the failure that is worse than the gap, because nothing on
+        either surface says the phone will never ring.
+        """
+
+        host = str(getattr(self.config, "hosted_host", "") or "").strip()
+        credential = load_runner_credential(host) if host else None
+        token = str((credential or {}).get("runner_token") or "").strip()
+        if not token:
+            where = host or "the control plane"
+            raise PortalError(
+                "This deployment answers halts on a phone through OpenAdapt "
+                f"Cloud, but this computer is not registered with {where} yet. "
+                "Connect it once, then start the portal again."
+            )
+        env = _subprocess_env()
+        env[RUNNER_TOKEN_ENV] = token
+        return env
+
+    def _assert_flow_supports_remote_decisions(self) -> None:
+        """Refuse before spawning when the resolved Flow has no such flag."""
+
+        from importlib.metadata import PackageNotFoundError, version
+
+        try:
+            raw = version("openadapt-flow")
+        except PackageNotFoundError:  # pragma: no cover - defensive
+            raise PortalError(
+                "The OpenAdapt Flow runtime version could not be read, so "
+                "phone decisions cannot be enabled safely."
+            ) from None
+        parts: list[int] = []
+        for piece in raw.split(".")[:3]:
+            digits = "".join(ch for ch in piece if ch.isdigit())
+            parts.append(int(digits) if digits else 0)
+        while len(parts) < 3:
+            parts.append(0)
+        if tuple(parts) < MIN_FLOW_FOR_REMOTE_DECISIONS:
+            wanted = ".".join(str(part) for part in MIN_FLOW_FOR_REMOTE_DECISIONS)
+            raise PortalError(
+                "This deployment answers halts on a phone, which needs "
+                f"openadapt-flow {wanted} or newer. This computer has {raw}. "
+                "Update OpenAdapt, or turn off human_decisions.remote."
+            )
+
+    def _spawn_console(
+        self,
+        prefix: list[str],
+        config_path: Path,
+        *,
+        remote_decisions: bool = False,
+    ) -> ConsoleProcess:
         command = [
             *prefix,
             "console",
@@ -432,12 +502,20 @@ class PortalService:
             "--port",
             str(int(getattr(self.config, "portal_console_port", 7863))),
         ]
+        env = _subprocess_env()
+        if remote_decisions:
+            # Both checks happen BEFORE the spawn. A console that starts and
+            # then dies on an unknown flag reports "the console did not start",
+            # which names neither the missing credential nor the old runtime.
+            self._assert_flow_supports_remote_decisions()
+            env = self._remote_decision_env()
+            command.append("--remote-decisions")
         process = self._popen(
             command,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            env=_subprocess_env(),
+            env=env,
         )
         # Both pipes are drained for the process's lifetime. A blocking
         # readline() here would ignore the timeout entirely (it is only checked
