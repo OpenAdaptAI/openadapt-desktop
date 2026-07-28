@@ -62,6 +62,7 @@ class FakeController:
         self.db = db
         self.capture_dir = capture_dir
         self.compiled: dict | None = {"bundle_id": "bnd1", "bundle_path": "/tmp/b", "ok": True}
+        self.compile_calls = 0
 
     @property
     def is_recording(self) -> bool:
@@ -90,6 +91,7 @@ class FakeController:
         return {"id": cid, "duration": 1.0, "event_count": 3, "size_bytes": 10}
 
     def compile_capture(self, capture_id, capture_dir):
+        self.compile_calls += 1
         return self.compiled
 
 
@@ -136,6 +138,7 @@ class TestRecordingCommands:
         assert r2["capture_id"] == "cap1"
         assert r2["compile"]["workflow_id"] == "bnd1"
         assert r2["compile"]["recording_retained"] is True
+        assert disp.services.controller.compile_calls == 1
         assert any(e == "recording_stopped" for e, _ in events)
         assert [data["state"] for event, data in events if event == "compile_progress"] == [
             "compiling",
