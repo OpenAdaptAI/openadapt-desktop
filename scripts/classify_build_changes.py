@@ -30,6 +30,9 @@ FULL_ARTIFACT_FILES = {
 
 FULL_ARTIFACT_PREFIXES = (
     ".github/actions/",
+    # build_frozen_engine.py freezes engine/__main__.py and its local imports
+    # into the sidecar that every native installer embeds.
+    "engine/",
     "src-tauri/",
 )
 
@@ -46,16 +49,11 @@ FULL_ARTIFACT_SCRIPTS = {
     "scripts/verify_build_artifact.py",
 }
 
-FULL_ARTIFACT_ENGINE_FILES = {
-    "engine/vision-runtime-manifest.json",
-}
-
 # These paths get the normal PR checks and the exact-main frontend, Python
 # distribution, and cross-platform test jobs. They do not change the native
 # packaging contract. Everything not named here fails toward the full matrix.
 CHEAP_MAIN_PREFIXES = (
     "docs/",
-    "engine/",
     "src/",
     "tests/",
 )
@@ -90,8 +88,6 @@ def _requires_full_artifacts(path: str) -> bool:
     if path in FULL_ARTIFACT_FILES:
         return True
     if path in FULL_ARTIFACT_SCRIPTS:
-        return True
-    if path in FULL_ARTIFACT_ENGINE_FILES:
         return True
     if path.startswith(FULL_ARTIFACT_PREFIXES):
         return True

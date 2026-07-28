@@ -24,7 +24,7 @@ def test_explicit_release_candidate_keeps_the_complete_matrix() -> None:
 @pytest.mark.parametrize(
     "paths",
     [
-        ["engine/dispatch.py", "src/screens/RecordReview.tsx"],
+        ["src/screens/RecordReview.tsx"],
         ["README.md", "docs/qualification.md"],
         ["tests/test_engine/test_dispatch.py"],
     ],
@@ -46,6 +46,8 @@ def test_protected_main_uses_cheap_jobs_for_application_only_changes(paths: list
         "scripts/build_frozen_engine.py",
         "scripts/verify_build_artifact.py",
         ".github/workflows/build.yml",
+        "engine/__main__.py",
+        "engine/dispatch.py",
         "engine/vision-runtime-manifest.json",
         "THIRD_PARTY_NOTICES.md",
     ],
