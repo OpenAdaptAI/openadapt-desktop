@@ -13,6 +13,8 @@ from engine.auth import rotation, store
 HOST = "https://app.openadapt.ai"
 OLD_TOKEN = "oai_ingest_" + "A" * 43
 NEW_TOKEN = "oai_ingest_" + "B" * 43
+THIRD_TOKEN = "oai_ingest_" + "C" * 43
+FOURTH_TOKEN = "oai_ingest_" + "D" * 43
 PREVIOUS_ID = str(uuid4())
 REPLACEMENT_ID = str(uuid4())
 
@@ -46,24 +48,29 @@ def _lifetime(days: int = 90) -> dict:
     }
 
 
-def _rotation_response() -> _Response:
+def _rotation_response(
+    *,
+    token: str = NEW_TOKEN,
+    previous_id: str = PREVIOUS_ID,
+    replacement_id: str = REPLACEMENT_ID,
+) -> _Response:
     lifetime = _lifetime(90)
     return _Response(
         201,
         {
-            "token": NEW_TOKEN,
+            "token": token,
             "record": {
-                "id": REPLACEMENT_ID,
+                "id": replacement_id,
                 "org_id": "org_1",
                 "name": "Desktop",
-                "token_prefix": NEW_TOKEN[:20],
+                "token_prefix": token[:20],
                 "created_at": _iso(0),
                 "last_used_at": None,
                 "expires_at": lifetime["expires_at"],
                 "revoked_at": None,
                 "rotated_to_id": None,
             },
-            "previous_id": PREVIOUS_ID,
+            "previous_id": previous_id,
             "previous_expires_at": _iso(7),
             "credential": lifetime,
         },
@@ -71,14 +78,22 @@ def _rotation_response() -> _Response:
     )
 
 
-def _replacement_validation_response(credential: dict) -> _Response:
+def _replacement_validation_response(
+    credential: dict,
+    *,
+    days: int | None = None,
+) -> _Response:
+    current = dict(credential)
+    if days is not None:
+        current["expires_in_days"] = days
+        current["expiring_soon"] = days < 14
     return _Response(
         200,
-        {"count": 0, "credential": dict(credential)},
+        {"count": 0, "credential": current},
         {
             "cache-control": "no-store",
             "x-openadapt-credential-warning-days": "14",
-            "x-openadapt-credential-expires-in-days": str(credential["expires_in_days"]),
+            "x-openadapt-credential-expires-in-days": str(current["expires_in_days"]),
         },
     )
 
@@ -328,7 +343,9 @@ def test_rotation_rejects_a_one_time_response_without_no_store(monkeypatch) -> N
     assert store.load_rotation_stage() is None
 
 
-def test_retained_rotation_recovers_without_a_second_cloud_request(monkeypatch) -> None:
+def test_delayed_rotation_recovery_accepts_decreased_days_without_a_second_request(
+    monkeypatch,
+) -> None:
     store.store_credential(_credential(OLD_TOKEN))
     response = _rotation_response().json()
     token, previous_id, expiry = rotation._validated_rotation(
@@ -347,7 +364,7 @@ def test_retained_rotation_recovers_without_a_second_cloud_request(monkeypatch) 
     monkeypatch.setattr(
         rotation.httpx,
         "get",
-        lambda *a, **k: _replacement_validation_response(response["credential"]),
+        lambda *a, **k: _replacement_validation_response(response["credential"], days=80),
     )
 
     recovered = rotation.rotate_credential(HOST)
@@ -390,6 +407,56 @@ def test_bad_replacement_stays_staged_and_recovery_validates_without_reissuing(
     assert post_calls == 1
     assert recovered["token"] == NEW_TOKEN
     assert store.load_credential(HOST) == recovered
+    assert store.load_rotation_stage() is None
+
+
+def test_later_login_supersedes_rejected_stage_before_future_rotation(monkeypatch) -> None:
+    store.store_credential(_credential(OLD_TOKEN))
+    rejected = _rotation_response()
+    replacement = _rotation_response(
+        token=FOURTH_TOKEN,
+        previous_id=str(uuid4()),
+        replacement_id=str(uuid4()),
+    )
+    posted_bearers: list[str] = []
+    validated_bearers: list[str] = []
+
+    def _post(url, *, headers, **kwargs):
+        posted_bearers.append(headers["Authorization"])
+        return rejected if len(posted_bearers) == 1 else replacement
+
+    def _get(url, *, headers, **kwargs):
+        bearer = headers["Authorization"]
+        validated_bearers.append(bearer)
+        if bearer == f"Bearer {NEW_TOKEN}":
+            return _Response(401, {})
+        assert bearer == f"Bearer {FOURTH_TOKEN}"
+        return _replacement_validation_response(replacement.json()["credential"])
+
+    monkeypatch.setattr(rotation, "secure_store_available", lambda: True)
+    monkeypatch.setattr(rotation.httpx, "post", _post)
+    monkeypatch.setattr(rotation.httpx, "get", _get)
+
+    with pytest.raises(rotation.RotationError, match="did not accept"):
+        rotation.rotate_credential(HOST)
+    assert store.load_rotation_stage() is not None
+    assert store.load_credential(HOST)["token"] == OLD_TOKEN
+
+    # A later browser/deep-link login writes a coherent third credential.
+    store.store_credential(_credential(THIRD_TOKEN))
+
+    rotated = rotation.rotate_credential(HOST)
+
+    assert posted_bearers == [
+        f"Bearer {OLD_TOKEN}",
+        f"Bearer {THIRD_TOKEN}",
+    ]
+    assert validated_bearers == [
+        f"Bearer {NEW_TOKEN}",
+        f"Bearer {FOURTH_TOKEN}",
+    ]
+    assert rotated["token"] == FOURTH_TOKEN
+    assert store.load_credential(HOST) == rotated
     assert store.load_rotation_stage() is None
 
 

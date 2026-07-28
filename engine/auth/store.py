@@ -43,6 +43,7 @@ import os
 
 from loguru import logger
 
+from engine.auth.lifetime import valid_ingest_token
 from engine.auth.provider import Credential
 
 SERVICE_NAME = "ai.openadapt.desktop"
@@ -555,6 +556,68 @@ def clear_rotation_stage(previous_id: str) -> bool:
     if stage.get("previous_id") != previous_id:
         return False
     return _apply_exact(_keyring(), _ROTATION_STAGE_ACCOUNT, None)
+
+
+def clear_superseded_rotation_stage(previous_id: str) -> bool:
+    """Clear an exact stale stage only after a coherent later login won.
+
+    A rejected replacement remains staged so transient propagation can recover.
+    If a later login writes a third, internally consistent credential for the
+    same host, that credential supersedes both the old snapshot and the staged
+    replacement. Retaining the dead stage would otherwise block every future
+    rotation of the new connection.
+    """
+    try:
+        stage = load_rotation_stage()
+    except RuntimeError:
+        return False
+    if stage is None or stage.get("previous_id") != previous_id:
+        return False
+    values = _rotation_stage_values(stage)
+    if values is None:
+        return False
+    host, previous, replacement = values
+    kr = _keyring()
+    accounts = (host, host + _CRED_SUFFIX, _ACTIVE_HOST_ACCOUNT)
+    observed: list[str | None] = []
+    for account in accounts:
+        readable, value = _strict_get(kr, account)
+        if not readable:
+            return False
+        observed.append(value)
+    current = tuple(observed)
+    if current in {previous, replacement}:
+        return False
+    if all(value in {prior, new} for value, prior, new in zip(current, previous, replacement)):
+        # A partial old/replacement write needs recovery, not deletion.
+        return False
+    raw_token, raw_credential, active = current
+    if not valid_ingest_token(raw_token) or not isinstance(raw_credential, str) or active != host:
+        return False
+    try:
+        credential = json.loads(raw_credential)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    if (
+        not isinstance(credential, dict)
+        or set(credential)
+        != {"kind", "token", "refresh_token", "org_id", "host", "expires_at"}
+        or credential.get("kind") != "ingest_token"
+        or credential.get("refresh_token") is not None
+        or credential.get("token") != raw_token
+        or credential.get("host") != host
+    ):
+        return False
+
+    # Re-read the stage after inspecting canonical state. Delete only the same
+    # stage identity; a concurrent rotation cannot be mistaken for this one.
+    try:
+        current_stage = load_rotation_stage()
+    except RuntimeError:
+        return False
+    if current_stage != stage:
+        return False
+    return clear_rotation_stage(previous_id)
 
 
 def load_credential(host: str) -> Credential | None:

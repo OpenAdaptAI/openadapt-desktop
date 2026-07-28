@@ -36,6 +36,7 @@ from engine.auth.store import (
     DEFAULT_HOST,
     INGEST_TOKEN_ENV,
     clear_rotation_stage,
+    clear_superseded_rotation_stage,
     commit_rotation_stage,
     load_credential,
     load_rotation_stage,
@@ -253,6 +254,12 @@ def recover_pending_rotation(host: str | None = None) -> Credential | None:
     previous_id, credential = _validated_rotation_stage(stage)
     if host is not None and credential["host"] != host.rstrip("/"):
         raise RotationError("A credential renewal for another Cloud host needs recovery first.")
+    if clear_superseded_rotation_stage(previous_id):
+        logger.info(
+            "Cleared a stale credential renewal after a later login for {host}",
+            host=credential["host"],
+        )
+        return None
     _validate_staged_replacement(previous_id, credential)
     if not commit_rotation_stage(previous_id):
         raise RotationError(
@@ -291,7 +298,6 @@ def _validate_staged_replacement(previous_id: str, credential: Credential) -> No
             response.json(),
             headers=response.headers,
             require_headers=True,
-            require_fresh=True,
             require_no_store=True,
         )
     except (AttributeError, TypeError, ValueError) as exc:
@@ -299,7 +305,10 @@ def _validate_staged_replacement(previous_id: str, credential: Credential) -> No
             "OpenAdapt retained the renewed credential, but Cloud returned an "
             "incomplete verification contract. The old credential remains active."
         ) from exc
-    if lifetime["expires_at_timestamp"] != credential["expires_at"]:
+    if (
+        lifetime["legacy_non_expiring"]
+        or lifetime["expires_at_timestamp"] != credential["expires_at"]
+    ):
         raise RotationError(
             "OpenAdapt retained the renewed credential, but Cloud verified a "
             "different expiry. The old credential remains active."

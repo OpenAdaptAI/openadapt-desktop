@@ -59,7 +59,9 @@ the active keychain entries. It then authenticates one independent
 `/api/needs-attention/count` request with the replacement and checks the exact
 lifetime contract before promotion. After a process interruption, Desktop
 validates and finishes that exact stage. It does not send a second rotation
-request.
+request. Recovery requires the same stored expiry, but the remaining-day count
+can decrease while the machine is offline. A later successful login safely
+supersedes an older rejected rotation stage.
 
 If the response is lost before Desktop can stage it, the old bearer remains
 usable during the overlap. Cloud cannot replay the raw replacement, so the
