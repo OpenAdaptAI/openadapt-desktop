@@ -58,6 +58,7 @@ _KNOWN_RUN_OUTCOMES = frozenset(
         "unknown",
     }
 )
+_TEACHABLE_RUN_OUTCOMES = frozenset({"HALTED", "halt"})
 
 
 def _noop_emit(event: str, data: dict) -> None:
@@ -1465,16 +1466,21 @@ class EngineDispatcher:
         bundle = self._bundle_dir(workflow_id)
         if bundle is None:
             return {"promoted": False, "message": f"Unknown workflow {workflow_id}"}
+        # Teach is a response to the latest execution state, not a search for
+        # any historical halt. Selecting an older halt after a newer VERIFIED,
+        # FAILED, or otherwise terminal run would promote evidence against a
+        # stale application state.
         run = next(
-            (
-                r
-                for r in self.services.db.list_runs(limit=100)
-                if r.get("bundle_id") == workflow_id
-                and r.get("status") in _KNOWN_RUN_OUTCOMES
-            ),
+            (r for r in self.services.db.list_runs(limit=100) if r.get("bundle_id") == workflow_id),
             None,
         )
-        if self._pending_run_is_newer(self._pending_run(str(workflow_id)), run):
+        pending = self._pending_run(str(workflow_id))
+        pending_matches_saved_run = bool(
+            pending is not None
+            and run is not None
+            and pending[1].get("run_id") == run.get("run_id")
+        )
+        if pending_matches_saved_run or self._pending_run_is_newer(pending, run):
             return {
                 "promoted": False,
                 "message": (
@@ -1482,8 +1488,19 @@ class EngineDispatcher:
                     "local history save before teaching a fix."
                 ),
             }
-        if run is None or not run.get("run_path"):
+        if run is None:
             return {"promoted": False, "message": "No halted run to teach against"}
+        if run.get("status") not in _TEACHABLE_RUN_OUTCOMES:
+            status = str(run.get("status") or "unknown")
+            return {
+                "promoted": False,
+                "message": f"The latest run ended as {status}, so it is not teachable.",
+            }
+        if not run.get("run_path"):
+            return {
+                "promoted": False,
+                "message": "The latest halted run has no evidence path",
+            }
         out_dir = self.config.data_dir / "bundles" / f"{workflow_id}_taught_{uuid.uuid4().hex[:6]}"
         try:
             result = self.services.flow_bridge.teach(Path(run["run_path"]), bundle, out_dir)

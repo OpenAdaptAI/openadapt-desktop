@@ -245,12 +245,19 @@ def test_remote_decisions_is_read_from_the_same_snapshot_as_the_payload(tmp_path
     """One read decides both what Flow executes and whether the lane is on."""
     source = tmp_path / "deployment.json"
     source.write_text(
-        json.dumps({"human_decisions": {"remote": {"enabled": True}}}),
+        json.dumps(
+            {
+                "human_decisions": {
+                    "remote": {"enabled": True, "runner_id": " runner_exact_01 "}
+                }
+            }
+        ),
         encoding="utf-8",
     )
     prepared = prepare_flow_config(source, None)
     assert prepared is not None
     assert prepared.remote_decisions is True
+    assert prepared.remote_decision_runner_id == "runner_exact_01"
 
 
 @pytest.mark.parametrize(

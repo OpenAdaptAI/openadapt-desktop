@@ -70,6 +70,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from loguru import logger
+from packaging.version import InvalidVersion, Version
 
 from engine.auth.store import load_runner_credential
 from engine.flow_bridge import FLOW_BIN, _flow_command, _subprocess_env
@@ -428,10 +429,18 @@ class PortalService:
         # Flow has read it; leaving this ``with`` block removes the file.
         with stage_private_yaml(staging_dir, prepared=prepared) as config_path:
             return self._spawn_console(
-                prefix, config_path, remote_decisions=prepared.remote_decisions
+                prefix,
+                config_path,
+                remote_decisions=prepared.remote_decisions,
+                remote_decision_runner_id=prepared.remote_decision_runner_id,
             )
 
-    def _remote_decision_env(self) -> dict[str, str]:
+    def _remote_decision_env(
+        self,
+        *,
+        host: str,
+        expected_runner_id: str,
+    ) -> dict[str, str]:
         """The child's environment with the runner credential, or a refusal.
 
         A deployment that enabled remote decisions and has no runner credential
@@ -441,15 +450,20 @@ class PortalService:
         either surface says the phone will never ring.
         """
 
-        host = str(getattr(self.config, "hosted_host", "") or "").strip()
-        credential = load_runner_credential(host) if host else None
+        credential = load_runner_credential(host)
+        credential_runner_id = str((credential or {}).get("runner_id") or "").strip()
         token = str((credential or {}).get("runner_token") or "").strip()
         if not token:
-            where = host or "the control plane"
             raise PortalError(
                 "This deployment answers halts on a phone through OpenAdapt "
-                f"Cloud, but this computer is not registered with {where} yet. "
+                f"Cloud, but this computer is not registered with {host} yet. "
                 "Connect it once, then start the portal again."
+            )
+        if credential_runner_id != expected_runner_id:
+            raise PortalError(
+                "The deployment configuration names a different runner than "
+                "the credential registered for this control-plane host. Select "
+                "the matching deployment or connect this computer again."
             )
         env = _subprocess_env()
         env[RUNNER_TOKEN_ENV] = token
@@ -467,14 +481,16 @@ class PortalService:
                 "The OpenAdapt Flow runtime version could not be read, so "
                 "phone decisions cannot be enabled safely."
             ) from None
-        parts: list[int] = []
-        for piece in raw.split(".")[:3]:
-            digits = "".join(ch for ch in piece if ch.isdigit())
-            parts.append(int(digits) if digits else 0)
-        while len(parts) < 3:
-            parts.append(0)
-        if tuple(parts) < MIN_FLOW_FOR_REMOTE_DECISIONS:
-            wanted = ".".join(str(part) for part in MIN_FLOW_FOR_REMOTE_DECISIONS)
+        wanted = ".".join(str(part) for part in MIN_FLOW_FOR_REMOTE_DECISIONS)
+        try:
+            installed = Version(raw)
+            required = Version(wanted)
+        except InvalidVersion:
+            raise PortalError(
+                "The OpenAdapt Flow runtime has an invalid version, so phone "
+                "decisions cannot be enabled safely. Reinstall OpenAdapt Flow."
+            ) from None
+        if installed < required:
             raise PortalError(
                 "This deployment answers halts on a phone, which needs "
                 f"openadapt-flow {wanted} or newer. This computer has {raw}. "
@@ -487,6 +503,7 @@ class PortalService:
         config_path: Path,
         *,
         remote_decisions: bool = False,
+        remote_decision_runner_id: str | None = None,
     ) -> ConsoleProcess:
         command = [
             *prefix,
@@ -508,8 +525,18 @@ class PortalService:
             # then dies on an unknown flag reports "the console did not start",
             # which names neither the missing credential nor the old runtime.
             self._assert_flow_supports_remote_decisions()
-            env = self._remote_decision_env()
-            command.append("--remote-decisions")
+            host = str(getattr(self.config, "hosted_host", "") or "").strip()
+            if not host:
+                raise PortalError("Remote decisions need an exact hosted control-plane URL.")
+            if not remote_decision_runner_id:
+                raise PortalError(
+                    "Remote decisions need an exact runner_id in the deployment configuration."
+                )
+            env = self._remote_decision_env(
+                host=host,
+                expected_runner_id=remote_decision_runner_id,
+            )
+            command.extend(["--remote-decisions", "--remote-decision-host", host])
         process = self._popen(
             command,
             stdout=subprocess.PIPE,

@@ -223,6 +223,9 @@ export interface QualificationParameter {
   name: string;
   type: string;
   secret: boolean;
+  required: boolean;
+  example: string | null;
+  choices: string[];
 }
 
 export interface QualificationNode {

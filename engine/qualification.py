@@ -330,11 +330,19 @@ def _qualification_controls(workflow, graph: dict[str, Any]) -> dict[str, Any]:
     parameters = []
     for name in parameter_names:
         spec = workflow.param_specs.get(name)
+        secret = name in workflow.secret_params
+        example = spec.example if spec is not None else workflow.params.get(name)
         parameters.append(
             {
                 "name": name,
                 "type": spec.type.value if spec is not None else "string",
-                "secret": name in workflow.secret_params,
+                "secret": secret,
+                "required": spec.required if spec is not None else True,
+                # A secret's recorded value and allowed-value list are also
+                # secret material. Desktop receives only the schema needed to
+                # render the credential reference, never its reusable value.
+                "example": None if secret else example,
+                "choices": [] if secret or spec is None else list(spec.choices),
             }
         )
 

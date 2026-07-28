@@ -562,10 +562,7 @@ def test_a_deployment_without_remote_decisions_never_asks_for_the_flag(
 ) -> None:
     seen, popen = _capture_spawn(monkeypatch)
     service = PortalService(configured(tmp_path / "data"), popen=popen)
-    try:
-        service.start()
-    except PortalError:
-        pass  # the socket/flow-client half is not what this asserts
+    service._start_console().stop()
     assert "--remote-decisions" not in seen["command"]
     assert "OPENADAPT_RUNNER_TOKEN" not in seen["env"]
 
@@ -598,6 +595,18 @@ def test_remote_decisions_refuses_a_flow_runtime_without_the_flag(
     assert "command" not in seen
 
 
+@pytest.mark.parametrize("raw", ["1.26.0rc1", "1.26.0.dev2", "not-a-version"])
+def test_remote_decisions_refuses_prerelease_or_invalid_flow_versions(
+    monkeypatch, tmp_path, raw
+) -> None:
+    seen, popen = _capture_spawn(monkeypatch)
+    monkeypatch.setattr("importlib.metadata.version", lambda _name: raw, raising=False)
+    service = PortalService(remote_configured(tmp_path / "data"), popen=popen)
+    with pytest.raises(PortalError):
+        service.start()
+    assert "command" not in seen
+
+
 def test_remote_decisions_passes_the_flag_and_the_credential(
     monkeypatch, tmp_path
 ) -> None:
@@ -611,12 +620,31 @@ def test_remote_decisions_passes_the_flag_and_the_credential(
         lambda _self: None,
     )
     service = PortalService(remote_configured(tmp_path / "data"), popen=popen)
-    try:
-        service.start()
-    except PortalError:
-        pass
+    service._start_console().stop()
     assert "--remote-decisions" in seen["command"]
+    host_index = seen["command"].index("--remote-decision-host")
+    assert seen["command"][host_index + 1] == "https://app.openadapt.ai"
     assert seen["env"]["OPENADAPT_RUNNER_TOKEN"] == RUNNER_TOKEN
     # The credential goes to the child process only. It is never an argument,
     # where it would appear in the process table for every user on the machine.
     assert RUNNER_TOKEN not in " ".join(seen["command"])
+
+
+def test_remote_decisions_refuses_a_credential_for_a_different_runner(
+    monkeypatch, tmp_path
+) -> None:
+    seen, popen = _capture_spawn(monkeypatch)
+    monkeypatch.setattr(
+        "engine.portal.service.load_runner_credential",
+        lambda _h: {"runner_id": "runner_other", "runner_token": RUNNER_TOKEN},
+    )
+    monkeypatch.setattr(
+        "engine.portal.service.PortalService._assert_flow_supports_remote_decisions",
+        lambda _self: None,
+    )
+    service = PortalService(remote_configured(tmp_path / "data"), popen=popen)
+
+    with pytest.raises(PortalError, match="different runner"):
+        service.start()
+
+    assert "command" not in seen

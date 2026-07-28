@@ -44,6 +44,7 @@ from openadapt_flow.ir import (  # noqa: E402
     ActionKind,
     Anchor,
     Landmark,
+    ParamKind,
     ParamSpec,
     Step,
     StructuralLocator,
@@ -131,6 +132,44 @@ def test_environment_identifier_digest_is_reproducible_but_explicitly_operator_d
         required_capabilities=[],
     )
     assert result["project"]["environment"]["environment_digest"] == exact_measured_digest
+
+
+def test_inspection_projects_typed_case_inputs_without_secret_values(
+    tmp_path: Path,
+) -> None:
+    bundle = tmp_path / "bundle"
+    Workflow(
+        name="typed-parameters",
+        params={"priority": "routine"},
+        param_specs={
+            "priority": ParamSpec(
+                name="priority",
+                type=ParamKind.ENUM,
+                example="routine",
+                required=True,
+                choices=["routine", "urgent"],
+            ),
+            "note": ParamSpec(name="note", required=False),
+            "api_token": ParamSpec(name="api_token", example="must-not-leak"),
+        },
+        secret_params=["api_token"],
+    ).save(bundle)
+
+    controls = inspect_bundle(bundle, workflow_id="wf-typed")["controls"]
+    parameters = {item["name"]: item for item in controls["parameters"]}
+
+    assert parameters["priority"] == {
+        "name": "priority",
+        "type": "enum",
+        "secret": False,
+        "required": True,
+        "example": "routine",
+        "choices": ["routine", "urgent"],
+    }
+    assert parameters["note"]["required"] is False
+    assert parameters["api_token"]["secret"] is True
+    assert parameters["api_token"]["example"] is None
+    assert parameters["api_token"]["choices"] == []
 
 
 def test_local_case_run_is_signed_and_bound_to_exact_retained_evidence(

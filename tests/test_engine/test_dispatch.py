@@ -1166,6 +1166,63 @@ class TestLibraryCommands:
         assert result["steps"][0]["state"] == "halted"
         assert db.list_runs(limit=10)[0]["bundle_id"] == "bnd1"
 
+    def test_teach_uses_only_the_latest_halted_run(self, deps, tmp_path: Path) -> None:
+        from engine.flow_bridge import FlowResult
+
+        disp, db, _events = deps
+        bundle = tmp_path / "bundle"
+        bundle.mkdir()
+        db.insert_bundle("bnd1", str(bundle), capture_id="cap1")
+        old_halt = tmp_path / "run-old-halt"
+        latest_halt = tmp_path / "run-latest-halt"
+        db.insert_run("run-old", str(old_halt), bundle_id="bnd1", status="HALTED")
+        db.insert_run("run-latest", str(latest_halt), bundle_id="bnd1", status="halt")
+
+        class Bridge:
+            calls: list[Path] = []
+
+            def teach(self, run_path, _bundle, out_dir):
+                self.calls.append(run_path)
+                return FlowResult(ok=True, returncode=0, out_dir=out_dir)
+
+        bridge = Bridge()
+        disp.services._flow_bridge = bridge
+
+        result = disp.dispatch("teach_fix", {"workflow_id": "bnd1"})
+
+        assert result == {"promoted": True, "message": "Fix promoted."}
+        assert bridge.calls == [latest_halt]
+
+    def test_teach_never_reuses_an_old_halt_after_a_newer_terminal_run(
+        self, deps, tmp_path: Path
+    ) -> None:
+        disp, db, _events = deps
+        bundle = tmp_path / "bundle"
+        bundle.mkdir()
+        db.insert_bundle("bnd1", str(bundle), capture_id="cap1")
+        db.insert_run(
+            "run-old-halt",
+            str(tmp_path / "run-old-halt"),
+            bundle_id="bnd1",
+            status="HALTED",
+        )
+        db.insert_run(
+            "run-new-verified",
+            str(tmp_path / "run-new-verified"),
+            bundle_id="bnd1",
+            status="VERIFIED",
+        )
+
+        class Bridge:
+            def teach(self, *_args, **_kwargs):
+                raise AssertionError("a stale halt must not be taught")
+
+        disp.services._flow_bridge = Bridge()
+        result = disp.dispatch("teach_fix", {"workflow_id": "bnd1"})
+
+        assert result["promoted"] is False
+        assert "latest run ended as VERIFIED" in result["message"]
+
 
 class TestSyncCommands:
     def test_pause_resume_sync(self, deps) -> None:

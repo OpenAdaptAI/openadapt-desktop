@@ -75,7 +75,15 @@ export function QualificationLifecycle({
     [project.controls.parameters],
   );
   const parameterSchemaKey = editableParameters
-    .map((parameter) => `${parameter.name}:${parameter.type}`)
+    .map((parameter) =>
+      [
+        parameter.name,
+        parameter.type,
+        parameter.required,
+        parameter.example,
+        parameter.choices.join(","),
+      ].join(":"),
+    )
     .join("|");
 
   useEffect(() => {
@@ -85,11 +93,11 @@ export function QualificationLifecycle({
   useEffect(() => setTarget(targetForProject(project)), [workflowId]);
 
   useEffect(() => {
-    setParameterValues((current) =>
+    setParameterValues(
       Object.fromEntries(
         editableParameters.map((parameter) => [
           parameter.name,
-          current[parameter.name] || "",
+          parameter.example ?? "",
         ]),
       ),
     );
@@ -386,27 +394,60 @@ export function QualificationLifecycle({
                   <Field
                     key={parameter.name}
                     label={parameter.name.replaceAll("_", " ")}
-                    hint={parameter.type.replaceAll("_", " ")}
+                    hint={[
+                      parameter.type.replaceAll("_", " "),
+                      parameter.required ? "required" : "optional",
+                      parameter.example !== null
+                        ? `recorded value: ${parameter.example}`
+                        : null,
+                    ]
+                      .filter(Boolean)
+                      .join(" · ")}
                     htmlFor={`qualification-case-param-${parameter.name}`}
                   >
-                    <input
-                      id={`qualification-case-param-${parameter.name}`}
-                      className="input"
-                      type={
-                        parameter.type === "number"
-                          ? "number"
-                          : parameter.type === "date"
-                            ? "date"
-                            : "text"
-                      }
-                      value={parameterValues[parameter.name] || ""}
-                      onChange={(event) =>
-                        setParameterValues((current) => ({
-                          ...current,
-                          [parameter.name]: event.target.value,
-                        }))
-                      }
-                    />
+                    {parameter.choices.length > 0 ? (
+                      <select
+                        id={`qualification-case-param-${parameter.name}`}
+                        className="input"
+                        required={parameter.required}
+                        value={parameterValues[parameter.name] ?? ""}
+                        onChange={(event) =>
+                          setParameterValues((current) => ({
+                            ...current,
+                            [parameter.name]: event.target.value,
+                          }))
+                        }
+                      >
+                        <option value="" disabled={parameter.required}>
+                          {parameter.required ? "Select a value" : "Not set"}
+                        </option>
+                        {parameter.choices.map((choice) => (
+                          <option key={choice} value={choice}>
+                            {choice}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <input
+                        id={`qualification-case-param-${parameter.name}`}
+                        className="input"
+                        required={parameter.required}
+                        type={
+                          parameter.type === "number"
+                            ? "number"
+                            : parameter.type === "date"
+                              ? "date"
+                              : "text"
+                        }
+                        value={parameterValues[parameter.name] ?? ""}
+                        onChange={(event) =>
+                          setParameterValues((current) => ({
+                            ...current,
+                            [parameter.name]: event.target.value,
+                          }))
+                        }
+                      />
+                    )}
                   </Field>
                 ))}
               </div>
