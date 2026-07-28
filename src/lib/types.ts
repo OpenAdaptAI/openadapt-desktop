@@ -219,6 +219,12 @@ export interface QualificationActionControls {
   effects: QualificationEditableEffect[];
 }
 
+export interface QualificationParameter {
+  name: string;
+  type: string;
+  secret: boolean;
+}
+
 export interface QualificationNode {
   id: string;
   index: number;
@@ -373,11 +379,7 @@ export interface QualificationProject {
     certified_at?: string | null;
   };
   controls: {
-    parameters: {
-      name: string;
-      type: string;
-      secret: boolean;
-    }[];
+    parameters: QualificationParameter[];
     actions: Record<string, QualificationActionControls>;
   };
 }
@@ -429,6 +431,17 @@ export interface RunReport {
     external_network_calls: "none" | "observed" | "unknown";
     compensation_actions: number;
   } | null;
+  persistence?: {
+    state: "persisted" | "degraded" | "failed";
+    retryable: boolean;
+    message: string;
+  };
+}
+
+export interface RunPersistenceRetryResponse {
+  ok: boolean;
+  report?: RunReport;
+  error?: string;
 }
 
 export interface ExecutionContractCounts {

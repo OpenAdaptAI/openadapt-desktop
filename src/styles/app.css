@@ -258,6 +258,76 @@ a:hover {
   gap: var(--space-1);
   margin-bottom: var(--space-4);
 }
+
+.qualification-journey-steps {
+  display: grid;
+  gap: var(--space-2);
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.qualification-journey-step {
+  min-width: 0;
+}
+.qualification-journey-button {
+  align-items: center;
+  background: var(--surface-sunk);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-1);
+  color: var(--text);
+  cursor: pointer;
+  display: grid;
+  font: inherit;
+  gap: var(--space-2);
+  grid-template-columns: 28px minmax(0, 1fr);
+  height: 100%;
+  padding: var(--space-2);
+  text-align: left;
+  width: 100%;
+}
+.qualification-journey-button:hover,
+.qualification-journey-button:focus-visible {
+  border-color: var(--brand);
+}
+.qualification-journey-button:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+.qualification-journey-index {
+  align-items: center;
+  background: var(--surface-sunk);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  color: var(--text-muted);
+  display: inline-flex;
+  font-family: var(--font-mono);
+  height: 26px;
+  justify-content: center;
+  width: 26px;
+}
+.qualification-journey-copy {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.qualification-journey-state {
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
+.qualification-journey-state {
+  font-family: var(--font-mono);
+}
+.qualification-journey-step.complete .qualification-journey-index,
+.qualification-journey-step.ready .qualification-journey-index {
+  background: var(--pill-ok-bg);
+  color: var(--pill-ok-fg);
+}
+.qualification-journey-step.current .qualification-journey-index {
+  background: var(--pill-run-bg);
+  color: var(--pill-run-fg);
+}
 .grid {
   display: grid;
   gap: var(--space-4);
