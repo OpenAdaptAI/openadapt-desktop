@@ -35,7 +35,14 @@ function project(): QualificationProject {
     },
     report: { case_count: 1, passed_case_count: 0 },
     graph: { bundle: { encrypted: true } },
-    controls: { parameters: [], actions: {} },
+    controls: {
+      parameters: [
+        { name: "record_id", type: "string", secret: false },
+        { name: "amount", type: "number", secret: false },
+        { name: "api_token", type: "string", secret: true },
+      ],
+      actions: {},
+    },
   } as unknown as QualificationProject;
 }
 
@@ -63,6 +70,12 @@ describe("Qualification lifecycle", () => {
       />,
     );
 
+    fireEvent.change(screen.getByLabelText("record id"), {
+      target: { value: "CASE-42" },
+    });
+    fireEvent.change(screen.getByLabelText("amount"), {
+      target: { value: "75.5" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "Run and sign case" }));
     await waitFor(() =>
       expect(mockedEngineInvoke).toHaveBeenCalledWith(
@@ -70,6 +83,7 @@ describe("Qualification lifecycle", () => {
         expect.objectContaining({
           workflow_id: "wf-1",
           case_id: "representative-1",
+          parameters_json: JSON.stringify({ record_id: "CASE-42", amount: 75.5 }),
           target: { backend: "web" },
         }),
       ),
