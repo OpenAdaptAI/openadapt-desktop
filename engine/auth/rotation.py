@@ -225,7 +225,7 @@ def rotate_credential(host: str = DEFAULT_HOST) -> Credential:
             "one-time response. The old credential remains valid for at most "
             "seven days. Sign in again; do not retry the same renewal."
         )
-    _validate_staged_replacement(previous_id, replacement)
+    _validate_staged_replacement(previous_id, replacement, require_fresh=True)
     if not commit_rotation_stage(previous_id):
         raise RotationError(
             "OpenAdapt retained the renewed credential but could not finish its "
@@ -260,7 +260,7 @@ def recover_pending_rotation(host: str | None = None) -> Credential | None:
             host=credential["host"],
         )
         return None
-    _validate_staged_replacement(previous_id, credential)
+    _validate_staged_replacement(previous_id, credential, require_fresh=False)
     if not commit_rotation_stage(previous_id):
         raise RotationError(
             "OpenAdapt could not safely finish the retained credential renewal. "
@@ -272,8 +272,18 @@ def recover_pending_rotation(host: str | None = None) -> Credential | None:
     return credential
 
 
-def _validate_staged_replacement(previous_id: str, credential: Credential) -> None:
-    """Prove the retained replacement bearer before canonical promotion."""
+def _validate_staged_replacement(
+    previous_id: str,
+    credential: Credential,
+    *,
+    require_fresh: bool,
+) -> None:
+    """Prove the retained replacement bearer before canonical promotion.
+
+    The immediate check must still show a new 89/90-day credential. Recovery
+    can occur later, so it binds the exact stored expiry while permitting the
+    display day count to decrease.
+    """
     try:
         response = httpx.get(
             f"{credential['host']}{COUNT_PATH}",
@@ -298,6 +308,7 @@ def _validate_staged_replacement(previous_id: str, credential: Credential) -> No
             response.json(),
             headers=response.headers,
             require_headers=True,
+            require_fresh=require_fresh,
             require_no_store=True,
         )
     except (AttributeError, TypeError, ValueError) as exc:

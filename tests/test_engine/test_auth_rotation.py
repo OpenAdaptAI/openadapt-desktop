@@ -252,6 +252,29 @@ def test_rotation_stages_then_atomically_promotes_the_one_time_replacement(
     ]
 
 
+def test_immediate_replacement_verification_still_requires_a_fresh_lifetime(
+    monkeypatch,
+) -> None:
+    store.store_credential(_credential(OLD_TOKEN))
+    rotated = _rotation_response()
+    monkeypatch.setattr(rotation, "secure_store_available", lambda: True)
+    monkeypatch.setattr(rotation.httpx, "post", lambda *a, **k: rotated)
+    monkeypatch.setattr(
+        rotation.httpx,
+        "get",
+        lambda *a, **k: _replacement_validation_response(
+            rotated.json()["credential"],
+            days=1,
+        ),
+    )
+
+    with pytest.raises(rotation.RotationError, match="incomplete verification contract"):
+        rotation.rotate_credential(HOST)
+
+    assert store.load_credential(HOST)["token"] == OLD_TOKEN
+    assert store.load_rotation_stage() is not None
+
+
 @pytest.mark.parametrize("field", ["previous_id", "record_id"])
 def test_rotation_response_requires_production_uuid_ids(field) -> None:
     response = _rotation_response()
