@@ -332,6 +332,40 @@ class TestLogin:
             "clear",
         ]
 
+    def test_local_alias_uses_one_canonical_host_for_login_claim_and_readback(
+        self, fake_keyring, monkeypatch
+    ) -> None:
+        _desktop_available(monkeypatch)
+        pairing_id = str(uuid4())
+        login_urls: list[str] = []
+
+        def _open_browser(url: str) -> None:
+            login_urls.append(url)
+            _deliver_from_login_url(url)
+
+        def _post(url, *, json, headers=None, **kwargs):
+            if url.endswith("/claim"):
+                assert url == "http://localhost/api/local-bridge/pairings/claim"
+                return _Response(
+                    201,
+                    _claim_body(pairing_id),
+                    {"cache-control": "no-store", "referrer-policy": "no-referrer"},
+                )
+            assert url == "http://localhost/api/local-bridge/pairings/confirm"
+            return _Response(200, {"connected": True})
+
+        monkeypatch.setattr(pairing.httpx, "post", _post)
+        monkeypatch.setattr(pairing.httpx, "get", lambda *a, **k: _validation())
+
+        credential = BrowserPkceProvider(
+            host="http://LOCALHOST:80/",
+            open_browser=_open_browser,
+        ).login()
+
+        assert login_urls[0].startswith("http://localhost/login?")
+        assert credential["host"] == "http://localhost"
+        assert store.load_credential("http://localhost") == credential
+
     @pytest.mark.parametrize(
         "wrong_code",
         [

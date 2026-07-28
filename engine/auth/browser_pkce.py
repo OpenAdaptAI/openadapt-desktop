@@ -235,7 +235,16 @@ class BrowserPkceProvider:
         open_browser=None,
         timeout: float = DEFAULT_TIMEOUT_S,
     ) -> None:
-        self.host = host.rstrip("/")
+        raw_host = host.rstrip("/")
+        kind = self._kind_for_host(raw_host)
+        try:
+            self.host = _validate_destination(raw_host, kind)
+            self._host_is_valid = True
+        except PairingError:
+            # Retain the safe, secret-free input only so `is_available()` can
+            # refuse it. No login URL or claim uses an invalid destination.
+            self.host = raw_host
+            self._host_is_valid = False
         self._uses_system_browser = open_browser is None
         self._open_browser = open_browser or self._default_open_browser
         self._timeout = timeout
@@ -256,9 +265,7 @@ class BrowserPkceProvider:
         """
         if os.environ.get("OPENADAPT_HEADLESS", "").strip():
             return False
-        try:
-            _validate_destination(self.host, self._destination_kind())
-        except PairingError:
+        if not self._host_is_valid:
             return False
         if not secure_store_available():
             return False
@@ -345,7 +352,11 @@ class BrowserPkceProvider:
 
     def _destination_kind(self) -> str | None:
         """Classify the host for the pairing destination policy."""
-        hostname = urllib.parse.urlparse(self.host).hostname
+        return self._kind_for_host(self.host)
+
+    @staticmethod
+    def _kind_for_host(host: str) -> str | None:
+        hostname = urllib.parse.urlparse(host).hostname
         return "local" if hostname in {"localhost", "127.0.0.1", "::1"} else None
 
     def _build_login_url(self, redirect_uri: str, challenge: str, state: str) -> str:

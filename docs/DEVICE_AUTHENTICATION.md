@@ -55,8 +55,11 @@ openadapt-desktop rotate
 
 Rotation creates the replacement first. The old bearer stays valid for at
 most seven days. Desktop durably stages the one-time response before it changes
-the active keychain entries. After a process interruption, Desktop finishes
-that exact stage and does not send a second rotation request.
+the active keychain entries. It then authenticates one independent
+`/api/needs-attention/count` request with the replacement and checks the exact
+lifetime contract before promotion. After a process interruption, Desktop
+validates and finishes that exact stage. It does not send a second rotation
+request.
 
 If the response is lost before Desktop can stage it, the old bearer remains
 usable during the overlap. Cloud cannot replay the raw replacement, so the

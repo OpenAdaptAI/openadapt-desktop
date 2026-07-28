@@ -71,6 +71,18 @@ def _rotation_response() -> _Response:
     )
 
 
+def _replacement_validation_response(credential: dict) -> _Response:
+    return _Response(
+        200,
+        {"count": 0, "credential": dict(credential)},
+        {
+            "cache-control": "no-store",
+            "x-openadapt-credential-warning-days": "14",
+            "x-openadapt-credential-expires-in-days": str(credential["expires_in_days"]),
+        },
+    )
+
+
 def _credential(token: str, expires_at: float | None = None) -> dict:
     return {
         "kind": "ingest_token",
@@ -196,13 +208,19 @@ def test_rotation_stages_then_atomically_promotes_the_one_time_replacement(
 ) -> None:
     store.store_credential(_credential(OLD_TOKEN))
     requests: list[tuple[str, dict, dict]] = []
+    rotated = _rotation_response()
 
     def _post(url, *, json, headers, **kwargs):
         requests.append((url, json, headers))
-        return _rotation_response()
+        return rotated
 
     monkeypatch.setattr(rotation, "secure_store_available", lambda: True)
     monkeypatch.setattr(rotation.httpx, "post", _post)
+    monkeypatch.setattr(
+        rotation.httpx,
+        "get",
+        lambda *a, **k: _replacement_validation_response(rotated.json()["credential"]),
+    )
 
     replacement = rotation.rotate_credential(HOST)
 
@@ -326,11 +344,52 @@ def test_retained_rotation_recovers_without_a_second_cloud_request(monkeypatch) 
         "post",
         lambda *a, **k: pytest.fail("recovery must not issue another rotation"),
     )
+    monkeypatch.setattr(
+        rotation.httpx,
+        "get",
+        lambda *a, **k: _replacement_validation_response(response["credential"]),
+    )
 
     recovered = rotation.rotate_credential(HOST)
 
     assert recovered == replacement
     assert store.load_credential(HOST) == replacement
+    assert store.load_rotation_stage() is None
+
+
+def test_bad_replacement_stays_staged_and_recovery_validates_without_reissuing(
+    monkeypatch,
+) -> None:
+    store.store_credential(_credential(OLD_TOKEN))
+    rotated = _rotation_response()
+    post_calls = 0
+
+    def _post(*args, **kwargs):
+        nonlocal post_calls
+        post_calls += 1
+        return rotated
+
+    monkeypatch.setattr(rotation, "secure_store_available", lambda: True)
+    monkeypatch.setattr(rotation.httpx, "post", _post)
+    monkeypatch.setattr(rotation.httpx, "get", lambda *a, **k: _Response(401, {}))
+
+    with pytest.raises(rotation.RotationError, match="did not accept.*old credential"):
+        rotation.rotate_credential(HOST)
+
+    assert post_calls == 1
+    assert store.load_credential(HOST)["token"] == OLD_TOKEN
+    assert store.load_rotation_stage() is not None
+
+    monkeypatch.setattr(
+        rotation.httpx,
+        "get",
+        lambda *a, **k: _replacement_validation_response(rotated.json()["credential"]),
+    )
+    recovered = rotation.rotate_credential(HOST)
+
+    assert post_calls == 1
+    assert recovered["token"] == NEW_TOKEN
+    assert store.load_credential(HOST) == recovered
     assert store.load_rotation_stage() is None
 
 

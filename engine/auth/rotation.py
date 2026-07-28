@@ -224,6 +224,7 @@ def rotate_credential(host: str = DEFAULT_HOST) -> Credential:
             "one-time response. The old credential remains valid for at most "
             "seven days. Sign in again; do not retry the same renewal."
         )
+    _validate_staged_replacement(previous_id, replacement)
     if not commit_rotation_stage(previous_id):
         raise RotationError(
             "OpenAdapt retained the renewed credential but could not finish its "
@@ -252,6 +253,7 @@ def recover_pending_rotation(host: str | None = None) -> Credential | None:
     previous_id, credential = _validated_rotation_stage(stage)
     if host is not None and credential["host"] != host.rstrip("/"):
         raise RotationError("A credential renewal for another Cloud host needs recovery first.")
+    _validate_staged_replacement(previous_id, credential)
     if not commit_rotation_stage(previous_id):
         raise RotationError(
             "OpenAdapt could not safely finish the retained credential renewal. "
@@ -261,6 +263,62 @@ def recover_pending_rotation(host: str | None = None) -> Credential | None:
         raise RotationError("The renewed credential is active, but its recovery record remains.")
     logger.info("Recovered the renewed hosted credential for {host}", host=credential["host"])
     return credential
+
+
+def _validate_staged_replacement(previous_id: str, credential: Credential) -> None:
+    """Prove the retained replacement bearer before canonical promotion."""
+    try:
+        response = httpx.get(
+            f"{credential['host']}{COUNT_PATH}",
+            headers={"Authorization": f"Bearer {credential['token']}"},
+            timeout=API_TIMEOUT_S,
+            follow_redirects=False,
+        )
+    except httpx.HTTPError as exc:
+        raise RotationError(
+            "OpenAdapt retained the renewed credential but could not verify it. "
+            "The old credential remains active, and recovery will retry the "
+            "retained replacement without another renewal request."
+        ) from exc
+    if not 200 <= response.status_code < 300:
+        raise RotationError(
+            "OpenAdapt retained the renewed credential, but Cloud did not accept "
+            f"it during verification ({response.status_code}). The old credential "
+            "remains active. Sign in again if verification does not recover."
+        )
+    try:
+        lifetime = parse_credential_lifetime(
+            response.json(),
+            headers=response.headers,
+            require_headers=True,
+            require_fresh=True,
+            require_no_store=True,
+        )
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise RotationError(
+            "OpenAdapt retained the renewed credential, but Cloud returned an "
+            "incomplete verification contract. The old credential remains active."
+        ) from exc
+    if lifetime["expires_at_timestamp"] != credential["expires_at"]:
+        raise RotationError(
+            "OpenAdapt retained the renewed credential, but Cloud verified a "
+            "different expiry. The old credential remains active."
+        )
+    # The recovery stage identity must remain unchanged across the network
+    # check. A concurrent operation cannot swap in another retained bearer and
+    # then have this successful response authorize its promotion.
+    try:
+        current_stage = load_rotation_stage()
+    except RuntimeError as exc:
+        raise RotationError("The retained credential changed during verification.") from exc
+    if current_stage is None:
+        raise RotationError("The retained credential changed during verification.")
+    try:
+        current_previous_id, current_credential = _validated_rotation_stage(current_stage)
+    except RotationError as exc:
+        raise RotationError("The retained credential changed during verification.") from exc
+    if current_previous_id != previous_id or current_credential != credential:
+        raise RotationError("The retained credential changed during verification.")
 
 
 def _stored_token(host: str) -> str | None:
