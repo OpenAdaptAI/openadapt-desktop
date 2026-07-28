@@ -49,6 +49,8 @@ SERVICE_NAME = "ai.openadapt.desktop"
 _ACTIVE_HOST_ACCOUNT = "__active_host__"
 _PAIRING_STAGE_ACCOUNT = "__pairing_stage__"
 _PAIRING_STAGE_VERSION = 1
+_ROTATION_STAGE_ACCOUNT = "__rotation_stage__"
+_ROTATION_STAGE_VERSION = 1
 
 # Suffix for the companion account that holds the full Credential JSON. The bare
 # ``host`` account holds the RAW bearer token (what the tray reads).
@@ -423,6 +425,136 @@ def clear_pairing_stage(pairing_id: str) -> bool:
     if stage.get("pairing_id") != pairing_id:
         return False
     return _apply_exact(_keyring(), _PAIRING_STAGE_ACCOUNT, None)
+
+
+def stage_rotation_credential(
+    previous_id: str,
+    credential: Credential,
+    previous: dict[str, str | None],
+) -> bool:
+    """Durably retain a one-time rotation response before canonical writes."""
+    kr = _keyring()
+    readable, current = _strict_get(kr, _ROTATION_STAGE_ACCOUNT)
+    if not readable or current is not None or previous.get("host") != credential["host"]:
+        return False
+    payload = json.dumps(
+        {
+            "version": _ROTATION_STAGE_VERSION,
+            "previous_id": previous_id,
+            "credential": credential,
+            "previous": previous,
+            "state": "received",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return _apply_exact(kr, _ROTATION_STAGE_ACCOUNT, payload)
+
+
+def load_rotation_stage() -> dict | None:
+    """Load the one-time rotation response retained for crash recovery."""
+    readable, raw = _strict_get(_keyring(), _ROTATION_STAGE_ACCOUNT)
+    if not readable:
+        raise RuntimeError("rotation recovery keychain entry is unreadable")
+    if raw is None:
+        return None
+    try:
+        value = json.loads(raw)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise RuntimeError("rotation recovery keychain entry is invalid") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError("rotation recovery keychain entry is invalid")
+    return value
+
+
+def _rotation_stage_values(
+    stage: dict,
+) -> tuple[str, tuple[str | None, ...], tuple[str, ...]] | None:
+    credential = stage.get("credential")
+    previous = stage.get("previous")
+    if (
+        stage.get("version") != _ROTATION_STAGE_VERSION
+        or stage.get("state") not in {"received", "canonical_written"}
+        or not isinstance(stage.get("previous_id"), str)
+        or not isinstance(credential, dict)
+        or not isinstance(previous, dict)
+        or not isinstance(credential.get("host"), str)
+        or previous.get("host") != credential["host"]
+        or not isinstance(credential.get("token"), str)
+    ):
+        return None
+    if any(
+        previous.get(key) is not None and not isinstance(previous.get(key), str)
+        for key in ("token", "credential", "active_host")
+    ):
+        return None
+    host = credential["host"]
+    prior = (
+        previous.get("token"),
+        previous.get("credential"),
+        previous.get("active_host"),
+    )
+    replacement = (credential["token"], json.dumps(credential), host)
+    return host, prior, replacement
+
+
+def _mark_rotation_stage(previous_id: str, state: str) -> bool:
+    if state not in {"received", "canonical_written"}:
+        return False
+    try:
+        stage = load_rotation_stage()
+    except RuntimeError:
+        return False
+    if stage is None or stage.get("previous_id") != previous_id:
+        return False
+    stage["state"] = state
+    payload = json.dumps(stage, sort_keys=True, separators=(",", ":"))
+    return _apply_exact(_keyring(), _ROTATION_STAGE_ACCOUNT, payload)
+
+
+def commit_rotation_stage(previous_id: str) -> bool:
+    """Finish or resume the canonical write for one retained replacement."""
+    try:
+        stage = load_rotation_stage()
+    except RuntimeError:
+        return False
+    if stage is None or stage.get("previous_id") != previous_id:
+        return False
+    values = _rotation_stage_values(stage)
+    if values is None:
+        return False
+    host, previous, replacement = values
+    kr = _keyring()
+    accounts = (host, host + _CRED_SUFFIX, _ACTIVE_HOST_ACCOUNT)
+    observed: list[str | None] = []
+    for account in accounts:
+        readable, value = _strict_get(kr, account)
+        if not readable:
+            return False
+        observed.append(value)
+    if tuple(observed) == replacement:
+        return _mark_rotation_stage(previous_id, "canonical_written")
+    if any(value not in {prior, new} for value, prior, new in zip(observed, previous, replacement)):
+        # Another login won after the rotation request. Preserve both the
+        # newer canonical value and this one-time response for operator review.
+        return False
+    if not all(_apply_exact(kr, account, value) for account, value in zip(accounts, replacement)):
+        # The stage remains, so the next process can finish any partial write.
+        return False
+    return _mark_rotation_stage(previous_id, "canonical_written")
+
+
+def clear_rotation_stage(previous_id: str) -> bool:
+    """Delete only the exact rotation recovery record after promotion."""
+    try:
+        stage = load_rotation_stage()
+    except RuntimeError:
+        return False
+    if stage is None:
+        return True
+    if stage.get("previous_id") != previous_id:
+        return False
+    return _apply_exact(_keyring(), _ROTATION_STAGE_ACCOUNT, None)
 
 
 def load_credential(host: str) -> Credential | None:
