@@ -69,6 +69,32 @@ _ROUTE_TASK_EVIDENCE = re.compile(
 )
 _ROUTE_TASK_DETAIL = re.compile(rf"^/api/portal/tasks/(?P<run_id>{_RUN_ID})$")
 
+
+def _flow_entity_label_options() -> list[dict[str, str]]:
+    """Return only Flow's closed, static entity labels for the local shell."""
+
+    try:
+        from openadapt_flow import qualification
+
+        provider = getattr(qualification, "entity_label_options", None)
+        raw_options = provider() if callable(provider) else []
+    except (ImportError, TypeError, ValueError):
+        return []
+    options: list[dict[str, str]] = []
+    for item in raw_options if isinstance(raw_options, (list, tuple)) else []:
+        raw = item.model_dump(mode="json") if hasattr(item, "model_dump") else item
+        if not isinstance(raw, dict):
+            continue
+        label = raw.get("label")
+        fallback = raw.get("fallback")
+        if (
+            isinstance(label, str)
+            and re.fullmatch(r"[a-z][a-z0-9]*(?:[ _-][a-z0-9]+){0,3}", label)
+            and fallback in {"record", "item"}
+        ):
+            options.append({"label": label, "fallback": fallback})
+    return options
+
 _SECURITY_HEADERS = {
     "Content-Security-Policy": (
         "default-src 'self'; script-src 'self'; style-src 'self'; "
@@ -228,6 +254,9 @@ class PortalApp:
                     "public_origin": self.ingress.public_origin,
                 },
             )
+
+        if method == "GET" and path == "/api/portal/entity-label-options":
+            return self._json(200, {"options": _flow_entity_label_options()})
 
         if method == "GET" and _ROUTE_TASKS.fullmatch(path):
             return self._relay("tasks")

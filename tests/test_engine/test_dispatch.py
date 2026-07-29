@@ -1639,3 +1639,46 @@ class TestScrubCaptureRefusal:
         row = db.get_capture("capE")
         assert row["review_status"] == "captured"
         assert not row["scrubbed_path"]
+
+
+def test_entity_class_noop_keeps_certified_status_and_removal_marks_pending(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The status follows the canonical qualification result, not the command name."""
+
+    import engine.qualification as qualification
+
+    config = EngineConfig(data_dir=tmp_path / ".openadapt", log_level="WARNING")
+    bundle = config.data_dir / "bundles" / "wf-1"
+    bundle.mkdir(parents=True)
+    db = IndexDB(tmp_path / "index.db")
+    db.initialize()
+    db.insert_bundle("wf-1", str(bundle))
+    db.update_bundle("wf-1", status="certified")
+    dispatcher = EngineDispatcher(config, services=EngineServices(config, db=db))
+    monkeypatch.setattr(
+        qualification,
+        "set_action_entity_label",
+        lambda *args, **kwargs: {"ok": True, "certification_current": True},
+    )
+    monkeypatch.setattr(
+        qualification,
+        "remove_action_entity_label",
+        lambda *args, **kwargs: {"ok": True, "certification_current": False},
+    )
+    try:
+        saved = dispatcher.set_qualification_entity_label(
+            workflow_id="wf-1",
+            step_id="save",
+            label="insurance claim",
+            fallback="record",
+        )
+        assert saved["ok"] is True
+        assert db.get_bundle("wf-1")["status"] == "certified"
+        removed = dispatcher.remove_qualification_entity_label(
+            workflow_id="wf-1", step_id="save"
+        )
+        assert removed["ok"] is True
+        assert db.get_bundle("wf-1")["status"] == "qualification_pending"
+    finally:
+        db.close()

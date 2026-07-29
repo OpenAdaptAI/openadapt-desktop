@@ -149,6 +149,11 @@ export interface QualificationEntityLabel {
   fallback: QualificationEntityFallback;
 }
 
+export interface QualificationEntityLabelOption {
+  label: string;
+  fallback: QualificationEntityFallback;
+}
+
 export interface QualificationIdentity {
   applicable: boolean;
   armed?: boolean | null;
@@ -392,6 +397,7 @@ export interface QualificationProject {
   entity_label_authoring?: {
     supported: boolean;
     minimum_flow_version: string;
+    options: QualificationEntityLabelOption[];
   };
   controls: {
     parameters: QualificationParameter[];

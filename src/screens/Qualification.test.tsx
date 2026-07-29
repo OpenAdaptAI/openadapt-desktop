@@ -118,7 +118,14 @@ function projectWithTiers(tiers: Record<string, number>): QualificationProject {
       edges: [],
     },
     controls: { parameters: [], actions },
-    entity_label_authoring: { supported: true, minimum_flow_version: "1.28.0" },
+    entity_label_authoring: {
+      supported: true,
+      minimum_flow_version: "1.28.0",
+      options: [
+        { label: "insurance claim", fallback: "record" },
+        { label: "loan application", fallback: "item" },
+      ],
+    },
     lint: { findings: [] },
   } as unknown as QualificationProject;
 }
@@ -223,7 +230,7 @@ describe("Qualification effect requirements", () => {
 
     render(<Qualification workflowId="wf-1" onBack={() => {}} />);
 
-    const field = (await screen.findByLabelText("Entity class")) as HTMLInputElement;
+    const field = (await screen.findByLabelText("Entity class")) as HTMLSelectElement;
     fireEvent.change(field, { target: { value: "insurance claim" } });
     fireEvent.click(screen.getByRole("button", { name: "Save entity class" }));
     await waitFor(() =>
@@ -245,18 +252,34 @@ describe("Qualification effect requirements", () => {
     );
   });
 
-  it("rejects a record value locally and does not echo it to the engine", async () => {
+  it("does not allow a person name to become an entity class", async () => {
     mockedEngineInvoke.mockResolvedValue(projectWithTiers({ review: 3, submit: 2 }));
     render(<Qualification workflowId="wf-1" onBack={() => {}} />);
     const privateValue = "Jane Smith 12345";
+    const field = (await screen.findByLabelText("Entity class")) as HTMLSelectElement;
+    expect(field.tagName).toBe("SELECT");
+    expect(screen.queryByRole("option", { name: privateValue })).toBeNull();
+    fireEvent.change(field, { target: { value: privateValue } });
+    expect(
+      (screen.getByRole("button", { name: "Save entity class" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+    expect(mockedEngineInvoke).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText(privateValue)).toBeNull();
+  });
+
+  it("shows a rejected qualified-class save without changing the selection", async () => {
+    mockedEngineInvoke
+      .mockResolvedValueOnce(projectWithTiers({ review: 3, submit: 2 }))
+      .mockResolvedValueOnce({ ok: false, workflow_id: "wf-1", error: "Class is not approved" });
+    render(<Qualification workflowId="wf-1" onBack={() => {}} />);
     fireEvent.change(await screen.findByLabelText("Entity class"), {
-      target: { value: privateValue },
+      target: { value: "insurance claim" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Save entity class" }));
-    await waitFor(() =>
-      expect(screen.getByText(/Enter a short static entity class/)).toBeTruthy(),
+    expect(await screen.findByText("Class is not approved")).toBeTruthy();
+    expect((screen.getByLabelText("Entity class") as HTMLSelectElement).value).toBe(
+      "insurance claim",
     );
-    expect(mockedEngineInvoke).toHaveBeenCalledTimes(1);
-    expect(screen.queryByDisplayValue(privateValue)).toBeNull();
   });
 });

@@ -98,6 +98,7 @@ def _flow_api() -> dict[str, Any]:
         "QualificationCaseResult": QualificationCaseResult,
         "QualificationOutcome": QualificationOutcome,
         "QualifiedEntityLabel": getattr(flow_qualification, "QualifiedEntityLabel", None),
+        "entity_label_options": getattr(flow_qualification, "entity_label_options", None),
         "EnvironmentBoundary": EnvironmentBoundary,
         "IdentityEnforcement": IdentityEnforcement,
         "IdentityEvidenceSource": IdentityEvidenceSource,
@@ -185,14 +186,40 @@ def _require_qualified_entity_label_authoring() -> None:
         )
 
 
-def _validate_entity_label(label: str, fallback: str) -> tuple[str, str]:
+def _entity_label_options(api: dict[str, Any]) -> list[dict[str, str]]:
+    """Project only Flow-owned, closed entity classes into Desktop inspection."""
+
+    provider = api.get("entity_label_options")
+    if not callable(provider):
+        return []
+    try:
+        raw_options = provider()
+    except (TypeError, ValueError):
+        return []
+    options: list[dict[str, str]] = []
+    for item in raw_options if isinstance(raw_options, (list, tuple)) else []:
+        raw = item.model_dump(mode="json") if hasattr(item, "model_dump") else item
+        if not isinstance(raw, dict):
+            continue
+        label = raw.get("label")
+        fallback = raw.get("fallback")
+        if (
+            isinstance(label, str)
+            and _QUALIFIED_ENTITY_LABEL_RE.fullmatch(label)
+            and fallback in {"record", "item"}
+        ):
+            options.append({"label": label, "fallback": fallback})
+    return options
+
+
+def _validate_entity_label(
+    label: str, fallback: str, options: list[dict[str, str]]
+) -> tuple[str, str]:
     normalized = label.strip()
-    if _QUALIFIED_ENTITY_LABEL_RE.fullmatch(normalized) is None:
+    if not any(item["label"] == normalized and item["fallback"] == fallback for item in options):
         raise QualificationError(
-            "Enter a short static entity class label, such as patient record, insurance claim, or loan application."
+            "Choose an approved static entity class. Do not enter a name, ID, account, or other record value."
         )
-    if fallback not in {"record", "item"}:
-        raise QualificationError("Entity fallback must be record or item.")
     return normalized, fallback
 
 
@@ -567,6 +594,7 @@ def inspect_bundle(
         workflow_contract_sha256=workflow_contract,
         project=project,
     )
+    entity_options = _entity_label_options(api)
     return {
         "ok": True,
         "workflow_id": workflow_id,
@@ -575,10 +603,16 @@ def inspect_bundle(
             project.schema_version if project is not None else "openadapt.qualification-project/v1"
         ),
         "entity_label_authoring": {
-            "supported": qualified_entity_label_authoring_supported(),
+            "supported": (
+                qualified_entity_label_authoring_supported()
+                and api["QualifiedEntityLabel"] is not None
+                and api["set_entity_label"] is not None
+                and bool(entity_options)
+            ),
             "minimum_flow_version": ".".join(
                 str(value) for value in MIN_FLOW_FOR_QUALIFIED_ENTITY_LABELS
             ),
+            "options": entity_options,
         },
         "project": project.model_dump(mode="json") if project is not None else None,
         "capability_coverage": capability_coverage,
@@ -730,9 +764,10 @@ def set_action_entity_label(
 ) -> dict:
     """Set one safe static entity class through Flow's qualification API."""
 
-    _require_qualified_entity_label_authoring()
-    label, fallback = _validate_entity_label(label, fallback)
     api = _flow_api()
+    _require_qualified_entity_label_authoring()
+    options = _entity_label_options(api)
+    label, fallback = _validate_entity_label(label, fallback, options)
     if api["QualifiedEntityLabel"] is None or api["set_entity_label"] is None:
         raise QualificationError("The installed Flow runtime does not support entity-class labels.")
     workflow = _load(bundle_dir, key=bundle_key)

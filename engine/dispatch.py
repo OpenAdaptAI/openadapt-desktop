@@ -1607,7 +1607,12 @@ class EngineDispatcher:
                 policy_source=policy,
                 bundle_key=self._qualification_bundle_key(workflow_id),
             )
-            self.services.db.update_bundle(workflow_id, status="qualification_pending")
+            self.services.db.update_bundle(
+                workflow_id,
+                status=(
+                    "certified" if result.get("certification_current") else "qualification_pending"
+                ),
+            )
             return result
         except Exception as exc:
             return {"ok": False, "workflow_id": workflow_id, "error": str(exc)}
@@ -1666,7 +1671,12 @@ class EngineDispatcher:
                 policy_source=policy,
                 bundle_key=self._qualification_bundle_key(workflow_id),
             )
-            self.services.db.update_bundle(workflow_id, status="qualification_pending")
+            self.services.db.update_bundle(
+                workflow_id,
+                status=(
+                    "certified" if result.get("certification_current") else "qualification_pending"
+                ),
+            )
             return result
         except Exception as exc:
             return {"ok": False, "workflow_id": workflow_id, "error": str(exc)}

@@ -124,6 +124,11 @@ function stubTransport() {
         status: 200,
         body: [{ id: "run1", headline: "The compiled target could not be resolved uniquely.", category: "resolution" }],
       };
+    } else if (url === "/api/portal/entity-label-options") {
+      reply = {
+        status: 200,
+        body: { options: [{ label: "insurance claim", fallback: "record" }] },
+      };
     } else if (url === "/api/portal/tasks/run1") {
       reply = { status: 200, body: detail };
     } else if (url.includes("/actions/")) {
@@ -222,6 +227,21 @@ describe("the decision view preserves the data boundary", () => {
     expect(text).toContain("Record identity");
     expect(text).toContain("intended record");
     expect(text).not.toContain("patient record");
+  });
+
+  it("keeps an unstaged V2 entity label neutral", async () => {
+    detail = {
+      ...QUALIFIED_ENTITY_HALT,
+      task: {
+        ...QUALIFIED_ENTITY_HALT.task,
+        entity: { label: "loan application", fallback: "item" },
+      },
+    };
+    await boot();
+    await openTask();
+    const text = document.getElementById("main")!.textContent ?? "";
+    expect(text).toContain("Item identity");
+    expect(text).not.toContain("loan application");
   });
 });
 

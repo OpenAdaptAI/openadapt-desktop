@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState } from "react";
 import { CMD, engineInvoke } from "../lib/engine";
 import type {
   QualificationEffectKind,
-  QualificationEntityFallback,
   QualificationIdentityEnforcement,
   QualificationIdentityMatch,
   QualificationIdentityNormalizer,
@@ -57,7 +56,6 @@ const EFFECT_REFUSALS = new Set([
   "effect_tier_insufficient",
   "high_risk_screen_only",
 ]);
-const ENTITY_CLASS_PATTERN = /^[a-z][a-z0-9]*(?:[ _-][a-z0-9]+){0,3}$/;
 
 interface IdentitySignalDraft {
   id: string;
@@ -229,8 +227,6 @@ export function Qualification({
   const [minimumTier, setMinimumTier] = useState(3);
   const [projectMinimumTier, setProjectMinimumTier] = useState(3);
   const [entityClass, setEntityClass] = useState("");
-  const [entityFallback, setEntityFallback] =
-    useState<QualificationEntityFallback>("record");
 
   async function load() {
     setBusy("loading");
@@ -351,7 +347,6 @@ export function Qualification({
     );
     setIdentityDraftActionId(selectedActionId);
     setEntityClass(selectedControls.entity_label?.label || "");
-    setEntityFallback(selectedControls.entity_label?.fallback || "record");
   }, [
     identityDraftActionId,
     project?.project?.minimum_effect_tier,
@@ -368,8 +363,12 @@ export function Qualification({
 
   useEffect(() => {
     setEntityClass(selectedControls?.entity_label?.label || "");
-    setEntityFallback(selectedControls?.entity_label?.fallback || "record");
-  }, [selectedActionId, selectedControls?.entity_label?.fallback, selectedControls?.entity_label?.label]);
+  }, [selectedActionId, selectedControls?.entity_label?.label]);
+
+  const entityOptions = project?.entity_label_authoring?.options || [];
+  const selectedEntityOption = entityOptions.find(
+    (option) => option.label === entityClass,
+  );
 
   useEffect(() => {
     if (
@@ -534,10 +533,9 @@ export function Qualification({
 
   async function saveEntityClass() {
     if (!selectedActionId) return;
-    const label = entityClass.trim();
-    if (!ENTITY_CLASS_PATTERN.test(label)) {
+    if (!selectedEntityOption) {
       setEntityClass("");
-      setError("Enter a short static entity class. Do not enter a name, ID, account, or other record value.");
+      setError("Choose an approved static entity class. Do not enter a name, ID, account, or other record value.");
       return;
     }
     setBusy("entity-class");
@@ -548,8 +546,8 @@ export function Qualification({
         {
           workflow_id: workflowId,
           step_id: selectedActionId,
-          label,
-          fallback: entityFallback,
+          label: selectedEntityOption.label,
+          fallback: selectedEntityOption.fallback,
           policy: POLICY,
         },
       );
@@ -580,7 +578,6 @@ export function Qualification({
       }
       setProject(response);
       setEntityClass("");
-      setEntityFallback("record");
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -1211,31 +1208,25 @@ export function Qualification({
                 </p>
                 {project.entity_label_authoring?.supported ? (
                   <>
-                    <div className="grid grid-2">
-                      <input
+                    <div className="field">
+                      <select
                         id="qualification-entity-class"
                         className="input"
                         value={entityClass}
-                        maxLength={63}
-                        placeholder="insurance claim"
                         onChange={(event) => setEntityClass(event.target.value)}
-                      />
-                      <select
-                        aria-label="Entity fallback"
-                        className="input"
-                        value={entityFallback}
-                        onChange={(event) =>
-                          setEntityFallback(event.target.value as QualificationEntityFallback)
-                        }
                       >
-                        <option value="record">Record</option>
-                        <option value="item">Item</option>
+                        <option value="">Use neutral record wording</option>
+                        {entityOptions.map((option) => (
+                          <option key={`${option.label}-${option.fallback}`} value={option.label}>
+                            {option.label}
+                          </option>
+                        ))}
                       </select>
                     </div>
                     <div className="row" style={{ marginTop: "var(--space-3)" }}>
                       <Button
                         variant="ghost"
-                        disabled={busy === "entity-class" || !entityClass.trim()}
+                        disabled={busy === "entity-class" || !selectedEntityOption}
                         onClick={() => void saveEntityClass()}
                       >
                         {busy === "entity-class" ? "Saving…" : "Save entity class"}

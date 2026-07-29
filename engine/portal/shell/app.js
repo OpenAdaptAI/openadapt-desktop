@@ -339,6 +339,21 @@ const TASK_KIND_COPY = {
 
 const QUALIFIED_ENTITY_LABEL = /^[a-z][a-z0-9]*(?:[ _-][a-z0-9]+){0,3}$/;
 const ENTITY_FALLBACKS = new Set(["record", "item"]);
+let approvedEntityLabels = new Set();
+
+async function loadApprovedEntityLabels() {
+  const { status, body } = await api("/api/portal/entity-label-options");
+  if (status !== 200 || !body || !Array.isArray(body.options)) {
+    approvedEntityLabels = new Set();
+    return;
+  }
+  approvedEntityLabels = new Set(
+    body.options
+      .filter((item) => item && typeof item === "object" && typeof item.label === "string")
+      .map((item) => item.label)
+      .filter((label) => QUALIFIED_ENTITY_LABEL.test(label)),
+  );
+}
 
 // V2 is the only task schema that carries a domain noun. The runner signs it
 // from the sealed qualification contract for the exact paused step. This shell
@@ -352,7 +367,11 @@ function entityNoun(task) {
   if (!entity || typeof entity !== "object" || Array.isArray(entity)) return "record";
   const keys = Object.keys(entity).sort().join(",");
   if (keys !== "fallback,label") return "record";
-  if (typeof entity.label === "string" && QUALIFIED_ENTITY_LABEL.test(entity.label)) {
+  if (
+    typeof entity.label === "string" &&
+    QUALIFIED_ENTITY_LABEL.test(entity.label) &&
+    approvedEntityLabels.has(entity.label)
+  ) {
     return entity.label;
   }
   return ENTITY_FALLBACKS.has(entity.fallback) ? entity.fallback : "record";
@@ -750,6 +769,7 @@ async function showTask(runId) {
   const { status, body } = await api(`/api/portal/tasks/${encodeURIComponent(runId)}`);
   if (status === 401 || status === 202) return startPairing();
   if (status !== 200 || !body) return unavailable(body);
+  await loadApprovedEntityLabels();
   const task = body.task;
   const presentation = body.presentation || {};
   const delivery = task ? task.delivery_state : null;
