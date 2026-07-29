@@ -339,19 +339,25 @@ const TASK_KIND_COPY = {
 
 const QUALIFIED_ENTITY_LABEL = /^[a-z][a-z0-9]*(?:[ _-][a-z0-9]+){0,3}$/;
 const ENTITY_FALLBACKS = new Set(["record", "item"]);
-let approvedEntityLabels = new Set();
+let approvedEntityOptions = new Map();
 
 async function loadApprovedEntityLabels() {
   const { status, body } = await api("/api/portal/entity-label-options");
   if (status !== 200 || !body || !Array.isArray(body.options)) {
-    approvedEntityLabels = new Set();
+    approvedEntityOptions = new Map();
     return;
   }
-  approvedEntityLabels = new Set(
+  approvedEntityOptions = new Map(
     body.options
-      .filter((item) => item && typeof item === "object" && typeof item.label === "string")
-      .map((item) => item.label)
-      .filter((label) => QUALIFIED_ENTITY_LABEL.test(label)),
+      .filter(
+        (item) =>
+          item &&
+          typeof item === "object" &&
+          typeof item.label === "string" &&
+          ENTITY_FALLBACKS.has(item.fallback) &&
+          QUALIFIED_ENTITY_LABEL.test(item.label),
+      )
+      .map((item) => [item.label, item.fallback]),
   );
 }
 
@@ -370,7 +376,7 @@ function entityNoun(task) {
   if (
     typeof entity.label === "string" &&
     QUALIFIED_ENTITY_LABEL.test(entity.label) &&
-    approvedEntityLabels.has(entity.label)
+    approvedEntityOptions.get(entity.label) === entity.fallback
   ) {
     return entity.label;
   }

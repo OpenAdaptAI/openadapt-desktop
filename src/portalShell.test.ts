@@ -101,7 +101,7 @@ const QUALIFIED_ENTITY_HALT = {
     ...RESOLUTION_HALT.task,
     schema_version: "openadapt.human-decision-task/v2",
     task_kind: "identity",
-    entity: { label: "insurance claim", fallback: "record" },
+    entity: { label: "insurance claim", fallback: "item" },
   },
   presentation: {
     ...RESOLUTION_HALT.presentation,
@@ -127,7 +127,7 @@ function stubTransport() {
     } else if (url === "/api/portal/entity-label-options") {
       reply = {
         status: 200,
-        body: { options: [{ label: "insurance claim", fallback: "record" }] },
+        body: { options: [{ label: "insurance claim", fallback: "item" }] },
       };
     } else if (url === "/api/portal/tasks/run1") {
       reply = { status: 200, body: detail };
@@ -242,6 +242,21 @@ describe("the decision view preserves the data boundary", () => {
     const text = document.getElementById("main")!.textContent ?? "";
     expect(text).toContain("Item identity");
     expect(text).not.toContain("loan application");
+  });
+
+  it("keeps a mismatched V2 entity fallback neutral", async () => {
+    detail = {
+      ...QUALIFIED_ENTITY_HALT,
+      task: {
+        ...QUALIFIED_ENTITY_HALT.task,
+        entity: { label: "insurance claim", fallback: "record" },
+      },
+    };
+    await boot();
+    await openTask();
+    const text = document.getElementById("main")!.textContent ?? "";
+    expect(text).toContain("Record identity");
+    expect(text).not.toContain("Insurance claim identity");
   });
 });
 
