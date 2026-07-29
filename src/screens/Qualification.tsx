@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { CMD, engineInvoke } from "../lib/engine";
 import type {
   QualificationEffectKind,
+  QualificationEntityFallback,
   QualificationIdentityEnforcement,
   QualificationIdentityMatch,
   QualificationIdentityNormalizer,
@@ -56,6 +57,7 @@ const EFFECT_REFUSALS = new Set([
   "effect_tier_insufficient",
   "high_risk_screen_only",
 ]);
+const ENTITY_CLASS_PATTERN = /^[a-z][a-z0-9]*(?:[ _-][a-z0-9]+){0,3}$/;
 
 interface IdentitySignalDraft {
   id: string;
@@ -226,6 +228,9 @@ export function Qualification({
   const [capabilities, setCapabilities] = useState("");
   const [minimumTier, setMinimumTier] = useState(3);
   const [projectMinimumTier, setProjectMinimumTier] = useState(3);
+  const [entityClass, setEntityClass] = useState("");
+  const [entityFallback, setEntityFallback] =
+    useState<QualificationEntityFallback>("record");
 
   async function load() {
     setBusy("loading");
@@ -345,6 +350,8 @@ export function Qualification({
       firstEffect?.verification_tier || project?.project?.minimum_effect_tier || 3,
     );
     setIdentityDraftActionId(selectedActionId);
+    setEntityClass(selectedControls.entity_label?.label || "");
+    setEntityFallback(selectedControls.entity_label?.fallback || "record");
   }, [
     identityDraftActionId,
     project?.project?.minimum_effect_tier,
@@ -358,6 +365,11 @@ export function Qualification({
       setBindingVerificationTier(project.project.minimum_effect_tier);
     }
   }, [project?.project?.minimum_effect_tier]);
+
+  useEffect(() => {
+    setEntityClass(selectedControls?.entity_label?.label || "");
+    setEntityFallback(selectedControls?.entity_label?.fallback || "record");
+  }, [selectedActionId, selectedControls?.entity_label?.fallback, selectedControls?.entity_label?.label]);
 
   useEffect(() => {
     if (
@@ -513,6 +525,62 @@ export function Qualification({
         return;
       }
       setProject(response);
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function saveEntityClass() {
+    if (!selectedActionId) return;
+    const label = entityClass.trim();
+    if (!ENTITY_CLASS_PATTERN.test(label)) {
+      setEntityClass("");
+      setError("Enter a short static entity class. Do not enter a name, ID, account, or other record value.");
+      return;
+    }
+    setBusy("entity-class");
+    setError("");
+    try {
+      const response = await engineInvoke<QualificationResponse>(
+        CMD.SET_QUALIFICATION_ENTITY_LABEL,
+        {
+          workflow_id: workflowId,
+          step_id: selectedActionId,
+          label,
+          fallback: entityFallback,
+          policy: POLICY,
+        },
+      );
+      if (!response.ok) {
+        setError(response.error);
+        return;
+      }
+      setProject(response);
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function removeEntityClass() {
+    if (!selectedActionId) return;
+    setBusy("entity-class-remove");
+    setError("");
+    try {
+      const response = await engineInvoke<QualificationResponse>(
+        CMD.REMOVE_QUALIFICATION_ENTITY_LABEL,
+        { workflow_id: workflowId, step_id: selectedActionId, policy: POLICY },
+      );
+      if (!response.ok) {
+        setError(response.error);
+        return;
+      }
+      setProject(response);
+      setEntityClass("");
+      setEntityFallback("record");
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -1133,6 +1201,63 @@ export function Qualification({
                 ))}
               </select>
             </div>
+
+            {selectedAction && selectedControls && project.project && (
+              <div className="field" style={{ marginBottom: "var(--space-4)" }}>
+                <label htmlFor="qualification-entity-class">Entity class</label>
+                <p className="page-sub">
+                  Set the generic entity this exact action handles. This is a static class,
+                  not a person, account, claim number, or other record value.
+                </p>
+                {project.entity_label_authoring?.supported ? (
+                  <>
+                    <div className="grid grid-2">
+                      <input
+                        id="qualification-entity-class"
+                        className="input"
+                        value={entityClass}
+                        maxLength={63}
+                        placeholder="insurance claim"
+                        onChange={(event) => setEntityClass(event.target.value)}
+                      />
+                      <select
+                        aria-label="Entity fallback"
+                        className="input"
+                        value={entityFallback}
+                        onChange={(event) =>
+                          setEntityFallback(event.target.value as QualificationEntityFallback)
+                        }
+                      >
+                        <option value="record">Record</option>
+                        <option value="item">Item</option>
+                      </select>
+                    </div>
+                    <div className="row" style={{ marginTop: "var(--space-3)" }}>
+                      <Button
+                        variant="ghost"
+                        disabled={busy === "entity-class" || !entityClass.trim()}
+                        onClick={() => void saveEntityClass()}
+                      >
+                        {busy === "entity-class" ? "Saving…" : "Save entity class"}
+                      </Button>
+                      {selectedControls.entity_label && (
+                        <Button
+                          variant="danger"
+                          disabled={busy === "entity-class-remove"}
+                          onClick={() => void removeEntityClass()}
+                        >
+                          {busy === "entity-class-remove" ? "Removing…" : "Remove entity class"}
+                        </Button>
+                      )}
+                    </div>
+                  </>
+                ) : (
+                  <Callout tone="warn" title="Update required">
+                    Entity class authoring requires OpenAdapt Flow {project.entity_label_authoring?.minimum_flow_version || "1.28.0"} or later.
+                  </Callout>
+                )}
+              </div>
+            )}
 
             {selectedAction && selectedControls && project.project && (
               <div className="grid grid-2">

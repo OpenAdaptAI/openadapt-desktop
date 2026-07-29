@@ -118,6 +118,7 @@ function projectWithTiers(tiers: Record<string, number>): QualificationProject {
       edges: [],
     },
     controls: { parameters: [], actions },
+    entity_label_authoring: { supported: true, minimum_flow_version: "1.28.0" },
     lint: { findings: [] },
   } as unknown as QualificationProject;
 }
@@ -205,5 +206,57 @@ describe("Qualification effect requirements", () => {
         }),
       ),
     );
+  });
+
+  it("saves and removes a static entity class without sending a record value", async () => {
+    const initial = projectWithTiers({ review: 3, submit: 2 });
+    const saved = projectWithTiers({ review: 3, submit: 2 });
+    saved.controls.actions.review.entity_label = {
+      step_id: "review",
+      label: "insurance claim",
+      fallback: "record",
+    };
+    mockedEngineInvoke
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValueOnce(saved)
+      .mockResolvedValueOnce(initial);
+
+    render(<Qualification workflowId="wf-1" onBack={() => {}} />);
+
+    const field = (await screen.findByLabelText("Entity class")) as HTMLInputElement;
+    fireEvent.change(field, { target: { value: "insurance claim" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save entity class" }));
+    await waitFor(() =>
+      expect(mockedEngineInvoke).toHaveBeenCalledWith(
+        CMD.SET_QUALIFICATION_ENTITY_LABEL,
+        expect.objectContaining({
+          step_id: "review",
+          label: "insurance claim",
+          fallback: "record",
+        }),
+      ),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Remove entity class" }));
+    await waitFor(() =>
+      expect(mockedEngineInvoke).toHaveBeenCalledWith(
+        CMD.REMOVE_QUALIFICATION_ENTITY_LABEL,
+        expect.objectContaining({ step_id: "review" }),
+      ),
+    );
+  });
+
+  it("rejects a record value locally and does not echo it to the engine", async () => {
+    mockedEngineInvoke.mockResolvedValue(projectWithTiers({ review: 3, submit: 2 }));
+    render(<Qualification workflowId="wf-1" onBack={() => {}} />);
+    const privateValue = "Jane Smith 12345";
+    fireEvent.change(await screen.findByLabelText("Entity class"), {
+      target: { value: privateValue },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save entity class" }));
+    await waitFor(() =>
+      expect(screen.getByText(/Enter a short static entity class/)).toBeTruthy(),
+    );
+    expect(mockedEngineInvoke).toHaveBeenCalledTimes(1);
+    expect(screen.queryByDisplayValue(privateValue)).toBeNull();
   });
 });

@@ -37,6 +37,8 @@ export const CMD = {
   GET_QUALIFICATION: "get_qualification",
   INITIALIZE_QUALIFICATION: "initialize_qualification",
   SET_QUALIFICATION_RISK: "set_qualification_risk",
+  SET_QUALIFICATION_ENTITY_LABEL: "set_qualification_entity_label",
+  REMOVE_QUALIFICATION_ENTITY_LABEL: "remove_qualification_entity_label",
   ARM_QUALIFICATION_IDENTITY: "arm_qualification_identity",
   SET_QUALIFICATION_IDENTITY: "set_qualification_identity",
   BIND_QUALIFICATION_EFFECT: "bind_qualification_effect",

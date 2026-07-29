@@ -141,6 +141,13 @@ export type QualificationTargetKind =
   | "linux"
   | "rdp"
   | "citrix";
+export type QualificationEntityFallback = "record" | "item";
+
+export interface QualificationEntityLabel {
+  step_id: string;
+  label: string;
+  fallback: QualificationEntityFallback;
+}
 
 export interface QualificationIdentity {
   applicable: boolean;
@@ -199,6 +206,7 @@ export interface QualificationEditableEffect {
 
 export interface QualificationActionControls {
   step_id: string;
+  entity_label?: QualificationEntityLabel | null;
   classification?: {
     step_id: string;
     classification: QualificationRisk | "unknown";
@@ -380,6 +388,10 @@ export interface QualificationProject {
     certified: boolean;
     certification_status?: string | null;
     certified_at?: string | null;
+  };
+  entity_label_authoring?: {
+    supported: boolean;
+    minimum_flow_version: string;
   };
   controls: {
     parameters: QualificationParameter[];

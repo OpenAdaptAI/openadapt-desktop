@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -31,6 +32,8 @@ QualificationIdentityEnforcement = Literal["canonical_ladder", "signal_quorum"]
 QualificationTargetKind = Literal["web", "windows", "macos", "linux", "rdp", "citrix"]
 DEFAULT_QUALIFICATION_POLICY = "clinical-write"
 ENVIRONMENT_IDENTIFIER_DERIVATION = "sha256(trimmed UTF-8 operator identifier)"
+MIN_FLOW_FOR_QUALIFIED_ENTITY_LABELS = (1, 28, 0)
+_QUALIFIED_ENTITY_LABEL_RE = re.compile(r"^[a-z][a-z0-9]*(?:[ _-][a-z0-9]+){0,3}$")
 
 
 class QualificationError(RuntimeError):
@@ -94,6 +97,7 @@ def _flow_api() -> dict[str, Any]:
         "QualificationCaseKind": QualificationCaseKind,
         "QualificationCaseResult": QualificationCaseResult,
         "QualificationOutcome": QualificationOutcome,
+        "QualifiedEntityLabel": getattr(flow_qualification, "QualifiedEntityLabel", None),
         "EnvironmentBoundary": EnvironmentBoundary,
         "IdentityEnforcement": IdentityEnforcement,
         "IdentityEvidenceSource": IdentityEvidenceSource,
@@ -109,12 +113,14 @@ def _flow_api() -> dict[str, Any]:
         "init_project": init_project,
         "record_case_results": record_case_results,
         "save_qualified_workflow": save_qualified_workflow,
+        "remove_entity_label": getattr(flow_qualification, "remove_entity_label", None),
         "set_trusted_runner_key": set_trusted_runner_key,
         "sign_case_result": sign_case_result,
         "set_action_classification": set_action_classification,
         "set_effect_policy": set_effect_policy,
         "set_identity_policy": set_identity_policy,
         "set_minimum_effect_tier": set_minimum_effect_tier,
+        "set_entity_label": getattr(flow_qualification, "set_entity_label", None),
         "workflow_contract_sha256": workflow_contract_sha256,
     }
 
@@ -162,6 +168,32 @@ def _runtime_version() -> str:
             return str(__version__)
         except (ImportError, AttributeError):
             return "source"
+
+
+def qualified_entity_label_authoring_supported() -> bool:
+    """Return true only for a released Flow runtime that owns this contract."""
+
+    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", _runtime_version().strip())
+    return bool(match and tuple(int(value) for value in match.groups()) >= MIN_FLOW_FOR_QUALIFIED_ENTITY_LABELS)
+
+
+def _require_qualified_entity_label_authoring() -> None:
+    if not qualified_entity_label_authoring_supported():
+        raise QualificationError(
+            "Entity-class labels require released OpenAdapt Flow 1.28.0 or later. "
+            "Update Desktop and Flow together before editing this qualified contract."
+        )
+
+
+def _validate_entity_label(label: str, fallback: str) -> tuple[str, str]:
+    normalized = label.strip()
+    if _QUALIFIED_ENTITY_LABEL_RE.fullmatch(normalized) is None:
+        raise QualificationError(
+            "Enter a short static entity class label, such as patient record, insurance claim, or loan application."
+        )
+    if fallback not in {"record", "item"}:
+        raise QualificationError("Entity fallback must be record or item.")
+    return normalized, fallback
 
 
 def environment_digest_from_identifier(identifier: str) -> str:
@@ -365,8 +397,10 @@ def _qualification_controls(workflow, graph: dict[str, Any]) -> dict[str, Any]:
             project.action_classifications.get(step.id) if project is not None else None
         )
         identity_policy = project.identity_policies.get(step.id) if project is not None else None
+        entity_label = project.entity_labels.get(step.id) if project is not None else None
         actions[node["id"]] = {
             "step_id": step.id,
+            "entity_label": entity_label.model_dump(mode="json") if entity_label else None,
             "classification": (classification.model_dump(mode="json") if classification else None),
             "identity": {
                 "can_arm": bool(sources),
@@ -540,6 +574,12 @@ def inspect_bundle(
         "qualification_schema": (
             project.schema_version if project is not None else "openadapt.qualification-project/v1"
         ),
+        "entity_label_authoring": {
+            "supported": qualified_entity_label_authoring_supported(),
+            "minimum_flow_version": ".".join(
+                str(value) for value in MIN_FLOW_FOR_QUALIFIED_ENTITY_LABELS
+            ),
+        },
         "project": project.model_dump(mode="json") if project is not None else None,
         "capability_coverage": capability_coverage,
         "migration_required": project is None,
@@ -670,6 +710,82 @@ def set_action_risk(
         _save(workflow, bundle_dir, key=bundle_key)
     except (ValueError, TypeError) as exc:
         raise QualificationError(str(exc)) from exc
+    return inspect_bundle(
+        bundle_dir,
+        workflow_id=workflow_id,
+        policy_source=policy_source,
+        bundle_key=bundle_key,
+    )
+
+
+def set_action_entity_label(
+    bundle_dir: Path,
+    *,
+    workflow_id: str,
+    step_id: str,
+    label: str,
+    fallback: str,
+    policy_source: str = DEFAULT_QUALIFICATION_POLICY,
+    bundle_key: str | None = None,
+) -> dict:
+    """Set one safe static entity class through Flow's qualification API."""
+
+    _require_qualified_entity_label_authoring()
+    label, fallback = _validate_entity_label(label, fallback)
+    api = _flow_api()
+    if api["QualifiedEntityLabel"] is None or api["set_entity_label"] is None:
+        raise QualificationError("The installed Flow runtime does not support entity-class labels.")
+    workflow = _load(bundle_dir, key=bundle_key)
+    if workflow.qualification is None:
+        raise QualificationError(
+            "Initialize the qualification boundary before setting an entity class."
+        )
+    step = _resolve_action(workflow, step_id)
+    try:
+        api["set_entity_label"](
+            workflow,
+            api["QualifiedEntityLabel"](
+                step_id=step.id,
+                label=label,
+                fallback=fallback,
+            ),
+        )
+        _save(workflow, bundle_dir, key=bundle_key)
+    except (ValueError, TypeError) as exc:
+        raise QualificationError("Could not save the static entity class label.") from exc
+    return inspect_bundle(
+        bundle_dir,
+        workflow_id=workflow_id,
+        policy_source=policy_source,
+        bundle_key=bundle_key,
+    )
+
+
+def remove_action_entity_label(
+    bundle_dir: Path,
+    *,
+    workflow_id: str,
+    step_id: str,
+    policy_source: str = DEFAULT_QUALIFICATION_POLICY,
+    bundle_key: str | None = None,
+) -> dict:
+    """Remove a qualified entity class and invalidate its certification."""
+
+    _require_qualified_entity_label_authoring()
+    api = _flow_api()
+    if api["remove_entity_label"] is None:
+        raise QualificationError("The installed Flow runtime does not support entity-class labels.")
+    workflow = _load(bundle_dir, key=bundle_key)
+    if workflow.qualification is None:
+        raise QualificationError(
+            "Initialize the qualification boundary before removing an entity class."
+        )
+    step = _resolve_action(workflow, step_id)
+    try:
+        api["remove_entity_label"](workflow, step.id)
+        _save(workflow, bundle_dir, key=bundle_key)
+    except (ValueError, TypeError) as exc:
+        raise QualificationError("Could not remove the static entity class label.") from exc
     return inspect_bundle(
         bundle_dir,
         workflow_id=workflow_id,

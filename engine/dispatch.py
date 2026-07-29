@@ -232,6 +232,8 @@ class EngineDispatcher:
             "get_qualification": self.get_qualification,
             "initialize_qualification": self.initialize_qualification,
             "set_qualification_risk": self.set_qualification_risk,
+            "set_qualification_entity_label": self.set_qualification_entity_label,
+            "remove_qualification_entity_label": self.remove_qualification_entity_label,
             "arm_qualification_identity": self.arm_qualification_identity,
             "set_qualification_identity": self.set_qualification_identity,
             "bind_qualification_effect": self.bind_qualification_effect,
@@ -1639,6 +1641,56 @@ class EngineDispatcher:
                     "certified" if result.get("certification_current") else "qualification_pending"
                 ),
             )
+            return result
+        except Exception as exc:
+            return {"ok": False, "workflow_id": workflow_id, "error": str(exc)}
+
+    def set_qualification_entity_label(self, **params: Any) -> dict:
+        """Save one static, non-sensitive entity class for an exact action."""
+
+        from engine.qualification import (
+            DEFAULT_QUALIFICATION_POLICY,
+            set_action_entity_label,
+        )
+
+        workflow_id = str(params.get("workflow_id") or "")
+        policy = str(params.get("policy") or DEFAULT_QUALIFICATION_POLICY)
+        try:
+            bundle = self._qualification_bundle_dir(workflow_id)
+            result = set_action_entity_label(
+                bundle,
+                workflow_id=workflow_id,
+                step_id=str(params.get("step_id") or ""),
+                label=str(params.get("label") or ""),
+                fallback=str(params.get("fallback") or "record"),
+                policy_source=policy,
+                bundle_key=self._qualification_bundle_key(workflow_id),
+            )
+            self.services.db.update_bundle(workflow_id, status="qualification_pending")
+            return result
+        except Exception as exc:
+            return {"ok": False, "workflow_id": workflow_id, "error": str(exc)}
+
+    def remove_qualification_entity_label(self, **params: Any) -> dict:
+        """Remove a static entity class from one action."""
+
+        from engine.qualification import (
+            DEFAULT_QUALIFICATION_POLICY,
+            remove_action_entity_label,
+        )
+
+        workflow_id = str(params.get("workflow_id") or "")
+        policy = str(params.get("policy") or DEFAULT_QUALIFICATION_POLICY)
+        try:
+            bundle = self._qualification_bundle_dir(workflow_id)
+            result = remove_action_entity_label(
+                bundle,
+                workflow_id=workflow_id,
+                step_id=str(params.get("step_id") or ""),
+                policy_source=policy,
+                bundle_key=self._qualification_bundle_key(workflow_id),
+            )
+            self.services.db.update_bundle(workflow_id, status="qualification_pending")
             return result
         except Exception as exc:
             return {"ok": False, "workflow_id": workflow_id, "error": str(exc)}
