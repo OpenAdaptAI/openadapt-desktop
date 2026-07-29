@@ -442,6 +442,9 @@ describe("the terminal receipt shape", () => {
     await openTask();
     await answer();
     expect(outcomeText()).toContain("Checked and continued");
+    expect((document.getElementById("decision") as HTMLElement).hidden).toBe(true);
+    expect(document.getElementById("outcome")!.classList).toContain("terminal");
+    expect(document.getElementById("outcome")!.classList).toContain("success");
     expect((document.getElementById("actions") as HTMLElement).hidden).toBe(true);
   });
 
@@ -454,6 +457,8 @@ describe("the terminal receipt shape", () => {
     await openTask();
     await answer();
     expect(outcomeText()).toContain("still not in the state this step needs");
+    expect((document.getElementById("decision") as HTMLElement).hidden).toBe(false);
+    expect(document.getElementById("outcome")!.classList).not.toContain("terminal");
     const button = document.querySelector('[data-action="verify_and_resume"]') as HTMLButtonElement;
     expect(button.disabled).toBe(false);
   });
@@ -574,7 +579,7 @@ describe("the assurance sentence names both halves of the boundary", () => {
 });
 
 describe("the retained frame is named as history, not as the live screen", () => {
-  it("labels it by when OpenAdapt stopped, ages it, and points at the app", async () => {
+  it("shows a retained figure with age and a no-live-state warning", async () => {
     detail = {
       ...RESOLUTION_HALT,
       task: {
@@ -584,41 +589,40 @@ describe("the retained frame is named as history, not as the live screen", () =>
     };
     await boot();
     await openTask();
-    const shot = document.querySelector(".shot")!.textContent ?? "";
-    expect(shot).toContain("Screen when OpenAdapt stopped");
-    expect(shot).toContain("about 14 minutes ago");
-    expect(shot).toContain("not the live screen");
-    expect(shot).toContain("Look at the application itself");
-    expect(shot).not.toContain("current screen");
+    const shot = document.querySelector("figure.shot")!;
+    expect(shot.querySelector("img[data-artifact]")).not.toBeNull();
+    const caption = shot.querySelector("figcaption")!.textContent ?? "";
+    expect(caption).toMatch(/14 minutes/);
+    expect(caption).toMatch(/not live/i);
+    expect(caption).not.toMatch(/current screen/i);
     // A refresh control would manufacture the liveness this wording removes,
     // and the runner does not re-observe on demand.
-    expect(document.querySelector(".shot")!.innerHTML).not.toContain("Refresh");
+    expect(shot.querySelector("button")).toBeNull();
   });
 });
 
-describe("stakes are shown above the question, and only when they are known", () => {
-  it("renders the irreversible case", async () => {
+describe("known action stakes stay visible without making an action primary", () => {
+  it("shows the risk signal and keeps the full explanation available", async () => {
     detail = {
       ...RESOLUTION_HALT,
       task: { ...RESOLUTION_HALT.task, risk_class: "irreversible" },
     };
     await boot();
     await openTask();
+    const signals = document.querySelector(".task-signals")!.textContent ?? "";
+    expect(signals).toContain("Irreversible action");
     const stakes = document.querySelector(".stakes")!.textContent ?? "";
     expect(stakes).toContain("This cannot be undone");
-    // Above the question, not below it.
-    const card = document.querySelector(".card")!;
-    const heading = card.querySelector("h1")!;
-    expect(
-      card.querySelector(".stakes")!.compareDocumentPosition(heading) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
+    expect(document.querySelector(".task-details .stakes")).not.toBeNull();
   });
 
-  it("says nothing at all when the engine could not establish the stakes", async () => {
+  it("does not invent a detailed risk claim when the engine does not know", async () => {
     await boot();
     await openTask();
     expect(document.querySelector(".stakes")).toBeNull();
+    expect(document.querySelector(".task-signals")!.textContent).toContain(
+      "Review required",
+    );
   });
 });
 

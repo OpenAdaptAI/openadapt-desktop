@@ -153,7 +153,15 @@ is deliberate: a free-text explanation field on the wire is how protected
 content escapes a closed contract, so the runner never sends prose and the
 phone never renders a runner string.
 
-**What broke.** `presentation.halt` carries the engine's typed halt category,
+The primary screen is intentionally short: one question, the delivery and risk
+signals, one retained application frame, and what OpenAdapt will check next.
+The resolution ladder, evidence counts, expiry, and full action consequences
+remain available under **Technical details and action effects**. A terminal
+receipt replaces the request with a visually distinct result screen. A
+non-terminal refusal leaves the request in place so the operator can correct
+the live application and answer again.
+
+**Why it stopped.** `presentation.halt` carries the engine's typed halt category,
 the step's ordinal, its action kind, the target's role, and the target's label
 *only when Flow proved that label is static control chrome rather than record
 content*. The shell composes "Step 1 of 6 could not start: OpenAdapt could not
@@ -225,9 +233,10 @@ uv run --extra build python scripts/capture_portal_scenarios.py \
   --out /tmp/openadapt-desktop-phone-fixtures
 ```
 
-The command writes one pre-action and one result image for identity, ambiguity,
-human-step, effect, delivery-uncertain, general-halt, and optional-step
-requests. The set covers each portable action result. The files
+The command writes one pre-action and one result image for each of the six
+operator request types: identity, ambiguity, human step, saved-result check,
+delivery uncertainty, and a declared optional-step halt. The set covers each
+portable action result. The files
 include `/tmp/openadapt-desktop-phone-fixtures/delivery-uncertain.png` and
 `/tmp/openadapt-desktop-phone-fixtures/delivery-uncertain-reconcile-result.png`.
 The generator requires `--out` so generated images do not enter the Desktop
@@ -242,8 +251,7 @@ uv run --extra build python scripts/capture_portal_scenarios.py \
   --frame /path/to/public-reference-run-frame.png
 ```
 
-The generator opens the real retained-frame control in the portal. It writes
-an additional `*-evidence.png` image for each request type. Use only a public
+The retained frame is visible in each request image. Use only a public
 reference frame with synthetic data. The portal labels the frame as historical
 and tells the operator to use the live application before answering.
 

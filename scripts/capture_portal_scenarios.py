@@ -123,13 +123,6 @@ SCENARIOS: dict[str, dict[str, Any]] = {
         category="effect_indeterminate",
         question="Is the live destination ready for OpenAdapt to reconcile the uncertain action?",
     ),
-    "halt": _detail(
-        title="The workflow stopped instead of guessing.",
-        kind="halt",
-        actions=["verify_and_resume", "reject", "teach", "escalate"],
-        category="halt",
-        question="Is the live application ready for OpenAdapt to verify and continue?",
-    ),
     "optional-step": _detail(
         title="This optional workflow step needs an operator decision.",
         kind="halt",
@@ -230,7 +223,7 @@ def _write_fixture_site(site: Path, frame: Path | None) -> None:
     (site / "index.html").write_text(
         """<!doctype html><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1,viewport-fit=cover\">
 <link rel=\"stylesheet\" href=\"/styles.css\"><body>
-<header class=\"bar\"><span class=\"brand\">OpenAdapt</span><span id=\"device\" class=\"device\">Demo phone</span></header>
+<header class=\"bar\"><span class=\"brand\"><span aria-hidden=\"true\">OA</span> OpenAdapt</span><span id=\"device\" class=\"device\">Demo phone</span></header>
 <main id=\"main\" class=\"main\">Loading…</main><footer id=\"actions\" class=\"actions\" hidden></footer>
 <script>window.__fixtures__="""
         + fixture
@@ -285,34 +278,24 @@ def _capture(out: Path, frame: Path | None) -> None:
                     page.goto(f"{origin}/?scenario={name}", wait_until="networkidle")
                     page.locator("[data-run='fixture-run']").click()
                     page.wait_for_timeout(50)
-                    # A canonical phone image is the phone viewport. A
-                    # full-page capture repeats the sticky heading in the
-                    # middle of long decision cards and is not what a staff
-                    # member sees on a device.
-                    page.screenshot(path=str(out / f"{name}.png"))
                     if frame is not None:
-                        page.locator("details.shot summary").click()
                         page.wait_for_function(
                             """() => {
                               const frame = document.querySelector('#frame');
                               return frame && frame.complete && frame.naturalWidth > 0;
                             }"""
                         )
-                        page.evaluate(
-                            """() => {
-                              const shot = document.querySelector('details.shot');
-                              const top = shot.getBoundingClientRect().top + window.scrollY;
-                              window.scrollTo(0, Math.max(0, top - 120));
-                            }"""
-                        )
-                        page.screenshot(path=str(out / f"{name}-evidence.png"))
+                    # A canonical phone image is the phone viewport. A
+                    # full-page capture repeats the sticky heading in the
+                    # middle of long decision cards and is not what a staff
+                    # member sees on a device.
+                    page.screenshot(path=str(out / f"{name}.png"))
                     for action in detail["task"]["allowed_actions"]:
                         page.goto(
                             f"{origin}/?scenario={name}&result={action}", wait_until="networkidle"
                         )
                         page.locator("[data-run='fixture-run']").click()
                         if frame is not None:
-                            page.locator("details.shot summary").click()
                             page.wait_for_function(
                                 """() => {
                                   const frame = document.querySelector('#frame');
@@ -322,15 +305,16 @@ def _capture(out: Path, frame: Path | None) -> None:
                         page.locator(f'[data-action="{action}"]').click()
                         page.wait_for_timeout(100)
                         page.evaluate(
-                            """(showFrame) => {
-                              const target = showFrame
-                                ? document.querySelector('details.shot')
-                                : document.querySelector('#outcome');
+                            """() => {
+                              const target = document.querySelector('#outcome');
                               if (!target) return;
+                              if (target.classList.contains('terminal')) {
+                                window.scrollTo(0, 0);
+                                return;
+                              }
                               const top = target.getBoundingClientRect().top + window.scrollY;
-                              window.scrollTo(0, Math.max(0, showFrame ? top - 110 : top - 420));
-                            }""",
-                            frame is not None,
+                              window.scrollTo(0, Math.max(0, top - 100));
+                            }"""
                         )
                         page.screenshot(path=str(out / f"{name}-{action}-result.png"))
                 for filename, (scenario, action, result) in RESULT_EXAMPLES.items():
@@ -340,7 +324,6 @@ def _capture(out: Path, frame: Path | None) -> None:
                     )
                     page.locator("[data-run='fixture-run']").click()
                     if frame is not None:
-                        page.locator("details.shot summary").click()
                         page.wait_for_function(
                             """() => {
                               const frame = document.querySelector('#frame');
@@ -350,15 +333,16 @@ def _capture(out: Path, frame: Path | None) -> None:
                     page.locator(f'[data-action="{action}"]').click()
                     page.wait_for_timeout(100)
                     page.evaluate(
-                        """(showFrame) => {
-                          const target = showFrame
-                            ? document.querySelector('details.shot')
-                            : document.querySelector('#outcome');
+                        """() => {
+                          const target = document.querySelector('#outcome');
                           if (!target) return;
+                          if (target.classList.contains('terminal')) {
+                            window.scrollTo(0, 0);
+                            return;
+                          }
                           const top = target.getBoundingClientRect().top + window.scrollY;
-                          window.scrollTo(0, Math.max(0, showFrame ? top - 110 : top - 420));
-                        }""",
-                        frame is not None,
+                          window.scrollTo(0, Math.max(0, top - 100));
+                        }"""
                     )
                     page.screenshot(path=str(out / f"result-{filename}.png"))
                 browser.close()
