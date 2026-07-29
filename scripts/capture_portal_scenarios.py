@@ -8,7 +8,8 @@ the caller-selected directory, outside the Desktop package by default.
 
 Example:
     uv run --extra build python scripts/capture_portal_scenarios.py \
-      --out /tmp/openadapt-desktop-phone-fixtures
+      --out /tmp/openadapt-desktop-phone-fixtures \
+      --frame /path/to/public-reference-run-frame.png
 """
 
 from __future__ import annotations
@@ -164,13 +165,68 @@ RESULTS: dict[str, dict[str, Any]] = {
         "report_success": True,
         "transition_receipt_digest": "sha256:" + "d" * 64,
     },
+    "accepted-pending-runner": {
+        "state": "accepted_pending_runner",
+        "reason_code": "pending_runner",
+        "action": "verify_and_resume",
+    },
+    "continuation-halted": {
+        "state": "halted",
+        "reason_code": "continuation_halted",
+        "action": "verify_and_resume",
+    },
+    "revalidation-refused": {
+        "state": "refused",
+        "reason_code": "revalidation_refused",
+        "action": "verify_and_resume",
+    },
+    "expired": {
+        "state": "expired",
+        "reason_code": "expired",
+        "action": "verify_and_resume",
+    },
+    "delivery-uncertain": {
+        "state": "delivery_uncertain",
+        "reason_code": "delivery_uncertain",
+        "action": "verify_and_resume",
+    },
+    "reconcile-refused": {
+        "state": "refused",
+        "reason_code": "revalidation_refused",
+        "action": "reconcile",
+    },
+    "reconcile-incomplete": {
+        "state": "completed",
+        "reason_code": "reconciled_and_resumed",
+        "action": "reconcile",
+        "report_success": False,
+        "transition_receipt_digest": None,
+    },
+}
+
+RESULT_EXAMPLES: dict[str, tuple[str, str, str]] = {
+    "accepted-pending-runner": ("identity", "verify_and_resume", "accepted-pending-runner"),
+    "continuation-halted": ("identity", "verify_and_resume", "continuation-halted"),
+    "revalidation-refused": ("identity", "verify_and_resume", "revalidation-refused"),
+    "expired": ("identity", "verify_and_resume", "expired"),
+    "delivery-uncertain": ("identity", "verify_and_resume", "delivery-uncertain"),
+    "reconcile-refused": ("delivery-uncertain", "reconcile", "reconcile-refused"),
+    "reconcile-incomplete": ("delivery-uncertain", "reconcile", "reconcile-incomplete"),
 }
 
 
-def _write_fixture_site(site: Path) -> None:
+def _write_fixture_site(site: Path, frame: Path | None) -> None:
     shutil.copy(SHELL / "app.js", site / "app.js")
     shutil.copy(SHELL / "styles.css", site / "styles.css")
-    fixture = json.dumps({"scenarios": SCENARIOS, "results": RESULTS}, separators=(",", ":"))
+    scenarios = json.loads(json.dumps(SCENARIOS))
+    frame_name = None
+    if frame is not None:
+        frame_name = f"evidence{frame.suffix.lower()}"
+        shutil.copy(frame, site / frame_name)
+        for detail in scenarios.values():
+            detail["task"]["evidence"]["frame_available_locally"] = True
+            detail["presentation"]["after_artifact_id"] = "openemr-retained-frame"
+    fixture = json.dumps({"scenarios": scenarios, "results": RESULTS}, separators=(",", ":"))
     (site / "index.html").write_text(
         """<!doctype html><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1,viewport-fit=cover\">
 <link rel=\"stylesheet\" href=\"/styles.css\"><body>
@@ -178,13 +234,17 @@ def _write_fixture_site(site: Path) -> None:
 <main id=\"main\" class=\"main\">Loading…</main><footer id=\"actions\" class=\"actions\" hidden></footer>
 <script>window.__fixtures__="""
         + fixture
+        + """; window.__fixtureFrame="""
+        + json.dumps(frame_name)
         + """;
 const params=new URLSearchParams(location.search); const scenario=params.get('scenario')||'identity';
 const result=params.get('result')||null; const detail=window.__fixtures__.scenarios[scenario];
 window.IntersectionObserver=undefined;
 sessionStorage.setItem('portal_token','fixture-token'); sessionStorage.setItem('portal_csrf','fixture-csrf');
+const nativeFetch=window.fetch.bind(window);
 window.fetch=async (url, options={})=>{let body=null,status=404;
- if(url==='/api/portal/session'){status=200;body={device_label:'Demo phone'}}
+ if(String(url).includes('/evidence?') && window.__fixtureFrame) return nativeFetch('/'+window.__fixtureFrame,options);
+ else if(url==='/api/portal/session'){status=200;body={device_label:'Demo phone'}}
  else if(url==='/api/portal/tasks'){status=200;body=[{id:'fixture-run',headline:detail.presentation.explanation,category:detail.task.task_kind}]}
  else if(url==='/api/portal/tasks/fixture-run'){status=200;body=detail}
  else if(String(url).includes('/actions/')){status=200;body=window.__fixtures__.results[result||'verify_and_resume']}
@@ -209,12 +269,12 @@ def _serve(directory: Path) -> tuple[ThreadingHTTPServer, Thread]:
     return server, thread
 
 
-def _capture(out: Path) -> None:
+def _capture(out: Path, frame: Path | None) -> None:
     from playwright.sync_api import sync_playwright
 
     with tempfile.TemporaryDirectory(prefix="openadapt-portal-fixtures-") as temp:
         site = Path(temp)
-        _write_fixture_site(site)
+        _write_fixture_site(site, frame)
         server, thread = _serve(site)
         try:
             origin = f"http://127.0.0.1:{server.server_port}"
@@ -230,14 +290,77 @@ def _capture(out: Path) -> None:
                     # middle of long decision cards and is not what a staff
                     # member sees on a device.
                     page.screenshot(path=str(out / f"{name}.png"))
+                    if frame is not None:
+                        page.locator("details.shot summary").click()
+                        page.wait_for_function(
+                            """() => {
+                              const frame = document.querySelector('#frame');
+                              return frame && frame.complete && frame.naturalWidth > 0;
+                            }"""
+                        )
+                        page.evaluate(
+                            """() => {
+                              const shot = document.querySelector('details.shot');
+                              const top = shot.getBoundingClientRect().top + window.scrollY;
+                              window.scrollTo(0, Math.max(0, top - 120));
+                            }"""
+                        )
+                        page.screenshot(path=str(out / f"{name}-evidence.png"))
                     for action in detail["task"]["allowed_actions"]:
                         page.goto(
                             f"{origin}/?scenario={name}&result={action}", wait_until="networkidle"
                         )
                         page.locator("[data-run='fixture-run']").click()
+                        if frame is not None:
+                            page.locator("details.shot summary").click()
+                            page.wait_for_function(
+                                """() => {
+                                  const frame = document.querySelector('#frame');
+                                  return frame && frame.complete && frame.naturalWidth > 0;
+                                }"""
+                            )
                         page.locator(f'[data-action="{action}"]').click()
-                        page.wait_for_timeout(50)
+                        page.wait_for_timeout(100)
+                        page.evaluate(
+                            """(showFrame) => {
+                              const target = showFrame
+                                ? document.querySelector('details.shot')
+                                : document.querySelector('#outcome');
+                              if (!target) return;
+                              const top = target.getBoundingClientRect().top + window.scrollY;
+                              window.scrollTo(0, Math.max(0, showFrame ? top - 110 : top - 420));
+                            }""",
+                            frame is not None,
+                        )
                         page.screenshot(path=str(out / f"{name}-{action}-result.png"))
+                for filename, (scenario, action, result) in RESULT_EXAMPLES.items():
+                    page.goto(
+                        f"{origin}/?scenario={scenario}&result={result}",
+                        wait_until="networkidle",
+                    )
+                    page.locator("[data-run='fixture-run']").click()
+                    if frame is not None:
+                        page.locator("details.shot summary").click()
+                        page.wait_for_function(
+                            """() => {
+                              const frame = document.querySelector('#frame');
+                              return frame && frame.complete && frame.naturalWidth > 0;
+                            }"""
+                        )
+                    page.locator(f'[data-action="{action}"]').click()
+                    page.wait_for_timeout(100)
+                    page.evaluate(
+                        """(showFrame) => {
+                          const target = showFrame
+                            ? document.querySelector('details.shot')
+                            : document.querySelector('#outcome');
+                          if (!target) return;
+                          const top = target.getBoundingClientRect().top + window.scrollY;
+                          window.scrollTo(0, Math.max(0, showFrame ? top - 110 : top - 420));
+                        }""",
+                        frame is not None,
+                    )
+                    page.screenshot(path=str(out / f"result-{filename}.png"))
                 browser.close()
         finally:
             server.shutdown()
@@ -247,9 +370,19 @@ def _capture(out: Path) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, required=True, help="Output directory for generated PNG files.")
+    parser.add_argument(
+        "--frame",
+        type=Path,
+        help="Optional retained PNG, JPEG, or WebP frame from a public reference run.",
+    )
     args = parser.parse_args()
+    if args.frame is not None:
+        if not args.frame.is_file():
+            parser.error(f"--frame does not exist: {args.frame}")
+        if args.frame.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
+            parser.error("--frame must be PNG, JPEG, or WebP")
     args.out.mkdir(parents=True, exist_ok=True)
-    _capture(args.out)
+    _capture(args.out, args.frame)
     print(f"Wrote synthetic phone fixtures to {args.out}")
 
 

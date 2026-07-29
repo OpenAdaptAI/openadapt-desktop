@@ -233,6 +233,20 @@ include `/tmp/openadapt-desktop-phone-fixtures/delivery-uncertain.png` and
 The generator requires `--out` so generated images do not enter the Desktop
 package or source tree by accident.
 
+To show the retained application context inside the phone, provide a raster
+frame from a public reference run:
+
+```bash
+uv run --extra build python scripts/capture_portal_scenarios.py \
+  --out /tmp/openadapt-desktop-phone-fixtures \
+  --frame /path/to/public-reference-run-frame.png
+```
+
+The generator opens the real retained-frame control in the portal. It writes
+an additional `*-evidence.png` image for each request type. Use only a public
+reference frame with synthetic data. The portal labels the frame as historical
+and tells the operator to use the live application before answering.
+
 ## Notifications
 
 Operating-system notifications are generic by construction. Desktop reads a
