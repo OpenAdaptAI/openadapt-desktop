@@ -175,6 +175,13 @@ names. Each button carries its consequence, and the card states it in full:
 correction* changes future runs and continues nothing now; *needs more help*
 leaves the run paused and untouched.
 
+**Reconcile is not retry.** A signed `reconcile` action is shown only when
+Flow records that an earlier action was delivered or may have been delivered.
+It asks Flow to prove the already-requested business effect. It never sends the
+earlier action again. The phone reports reconciliation success only when the
+receipt has both `report_success=true` and the bound transition receipt digest.
+If either is absent, it reports an incomplete receipt instead of success.
+
 **Stop and needs-more-help are not two phrasings of one answer.** Escalation
 *parks* the run: the durable pause stays intact and a qualified operator can
 still continue it. A rejection *terminates* it — the engine marks the pause
@@ -206,6 +213,25 @@ real `halted` as "that decision was refused" is the exact defect that mapping
 prevents. A runner still returning the older decision record is mapped through
 Flow's own status table so it renders identically. `src/portalShell.test.ts`
 drives the shipped `app.js` in a DOM and pins each of those outcomes.
+
+## Synthetic phone screenshots
+
+Use the deterministic fixture generator when a document or demo needs current
+phone screens. It contains synthetic labels and closed receipt results only. It
+does not start a runner and does not read customer evidence:
+
+```bash
+uv run --extra build python scripts/capture_portal_scenarios.py \
+  --out /tmp/openadapt-desktop-phone-fixtures
+```
+
+The command writes one pre-action and one result image for identity, ambiguity,
+human-step, effect, delivery-uncertain, general-halt, and optional-step
+requests. The set covers each portable action result. The files
+include `/tmp/openadapt-desktop-phone-fixtures/delivery-uncertain.png` and
+`/tmp/openadapt-desktop-phone-fixtures/delivery-uncertain-reconcile-result.png`.
+The generator requires `--out` so generated images do not enter the Desktop
+package or source tree by accident.
 
 ## Notifications
 

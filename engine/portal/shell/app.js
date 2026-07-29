@@ -64,6 +64,18 @@ const ACTION_WIRE = {
       "Passes the decision on. The run stays paused exactly where it is and " +
       "nothing in the application is touched.",
   },
+  reconcile: {
+    // Reconciliation is not a retry. The runner looks for the declared
+    // persisted effect of the earlier delivery and reports what it finds. It
+    // never dispatches that earlier action again from this decision path.
+    wire: "reconcile",
+    label: "Check what happened",
+    brief: "Checks, never resends",
+    consequence:
+      "OpenAdapt checks whether the earlier action already changed the system " +
+      "of record. It does not send that action again. If it cannot prove the " +
+      "result, the run stays paused for reconciliation.",
+  },
 };
 
 const DISPOSITION = {
@@ -72,6 +84,7 @@ const DISPOSITION = {
   reject: "rejected_by_operator",
   teach: "teach_requested",
   escalate: "needs_assistance",
+  reconcile: "reconcile_requested",
 };
 
 // -------------------------------------------------- the terminal receipt shape
@@ -96,6 +109,13 @@ const RECEIPT_COPY = {
   "completed/skipped_and_resumed": {
     text: "Step skipped. The workflow continued from the next step.",
     terminal: true,
+  },
+  "completed/reconciled_and_resumed": {
+    text:
+      "Reconciled and continued. OpenAdapt proved the earlier action already " +
+      "changed the system of record. It did not send that action again.",
+    terminal: true,
+    reconciliation: true,
   },
   "halted/continuation_halted": {
     text:
@@ -545,7 +565,7 @@ function ladderRows(halt) {
     <ul class="ladder">${items}</ul></details>`;
 }
 
-function recheckBlock(halt) {
+function recheckBlock(halt, task) {
   const checks = (halt && halt.will_recheck) || [];
   if (checks.length === 0) return "";
   const items = checks
@@ -558,10 +578,16 @@ function recheckBlock(halt) {
     .filter(Boolean)
     .join("");
   if (!items) return "";
+  const reconciling = task && task.task_kind === "delivery_uncertain";
+  const heading = reconciling
+    ? "If you select “Check what happened”"
+    : "If you answer “I fixed it”";
+  const introduction = reconciling
+    ? "OpenAdapt will not send the earlier action again. It checks the live application and must still:"
+    : "OpenAdapt will not repeat the step blindly. It re-reads the live screen and must still:";
   return `<section class="recheck">
-      <h2>If you answer “I fixed it”</h2>
-      <p class="muted">OpenAdapt will not repeat the step blindly. It re-reads the
-      live screen and must still:</p>
+      <h2>${esc(heading)}</h2>
+      <p class="muted">${esc(introduction)}</p>
       <ul>${items}</ul>
       <p class="muted">If any of those fail it stops again and changes nothing.</p>
     </section>`;
@@ -633,6 +659,18 @@ function consequenceBlock(task) {
     <ul>${items}</ul></section>`;
 }
 
+function actionIsValidForTask(action, task) {
+  // Types v0.7 closes this too, but preserve the boundary in Desktop: an old
+  // or malformed runner must not turn a definitely un-sent action into a
+  // reconciliation UI. The signed task remains the source of authority; this
+  // is a presentation refusal, never an addition to its action set.
+  return (
+    action !== "reconcile" ||
+    (task.task_kind === "delivery_uncertain" &&
+      ["delivered", "unknown"].includes(task.delivery_state))
+  );
+}
+
 async function showTask(runId) {
   const { status, body } = await api(`/api/portal/tasks/${encodeURIComponent(runId)}`);
   if (status === 401 || status === 202) return startPairing();
@@ -665,7 +703,7 @@ async function showTask(runId) {
       ${presentation.explanation ? `<p class="muted">${esc(presentation.explanation)}</p>` : ""}
       ${frameBlock(task, presentation)}
       ${ladderRows(halt)}
-      ${recheckBlock(halt)}
+      ${recheckBlock(halt, task)}
       ${evidenceRows(task)}
       ${
         task && task.expires_at
@@ -751,7 +789,7 @@ function renderActions(runId, detail) {
   const task = detail.task;
   if (!task || !Array.isArray(task.allowed_actions)) return;
   const buttons = task.allowed_actions
-    .filter((action) => ACTION_WIRE[action])
+    .filter((action) => ACTION_WIRE[action] && actionIsValidForTask(action, task))
     .map(
       (action) =>
         // Each button carries its consequence, because "verify & continue",
@@ -786,13 +824,18 @@ function renderActions(runId, detail) {
     // the scroll position down by exactly that much so nothing that was on
     // screen is swallowed -- the same defect as the outcome line disappearing
     // under a taller-than-guessed bar.
-    const before = actionBar.hidden ? 0 : actionBar.getBoundingClientRect().height;
+    const wasHidden = actionBar.hidden;
+    const before = wasHidden ? 0 : actionBar.getBoundingClientRect().height;
     actionBar.innerHTML = buttons;
     actionBar.hidden = false;
     syncActionBarSpace();
     const growth = actionBar.getBoundingClientRect().height - before;
     const scroller = document.scrollingElement || document.documentElement;
-    if (growth > 0 && scroller) scroller.scrollTop += growth;
+    // On first render the bar was absent. Moving the document by the new bar
+    // height there hides the question under the sticky heading before the
+    // operator reads it. Preserve the viewport only when an already-visible
+    // gate or action bar grew.
+    if (growth > 0 && scroller && !wasHidden) scroller.scrollTop += growth;
     actionBar.querySelectorAll("[data-action]").forEach((node) => {
       node.addEventListener("click", () => decide(runId, detail, node.dataset.action));
     });
@@ -812,6 +855,15 @@ function renderActions(runId, detail) {
 // Translate one reply into operator copy. Returns `terminal` (the decision is
 // over -- take the buttons away) and `retry` (the runner refused without acting,
 // so answering again after fixing the application is legitimate).
+function hasReconciliationSuccessProof(body) {
+  return (
+    body &&
+    body.report_success === true &&
+    typeof body.transition_receipt_digest === "string" &&
+    /^sha256:[0-9a-f]{64}$/.test(body.transition_receipt_digest)
+  );
+}
+
 function interpretReply(status, body, portableAction) {
   if (status === 0 || status >= 500) {
     return {
@@ -837,7 +889,34 @@ function interpretReply(status, body, portableAction) {
   }
   if (state && reason) {
     const copy = RECEIPT_COPY[`${state}/${reason}`];
-    if (copy) return { text: copy.text, terminal: copy.terminal, pending: copy.pending };
+    if (copy) {
+      // `reconciled_and_resumed` is a success-shaped outcome only when the
+      // exact receipt commits to both a successful report and the transition
+      // that consumed the pause. Do not translate a partial reply into proof.
+      if (copy.reconciliation && !hasReconciliationSuccessProof(body)) {
+        return {
+          text:
+            "OpenAdapt returned an incomplete reconciliation receipt. It did " +
+            "not claim the earlier action succeeded. Check this decision on " +
+            "the computer running OpenAdapt.",
+          terminal: true,
+        };
+      }
+      if (
+        portableAction === "reconcile" &&
+        state === "refused" &&
+        reason === "revalidation_refused"
+      ) {
+        return {
+          text:
+            "OpenAdapt could not yet prove the saved result. It did not send " +
+            "the earlier action again. Review the live record, then check " +
+            "again or hand this case to someone else.",
+          terminal: false,
+        };
+      }
+      return { text: copy.text, terminal: copy.terminal, pending: copy.pending };
+    }
     // A state this build has no wording for is reported as exactly that. It is
     // NOT a refusal: showing a real terminal outcome as "refused" is the defect
     // this branch exists to prevent.

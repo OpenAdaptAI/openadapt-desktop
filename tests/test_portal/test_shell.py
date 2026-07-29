@@ -102,10 +102,7 @@ def test_the_shell_renders_the_engines_action_set_without_adding_to_it() -> None
     assert "task.allowed_actions" in APP
     # Buttons are filtered from the signed task's list, never unioned with a
     # local default set.
-    assert re.search(
-        r"task\.allowed_actions\s*\.filter\(\(action\) => ACTION_WIRE\[action\]\)",
-        APP.replace("\n", "").replace("  ", ""),
-    )
+    assert "actionIsValidForTask(action, task)" in APP
     # The mapping mirrors Flow's own action names and adds no others.
     assert set(re.findall(r'wire: "(\w+)"', APP)) == {
         "continue",
@@ -113,6 +110,7 @@ def test_the_shell_renders_the_engines_action_set_without_adding_to_it() -> None
         "reject",
         "teach",
         "escalate",
+        "reconcile",
     }
 
 
@@ -205,7 +203,7 @@ def test_the_action_bar_stays_usable_once_reject_makes_four_the_ordinary_case() 
     assert ":has(button:nth-child(4))" in styles
     assert ":has(button:nth-child(5))" in styles
     # Keyed on count only: no action name may appear in a sizing selector.
-    for action in ("reject", "escalate", "teach", "skip", "continue"):
+    for action in ("reject", "escalate", "teach", "skip", "continue", "reconcile"):
         assert f'[data-action="{action}"]' not in styles, action
     heights = [
         int(value)

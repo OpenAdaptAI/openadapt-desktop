@@ -36,6 +36,9 @@ html, body {
   border-bottom: 1px solid var(--line);
   position: sticky;
   top: 0;
+  /* The task card follows the header in document order. Without a stacking
+     context it can paint over the sticky label while the page moves. */
+  z-index: 2;
   background: var(--bg);
 }
 

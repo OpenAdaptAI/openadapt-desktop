@@ -80,6 +80,25 @@ const TYPED_HALT = {
   },
 };
 
+const RECONCILIATION_HALT = {
+  ...RESOLUTION_HALT,
+  task: {
+    ...RESOLUTION_HALT.task,
+    task_kind: "delivery_uncertain",
+    delivery_state: "unknown",
+    allowed_actions: ["reconcile", "teach", "escalate"],
+  },
+  presentation: {
+    ...RESOLUTION_HALT.presentation,
+    question: "Is the live destination ready for OpenAdapt to reconcile the uncertain action?",
+    halt: {
+      ...RESOLUTION_HALT.presentation.halt,
+      category: "effect_indeterminate",
+      will_recheck: [{ check: "delivery_reconciliation", count: null }],
+    },
+  },
+};
+
 type Reply = { status: number; body: unknown };
 
 let decisionReply: Reply = { status: 200, body: null };
@@ -264,6 +283,99 @@ describe("the answers are distinguishable by consequence", () => {
       "task_digest",
       "task_signature",
     ]);
+  });
+});
+
+describe("reconciliation never turns an uncertain delivery into a retry", () => {
+  it("shows it only for a delivery-uncertain task that may have crossed delivery", async () => {
+    detail = RECONCILIATION_HALT;
+    await boot();
+    await openTask();
+    const reconcile = document.querySelector('[data-action="reconcile"]')!;
+    expect(reconcile.textContent).toContain("Check what happened");
+    expect(reconcile.textContent).toContain("Checks, never resends");
+    expect(document.querySelector(".recheck")!.textContent).toContain(
+      "If you select “Check what happened”",
+    );
+    expect(document.querySelector(".recheck")!.textContent).toContain(
+      "will not send the earlier action again",
+    );
+    expect(document.querySelector(".consequences")!.textContent).toContain(
+      "does not send that action again",
+    );
+  });
+
+  it("does not render reconcile when the action was not delivered", async () => {
+    detail = {
+      ...RECONCILIATION_HALT,
+      task: { ...RECONCILIATION_HALT.task, delivery_state: "not_delivered" },
+    };
+    await boot();
+    await openTask();
+    expect(document.querySelector('[data-action="reconcile"]')).toBeNull();
+  });
+
+  it("sends a closed reconciliation request, not continue", async () => {
+    detail = RECONCILIATION_HALT;
+    decisionReply = {
+      status: 200,
+      body: {
+        state: "completed",
+        reason_code: "reconciled_and_resumed",
+        action: "reconcile",
+        report_success: true,
+        transition_receipt_digest: "sha256:" + "d".repeat(64),
+      },
+    };
+    await boot();
+    await openTask();
+    await answer("reconcile");
+    const body = JSON.parse(
+      (fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls
+        .map((call) => call[1] as { body?: string } | undefined)
+        .filter((init) => init?.body)
+        .pop()!.body!,
+    );
+    expect(body.action).toBe("reconcile");
+    expect(body.disposition).toBe("reconcile_requested");
+    expect(outcomeText()).toContain("proved the earlier action already changed");
+    expect(outcomeText()).toContain("did not send that action again");
+  });
+
+  it("does not claim a reconciliation succeeded without the exact receipt proof", async () => {
+    detail = RECONCILIATION_HALT;
+    decisionReply = {
+      status: 200,
+      body: {
+        state: "completed",
+        reason_code: "reconciled_and_resumed",
+        action: "reconcile",
+        report_success: true,
+      },
+    };
+    await boot();
+    await openTask();
+    await answer("reconcile");
+    expect(outcomeText()).toContain("incomplete reconciliation receipt");
+    expect(outcomeText()).not.toContain("Reconciled and continued");
+  });
+
+  it("keeps an unproven reconciliation answerable without offering a resend", async () => {
+    detail = RECONCILIATION_HALT;
+    decisionReply = {
+      status: 200,
+      body: {
+        state: "refused",
+        reason_code: "revalidation_refused",
+        action: "reconcile",
+      },
+    };
+    await boot();
+    await openTask();
+    await answer("reconcile");
+    expect(outcomeText()).toContain("did not send the earlier action again");
+    expect(document.querySelector('[data-action="reconcile"]')).not.toBeNull();
+    expect(document.querySelector('[data-action="continue"]')).toBeNull();
   });
 });
 
@@ -576,6 +688,14 @@ describe("the answers are gated on reaching the end of the decision", () => {
 });
 
 describe("the outcome is readable and the bar goes away", () => {
+  it("does not move a newly opened decision below the sticky heading", async () => {
+    const scroller = (document.scrollingElement || document.documentElement) as HTMLElement;
+    scroller.scrollTop = 0;
+    await boot();
+    await openTask();
+    expect(scroller.scrollTop).toBe(0);
+  });
+
   it("reserves the measured height of the action bar, not a constant", async () => {
     await boot();
     await openTask();
