@@ -34,7 +34,7 @@ already treats every ``password``/``token``/``secret`` key as sensitive when it
 builds log redactions.  So this file is *not* "a backend and a URL", and it is
 not eligible to sit on disk for a whole portal session.
 
-It is also pointless to re-stage it per run.  In ``openadapt-flow==1.25.0``
+It is also pointless to re-stage it per run.  In the pinned OpenAdapt Flow runtime
 (the exact pin this installer ships) ``__main__._attended_service_from_args``
 resolves ``--config`` **eagerly**, through ``load_deployment``, before it
 yields; ``AttendedActionService`` is constructed from the parsed
