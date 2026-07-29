@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 import pytest
+import yaml
 
 from engine.config import EngineConfig
 from engine.portal.service import PortalError, PortalService, _parse_console_banner
@@ -628,6 +629,44 @@ def test_remote_decisions_passes_the_flag_and_the_credential(
     # The credential goes to the child process only. It is never an argument,
     # where it would appear in the process table for every user on the machine.
     assert RUNNER_TOKEN not in " ".join(seen["command"])
+
+
+def test_remote_task_schema_v2_requires_a_released_compatible_flow(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr("importlib.metadata.version", lambda _name: "1.27.0")
+    service = PortalService(remote_configured(tmp_path / "data"))
+    assert service._remote_task_schemas() == ()
+    monkeypatch.setattr("importlib.metadata.version", lambda _name: "1.28.0")
+    assert service._remote_task_schemas() == (
+        "openadapt.human-decision-task/v1",
+        "openadapt.human-decision-task/v2",
+    )
+
+
+def test_remote_decisions_pass_the_local_portal_v2_advertisement_to_flow(
+    monkeypatch, tmp_path
+) -> None:
+    seen: dict[str, object] = {}
+
+    def popen(command, **kwargs):
+        config_path = Path(command[command.index("--config") + 1])
+        seen["config"] = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        return FakeProcess(f"http://127.0.0.1:7863/#token={'b' * 43}")
+
+    monkeypatch.setattr(
+        "engine.portal.service._flow_command", lambda _bin: ["openadapt-flow"]
+    )
+    monkeypatch.setattr("importlib.metadata.version", lambda _name: "1.28.0")
+    monkeypatch.setattr(
+        "engine.portal.service.load_runner_credential",
+        lambda _h: {"runner_id": "runner_exact_01", "runner_token": RUNNER_TOKEN},
+    )
+    service = PortalService(remote_configured(tmp_path / "data"), popen=popen)
+    service._start_console().stop()
+    remote = seen["config"]["human_decisions"]["remote"]  # type: ignore[index]
+    assert remote["peer_task_schemas"] == [
+        "openadapt.human-decision-task/v1",
+        "openadapt.human-decision-task/v2",
+    ]
 
 
 def test_remote_decisions_refuses_a_credential_for_a_different_runner(

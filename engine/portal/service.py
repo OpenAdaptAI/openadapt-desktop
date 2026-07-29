@@ -84,6 +84,8 @@ from engine.portal.notifications import (
 from engine.portal.pairing import DevicePairingStore, PairingRefused
 from engine.portal.server import PortalApp, PortalServer
 from engine.private_flow_config import (
+    HUMAN_DECISION_TASK_V1_SCHEMA,
+    HUMAN_DECISION_TASK_V2_SCHEMA,
     PrivateFlowConfigError,
     prepare_flow_config,
     stage_private_yaml,
@@ -103,6 +105,12 @@ CONSOLE_START_TIMEOUT_S = 60.0
 #: the operator would see "the console did not start" instead of the real cause.
 #: Checking the version first turns that into a sentence that names the fix.
 MIN_FLOW_FOR_REMOTE_DECISIONS = (1, 26, 0)
+
+# Flow begins emitting a qualified-entity task only when its remote peer has
+# explicitly declared this schema.  Keep the 0.15 release train on V1: its
+# pinned Flow does not parse this declaration.  The next Desktop train enables
+# V2 when a compatible Flow is installed.
+MIN_FLOW_FOR_QUALIFIED_ENTITY_TASKS = (1, 28, 0)
 
 #: Environment variable ``openadapt_flow.console.decision_relay`` reads the
 #: runner credential from. It is passed to the child process only, never
@@ -421,6 +429,10 @@ class PortalService:
             ) from exc
         if prepared is None:  # pragma: no cover - a file source is never None
             raise PortalError("The deployment configuration resolved to nothing.")
+        if prepared.remote_decisions:
+            prepared = prepared.with_remote_task_schemas(
+                self._remote_task_schemas()
+            )
 
         staging_dir = Path(self.config.data_dir) / "portal"
         staging_dir.mkdir(parents=True, exist_ok=True)
@@ -472,6 +484,20 @@ class PortalService:
     def _assert_flow_supports_remote_decisions(self) -> None:
         """Refuse before spawning when the resolved Flow has no such flag."""
 
+        raw, installed = self._installed_flow_version()
+        wanted = ".".join(str(part) for part in MIN_FLOW_FOR_REMOTE_DECISIONS)
+        required = Version(wanted)
+        if installed < required:
+            raise PortalError(
+                "This deployment answers halts on a phone, which needs "
+                f"openadapt-flow {wanted} or newer. This computer has {raw}. "
+                "Update OpenAdapt, or turn off human_decisions.remote."
+            )
+
+    @staticmethod
+    def _installed_flow_version() -> tuple[str, Version]:
+        """Return a final installed Flow version or fail before a spawn."""
+
         from importlib.metadata import PackageNotFoundError, version
 
         try:
@@ -481,21 +507,40 @@ class PortalService:
                 "The OpenAdapt Flow runtime version could not be read, so "
                 "phone decisions cannot be enabled safely."
             ) from None
-        wanted = ".".join(str(part) for part in MIN_FLOW_FOR_REMOTE_DECISIONS)
         try:
             installed = Version(raw)
-            required = Version(wanted)
         except InvalidVersion:
             raise PortalError(
                 "The OpenAdapt Flow runtime has an invalid version, so phone "
                 "decisions cannot be enabled safely. Reinstall OpenAdapt Flow."
             ) from None
-        if installed < required:
+        if installed.is_prerelease or installed.is_devrelease:
             raise PortalError(
-                "This deployment answers halts on a phone, which needs "
-                f"openadapt-flow {wanted} or newer. This computer has {raw}. "
-                "Update OpenAdapt, or turn off human_decisions.remote."
+                "The OpenAdapt Flow runtime is a pre-release, so phone decisions "
+                "cannot be enabled safely. Install a released OpenAdapt Flow version."
             )
+        return raw, installed
+
+    def _remote_task_schemas(self) -> tuple[str, ...]:
+        """Declare task formats this local portal can render safely.
+
+        The declaration comes from this build, not from a screenshot, OCR,
+        parameters, application identity, or model output.  V1 remains the
+        compatibility path until the spawned Flow can validate V2.
+        """
+
+        try:
+            _, installed = self._installed_flow_version()
+        except PortalError:
+            # `_assert_flow_supports_remote_decisions` remains the admission
+            # gate before spawn.  This earlier projection step must not turn a
+            # test or an unavailable package-metadata lookup into a different
+            # failure mode; it simply leaves the old V1 declaration absent.
+            return ()
+        v2 = Version(".".join(str(part) for part in MIN_FLOW_FOR_QUALIFIED_ENTITY_TASKS))
+        if installed >= v2:
+            return (HUMAN_DECISION_TASK_V1_SCHEMA, HUMAN_DECISION_TASK_V2_SCHEMA)
+        return ()
 
     def _spawn_console(
         self,

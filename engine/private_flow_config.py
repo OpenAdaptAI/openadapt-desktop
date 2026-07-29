@@ -21,6 +21,13 @@ import yaml
 
 from engine.targets import ExecutionTarget
 
+# This is an explicit consumer capability declaration, not a hint.  Desktop
+# writes it only after the launched Flow version supports the matching task
+# schema.  Flow then emits V2 only for a sealed qualification that supplies a
+# label for the exact paused step.
+HUMAN_DECISION_TASK_V1_SCHEMA = "openadapt.human-decision-task/v1"
+HUMAN_DECISION_TASK_V2_SCHEMA = "openadapt.human-decision-task/v2"
+
 _PHI_CAPABLE_BACKEND_KEYS = {
     "url",
     "agent_url",
@@ -93,6 +100,57 @@ class PreparedPrivateYaml:
     redactions: tuple[str, ...]
     remote_decisions: bool = False
     remote_decision_runner_id: str | None = None
+
+    def with_remote_task_schemas(
+        self, schemas: tuple[str, ...]
+    ) -> "PreparedPrivateYaml":
+        """Advertise this Desktop build's remote task schemas from this snapshot.
+
+        The method reparses only the immutable in-memory payload.  It never
+        rereads the operator file, so the launch config, the decision switch,
+        and the peer capability declaration remain one source snapshot.
+
+        Empty schemas deliberately remove a stale declaration.  This keeps an
+        older embedded Flow on the V1 task contract even when a deployment file
+        was previously used by a newer Desktop build.
+        """
+
+        if not self.remote_decisions:
+            return self
+        try:
+            deployment = yaml.safe_load(self.payload) or {}
+        except (UnicodeError, yaml.YAMLError) as exc:  # pragma: no cover - sealed payload
+            raise PrivateFlowConfigError("Prepared deployment config could not be read") from exc
+        if not isinstance(deployment, Mapping):  # pragma: no cover - sealed payload
+            raise PrivateFlowConfigError("Prepared deployment config must contain an object")
+        normalized = tuple(dict.fromkeys(schemas))
+        if any(
+            schema not in {HUMAN_DECISION_TASK_V1_SCHEMA, HUMAN_DECISION_TASK_V2_SCHEMA}
+            for schema in normalized
+        ):
+            raise PrivateFlowConfigError("Desktop does not support one remote decision task schema")
+
+        updated = dict(deployment)
+        human_decisions = updated.get("human_decisions")
+        remote = (
+            dict(human_decisions.get("remote") or {})
+            if isinstance(human_decisions, Mapping)
+            else {}
+        )
+        if normalized:
+            remote["peer_task_schemas"] = list(normalized)
+        else:
+            remote.pop("peer_task_schemas", None)
+        updated["human_decisions"] = {
+            **(dict(human_decisions) if isinstance(human_decisions, Mapping) else {}),
+            "remote": remote,
+        }
+        return PreparedPrivateYaml(
+            payload=yaml.safe_dump(updated, sort_keys=False),
+            redactions=_redactions_for_mapping(updated),
+            remote_decisions=self.remote_decisions,
+            remote_decision_runner_id=self.remote_decision_runner_id,
+        )
 
 
 def _load_mapping(source: Path | None) -> dict[str, Any]:

@@ -260,6 +260,59 @@ def test_remote_decisions_is_read_from_the_same_snapshot_as_the_payload(tmp_path
     assert prepared.remote_decision_runner_id == "runner_exact_01"
 
 
+def test_remote_task_schema_advertisement_uses_the_prepared_snapshot(tmp_path):
+    source = tmp_path / "deployment.json"
+    source.write_text(
+        json.dumps(
+            {
+                "human_decisions": {
+                    "remote": {
+                        "enabled": True,
+                        "runner_id": "runner_exact_01",
+                        "peer_task_schemas": ["openadapt.human-decision-task/v2"],
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    prepared = prepare_flow_config(source, None)
+    assert prepared is not None
+    # Change the source after the first read. The V2 declaration still comes
+    # only from the retained snapshot and this Desktop build's capabilities.
+    source.write_text("human_decisions: {}\n", encoding="utf-8")
+    advertised = prepared.with_remote_task_schemas(
+        ("openadapt.human-decision-task/v1", "openadapt.human-decision-task/v2")
+    )
+    payload = yaml.safe_load(advertised.payload)
+    assert payload["human_decisions"]["remote"]["peer_task_schemas"] == [
+        "openadapt.human-decision-task/v1",
+        "openadapt.human-decision-task/v2",
+    ]
+
+
+def test_old_embedded_flow_gets_no_stale_v2_advertisement(tmp_path):
+    source = tmp_path / "deployment.json"
+    source.write_text(
+        json.dumps(
+            {
+                "human_decisions": {
+                    "remote": {
+                        "enabled": True,
+                        "runner_id": "runner_exact_01",
+                        "peer_task_schemas": ["openadapt.human-decision-task/v2"],
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    prepared = prepare_flow_config(source, None)
+    assert prepared is not None
+    payload = yaml.safe_load(prepared.with_remote_task_schemas(()).payload)
+    assert "peer_task_schemas" not in payload["human_decisions"]["remote"]
+
+
 @pytest.mark.parametrize(
     "deployment",
     [

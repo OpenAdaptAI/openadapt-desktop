@@ -337,6 +337,35 @@ const TASK_KIND_COPY = {
   operator_review: "Operator review",
 };
 
+const QUALIFIED_ENTITY_LABEL = /^[a-z][a-z0-9]*(?:[ _-][a-z0-9]+){0,3}$/;
+const ENTITY_FALLBACKS = new Set(["record", "item"]);
+
+// V2 is the only task schema that carries a domain noun. The runner signs it
+// from the sealed qualification contract for the exact paused step. This shell
+// neither derives nor enriches it from the retained frame, OCR, parameters,
+// application identity, or a model. A V1 task always stays domain-neutral.
+function entityNoun(task) {
+  if (!task || task.schema_version !== "openadapt.human-decision-task/v2") {
+    return "record";
+  }
+  const entity = task.entity;
+  if (!entity || typeof entity !== "object" || Array.isArray(entity)) return "record";
+  const keys = Object.keys(entity).sort().join(",");
+  if (keys !== "fallback,label") return "record";
+  if (typeof entity.label === "string" && QUALIFIED_ENTITY_LABEL.test(entity.label)) {
+    return entity.label;
+  }
+  return ENTITY_FALLBACKS.has(entity.fallback) ? entity.fallback : "record";
+}
+
+function taskKindLabel(task) {
+  if (task && task.task_kind === "identity" && task.schema_version === "openadapt.human-decision-task/v2") {
+    const noun = entityNoun(task);
+    return `${noun.charAt(0).toUpperCase()}${noun.slice(1)} identity`;
+  }
+  return TASK_KIND_COPY[task && task.task_kind] || "Operator decision";
+}
+
 const RISK_LABEL = {
   read_only: "Read-only",
   state_changing: "Changes application state",
@@ -559,7 +588,7 @@ function describeTarget(halt) {
   return halt.target_label ? `the ${noun} labelled “${halt.target_label}”` : `the ${noun}`;
 }
 
-function describeStop(halt) {
+function describeStop(halt, task) {
   if (!halt) return "";
   const where =
     halt.step_ordinal && halt.step_count
@@ -573,7 +602,7 @@ function describeStop(halt) {
     case "disambiguation":
       return `${where} found more than one thing that looked like ${target}, so it refused to pick one.`;
     case "identity":
-      return `${where} could not confirm that the record on screen is the intended one, so it did not ${verb} ${target}.`;
+      return `${where} could not confirm that the ${entityNoun(task)} on screen is the intended ${entityNoun(task)}, so it did not ${verb} ${target}.`;
     case "human_required":
       return `${where} needs a person: complete the sign-in, challenge, or verification in the live application yourself.`;
     case "unmet_guard":
@@ -610,7 +639,10 @@ function recheckBlock(halt, task) {
   if (checks.length === 0) return "";
   const items = checks
     .map((row) => {
-      const noun = RECHECK_NOUN[row.check];
+      const noun =
+        row.check === "record_identity"
+          ? `confirm that the ${entityNoun(task)} on screen is the intended ${entityNoun(task)}`
+          : RECHECK_NOUN[row.check];
       if (!noun) return "";
       const count = typeof row.count === "number" ? ` (${row.count})` : "";
       return `<li>${esc(noun)}${esc(count)}</li>`;
@@ -727,8 +759,8 @@ async function showTask(runId) {
     unknown: "May have been sent",
   }[delivery];
   const halt = presentation.halt;
-  const stopped = describeStop(halt);
-  const taskKind = TASK_KIND_COPY[task && task.task_kind] || "Operator decision";
+  const stopped = describeStop(halt, task);
+  const taskKind = taskKindLabel(task);
   const risk = RISK_LABEL[task && task.risk_class] || "Review required";
   const reason =
     presentation.explanation || stopped || "OpenAdapt stopped instead of guessing.";

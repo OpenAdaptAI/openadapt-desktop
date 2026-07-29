@@ -95,6 +95,20 @@ const RECONCILIATION_HALT = {
   },
 };
 
+const QUALIFIED_ENTITY_HALT = {
+  ...RESOLUTION_HALT,
+  task: {
+    ...RESOLUTION_HALT.task,
+    schema_version: "openadapt.human-decision-task/v2",
+    task_kind: "identity",
+    entity: { label: "insurance claim", fallback: "record" },
+  },
+  presentation: {
+    ...RESOLUTION_HALT.presentation,
+    halt: { ...RESOLUTION_HALT.presentation.halt, category: "identity" },
+  },
+};
+
 type Reply = { status: number; body: unknown };
 
 let decisionReply: Reply = { status: 200, body: null };
@@ -181,6 +195,33 @@ describe("the decision view preserves the data boundary", () => {
     const text = document.getElementById("main")!.textContent ?? "";
     expect(text).not.toContain(PROTECTED_VALUE);
     expect(text).not.toContain("Marta");
+  });
+
+  it("uses only the signed qualification entity label for V2 identity copy", async () => {
+    detail = QUALIFIED_ENTITY_HALT;
+    await boot();
+    await openTask();
+    const text = document.getElementById("main")!.textContent ?? "";
+    expect(text).toContain("Insurance claim identity");
+    expect(text).toContain("intended insurance claim");
+    expect(text).not.toContain(PROTECTED_VALUE);
+  });
+
+  it("keeps V1 identity copy neutral when an untrusted entity field appears", async () => {
+    detail = {
+      ...QUALIFIED_ENTITY_HALT,
+      task: {
+        ...QUALIFIED_ENTITY_HALT.task,
+        schema_version: "openadapt.human-decision-task/v1",
+        entity: { label: "patient record", fallback: "record" },
+      },
+    };
+    await boot();
+    await openTask();
+    const text = document.getElementById("main")!.textContent ?? "";
+    expect(text).toContain("Record identity");
+    expect(text).toContain("intended record");
+    expect(text).not.toContain("patient record");
   });
 });
 
