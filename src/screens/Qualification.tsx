@@ -696,7 +696,7 @@ export function Qualification({
                     className="input"
                     value={application}
                     onChange={(event) => setApplication(event.target.value)}
-                    placeholder="Accuro"
+                    placeholder="Target application"
                   />
                 </div>
                 <div className="field">
@@ -720,7 +720,7 @@ export function Qualification({
                     className="input"
                     value={environmentLabel}
                     onChange={(event) => setEnvironmentLabel(event.target.value)}
-                    placeholder="clinic-test-citrix-vda"
+                    placeholder="test-citrix-vda"
                   />
                   <span className="page-sub">
                     SHA-256 of the trimmed UTF-8 identifier. Configure the
@@ -1350,8 +1350,8 @@ export function Qualification({
                                           signal.source === "session"
                                             ? "64-character session digest"
                                             : signal.source === "application"
-                                              ? "accuro or https://app.example"
-                                              : "patient-chart"
+                                              ? "target-app or https://app.example"
+                                              : "record-detail"
                                         }
                                         spellCheck={false}
                                       />
@@ -1664,7 +1664,7 @@ export function Qualification({
                   {!parameters.length ? (
                     <Callout tone="warn" title="Workflow parameters required">
                       Add typed workflow parameters before binding a reusable effect.
-                      OpenAdapt will not seal a patient or account literal into this form.
+                      OpenAdapt will not seal a live identity literal into this form.
                     </Callout>
                   ) : (
                     <>
