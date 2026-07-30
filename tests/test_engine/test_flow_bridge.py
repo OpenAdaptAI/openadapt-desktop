@@ -97,6 +97,30 @@ class TestFlowBridgeInvocation:
         # The run directory is passed via --run-dir (not --out).
         assert "--run-dir" in command
 
+    def test_qualify_run_case_uses_flow_owned_authorization(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        monkeypatch.setattr("engine.flow_bridge.shutil.which", lambda _: "/usr/bin/openadapt-flow")
+        calls: list = []
+        bridge = FlowBridge(runner=_runner(calls))
+
+        bridge.qualify_run_case(
+            tmp_path / "bundle",
+            tmp_path / "cfg.yaml",
+            case_id="representative-1",
+            inputs_file=tmp_path / "runtime-inputs.json",
+            campaign_id="campaign-1",
+            run_id="run-1",
+            out_dir=tmp_path / "run",
+        )
+
+        command, _ = calls[0]
+        assert command[1:3] == ["qualify", "run-case"]
+        assert command[command.index("--case-id") + 1] == "representative-1"
+        assert command[command.index("--inputs") + 1] == str(tmp_path / "runtime-inputs.json")
+        assert command[command.index("--campaign-id") + 1] == "campaign-1"
+        assert command[command.index("--run-id") + 1] == "run-1"
+
     def test_qualification_inputs_and_bundle_key_stay_out_of_argv(
         self, tmp_path: Path, monkeypatch
     ) -> None:

@@ -575,6 +575,46 @@ class FlowBridge:
             env_overrides=env_overrides,
         )
 
+    def qualify_run_case(
+        self,
+        bundle_dir: Path,
+        config: Path,
+        *,
+        case_id: str,
+        inputs_file: Path,
+        campaign_id: str,
+        run_id: str,
+        out_dir: Path,
+        url: str | None = None,
+        env_overrides: dict[str, str] | None = None,
+    ) -> FlowResult:
+        """Run one qualification case through Flow-owned authorization.
+
+        Desktop supplies only private canonical inputs and stable local ids.
+        Flow builds and consumes the Standard authorization in the same process.
+        """
+
+        args = [
+            "qualify",
+            "run-case",
+            str(bundle_dir),
+            "--case-id",
+            case_id,
+            "--inputs",
+            str(inputs_file),
+            "--campaign-id",
+            campaign_id,
+            "--run-id",
+            run_id,
+            "--run-dir",
+            str(out_dir),
+            "--config",
+            str(config),
+        ]
+        if url:
+            args += ["--url", url]
+        return self._run(args, out_dir=out_dir, env_overrides=env_overrides)
+
     def run_supports_authorization(self) -> bool:
         """Probe (once) whether the installed flow CLI accepts ``--authorization-file``."""
         if self._run_auth_support is None:

@@ -797,6 +797,7 @@ class EngineDispatcher:
         run_dir.mkdir(parents=True, exist_ok=True)
         params_file = None
         qualification_case_id = params.get("_qualification_case_id")
+        qualification_case_execution = params.get("_qualification_case_execution")
         if qualification_case_id is not None:
             from engine.qualification_lifecycle import case_parameters_path
 
@@ -884,7 +885,23 @@ class EngineDispatcher:
                             run_kwargs["params_file"] = params_file
                         if bundle_env:
                             run_kwargs["env_overrides"] = bundle_env
-                        result = self.services.flow_bridge.run(bundle, config_path, **run_kwargs)
+                        if qualification_case_execution is not None:
+                            result = self.services.flow_bridge.qualify_run_case(
+                                bundle,
+                                config_path,
+                                case_id=str(qualification_case_execution["case_id"]),
+                                inputs_file=Path(qualification_case_execution["inputs_file"]),
+                                campaign_id=str(qualification_case_execution["campaign_id"]),
+                                run_id=run_id,
+                                out_dir=run_dir,
+                                env_overrides=bundle_env,
+                            )
+                        else:
+                            result = self.services.flow_bridge.run(
+                                bundle,
+                                config_path,
+                                **run_kwargs,
+                            )
                     else:
                         replay_kwargs: dict[str, Any] = {
                             "out_dir": run_dir,
@@ -1875,10 +1892,12 @@ class EngineDispatcher:
             DEFAULT_QUALIFICATION_POLICY,
             prepare_local_qualification_runner,
             record_local_qualification_result,
+            set_local_qualification_case_scope,
         )
         from engine.qualification_lifecycle import (
             retain_capability_observation,
             retain_run_evidence,
+            stage_case_runtime_inputs,
             store_case_parameters,
         )
 
@@ -1914,6 +1933,35 @@ class EngineDispatcher:
                     parameters_json=str(parameters_json),
                     forbidden_keys=secret_params,
                 )
+            from engine.qualification import _load
+            from engine.qualification_lifecycle import case_parameters_path
+
+            parameters_path = case_parameters_path(
+                self.config.data_dir,
+                workflow_id=workflow_id,
+                case_id=case_id,
+            )
+            if parameters_path is None:
+                raise ValueError("Qualification case parameters are required before execution")
+            workflow_for_inputs = _load(
+                bundle,
+                key=self._qualification_bundle_key(workflow_id),
+            )
+            inputs_path, runtime_input_bytes = stage_case_runtime_inputs(
+                self.config.data_dir,
+                workflow_id=workflow_id,
+                case_id=case_id,
+                workflow=workflow_for_inputs,
+                parameters_path=parameters_path,
+            )
+            set_local_qualification_case_scope(
+                bundle,
+                workflow_id=workflow_id,
+                case_id=case_id,
+                runtime_input_bytes=runtime_input_bytes,
+                policy_source=policy,
+                bundle_key=self._qualification_bundle_key(workflow_id),
+            )
             prepare_local_qualification_runner(
                 bundle,
                 workflow_id=workflow_id,
@@ -1923,6 +1971,11 @@ class EngineDispatcher:
             execution_params = {
                 "workflow_id": workflow_id,
                 "_qualification_case_id": case_id,
+                "_qualification_case_execution": {
+                    "case_id": case_id,
+                    "inputs_file": str(inputs_path),
+                    "campaign_id": uuid.uuid4().hex,
+                },
             }
             if params.get("target") is not None:
                 execution_params["target"] = params["target"]
@@ -1956,6 +2009,7 @@ class EngineDispatcher:
                 run_id=run_id,
                 run_dir=Path(str(run["run_path"])),
                 report_bytes=raw_report_bytes,
+                runtime_input_bytes=runtime_input_bytes,
             )
             from openadapt_flow.traversal import iter_workflow_steps
 
