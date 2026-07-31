@@ -1222,8 +1222,7 @@ def record_local_qualification_result(
         raise QualificationError("Qualification report evidence is invalid") from exc
     input_sha256 = str(inputs[0]["sha256"])
     if (
-        hashlib.sha256(input_bytes).hexdigest()
-        != input_sha256
+        hashlib.sha256(input_bytes).hexdigest() != input_sha256
         or report.governed_qualification_case_input_sha256 != input_sha256
         or report.governed_runtime_inputs_digest != input_sha256
         or report.governed_qualification_run_id_sha256

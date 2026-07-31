@@ -1127,9 +1127,7 @@ class EngineDispatcher:
             return False
         if run is None:
             return True
-        return str(pending[1].get("created_at") or "") >= str(
-            run.get("created_at") or ""
-        )
+        return str(pending[1].get("created_at") or "") >= str(run.get("created_at") or "")
 
     def retry_run_persistence(self, **params: Any) -> dict:
         """Retry a failed local-history save from its bounded recovery marker."""

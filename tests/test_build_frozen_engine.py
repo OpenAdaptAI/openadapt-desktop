@@ -267,14 +267,10 @@ def test_frozen_notice_inventory_binds_concrete_archive_bytes(
         packages.append(
             {
                 "name": name,
-                    # This fixture represents the exact Desktop capture pin. The
-                    # installed test environment may contain a different capture
-                    # package, so it must not decide an archive-inventory test.
-                    "version": (
-                        "1.2.1"
-                        if name == verify.CAPTURE_DISTRIBUTION
-                        else "1.0.0"
-                ),
+                # This fixture represents the exact Desktop capture pin. The
+                # installed test environment may contain a different capture
+                # package, so it must not decide an archive-inventory test.
+                "version": ("1.2.1" if name == verify.CAPTURE_DISTRIBUTION else "1.0.0"),
                 "license_evidence": ["MIT"],
                 "notices": notices,
             }
@@ -449,15 +445,15 @@ def test_frozen_flow_pin_must_request_the_console_and_browser_extras(tmp_path: P
         return root
 
     version, extras = frozen_notices.bundled_flow_pin(build.ROOT)
-    assert version == "1.27.0"
+    assert version == "1.27.1"
     assert set(frozen_notices.FLOW_REQUIRED_EXTRAS) <= set(extras)
 
     with pytest.raises(ValueError, match="console"):
-        frozen_notices.bundled_flow_pin(_pyproject("openadapt-flow==1.27.0"))
+        frozen_notices.bundled_flow_pin(_pyproject("openadapt-flow==1.27.1"))
     with pytest.raises(ValueError, match="browser"):
-        frozen_notices.bundled_flow_pin(_pyproject("openadapt-flow[console]==1.27.0"))
+        frozen_notices.bundled_flow_pin(_pyproject("openadapt-flow[console]==1.27.1"))
     with pytest.raises(ValueError, match="exact openadapt-flow build pin"):
-        frozen_notices.bundled_flow_pin(_pyproject("openadapt-flow[browser,console]>=1.27.0"))
+        frozen_notices.bundled_flow_pin(_pyproject("openadapt-flow[browser,console]>=1.27.1"))
 
 
 def test_frozen_runtime_roots_carry_the_pinned_flow_extras() -> None:
@@ -514,9 +510,7 @@ def test_frozen_capture_carries_its_own_distribution_metadata(tmp_path: Path) ->
     command = _build_command("", tmp_path)
 
     copied = [
-        command[index + 1]
-        for index, value in enumerate(command)
-        if value == "--copy-metadata"
+        command[index + 1] for index, value in enumerate(command) if value == "--copy-metadata"
     ]
     assert "openadapt-capture" in copied
     assert "openadapt-flow" in copied

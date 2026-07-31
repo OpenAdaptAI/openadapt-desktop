@@ -81,7 +81,7 @@ build = [
     # decision portal supervises ``openadapt-flow console --attend``; without
     # this extra the frozen sidecar carries no fastapi/uvicorn and the console
     # exits with an install hint instead of a capability banner, so the portal
-    # is dead in every signed installer.  1.27.0 carries the current signed
+    # is dead in every signed installer.  1.27.1 carries the current signed
     # attended-decision and reconciliation contract that the portal renders.
     #
     # ``browser`` is equally load-bearing: 1.25.0 moved Playwright from a core
@@ -89,7 +89,7 @@ build = [
     # purpose (see the pin below and the embedded ``-m playwright`` process
     # mode). Without it the driver becomes build-only and the artifact gate
     # correctly refuses the archive.
-    "openadapt-flow[browser,console]==1.27.0",
+    "openadapt-flow[browser,console]==1.27.1",
     # Desktop deliberately embeds the optional browser driver so selecting a
     # web workflow is one click. It does NOT bundle Chromium: that larger
     # runtime is fetched only after the operator chooses the browser surface.
