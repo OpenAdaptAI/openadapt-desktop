@@ -45,6 +45,7 @@ EXPECTED_PLATFORMS = {
     ("windows", "x86_64"),
     ("linux", "x86_64"),
 }
+WEBSITE_RELEASE_MANIFEST = "openadapt-desktop-release-manifest.json"
 
 
 def native_versions(root: Path = ROOT) -> dict[str, str]:
@@ -398,7 +399,13 @@ def validate_release_set(directory: Path) -> int:
     actual_assets = {
         path.name
         for path in files
-        if not path.name.endswith("-metadata.json") and path.name != "SHA256SUMS"
+        if not path.name.endswith("-metadata.json")
+        and path.name != "SHA256SUMS"
+        # These release-wide integrity documents are generated after the
+        # per-platform staging metadata. They describe the installer set but
+        # are not installers themselves.
+        and not path.name.endswith(".cyclonedx.json")
+        and path.name != WEBSITE_RELEASE_MANIFEST
     }
     if actual_assets != referenced_assets:
         raise ValueError(
@@ -435,6 +442,86 @@ def validate_sbom(path: Path) -> int:
     if len(named) != len(components):
         raise ValueError(f"SBOM contains an unnamed or malformed component: {path}")
     return len(components)
+
+
+def write_website_release_manifest(
+    directory: Path, *, tag: str, sbom: Path, root: Path = ROOT
+) -> Path:
+    """Write the verified, public release index consumed by download pages.
+
+    This is deliberately a description of the exact staged bytes, not a claim
+    that an unsigned artifact is signed.  ``SHA256SUMS`` subsequently binds the
+    manifest itself into the GitHub provenance attestation.
+    """
+
+    validate_tag(tag, root)
+    validate_release_set(directory)
+    validate_sbom(sbom)
+    if sbom.parent.resolve() != directory.resolve():
+        raise ValueError("SBOM must be inside the release asset directory")
+    output = directory / WEBSITE_RELEASE_MANIFEST
+    if output.exists():
+        raise ValueError(f"release manifest already exists: {output}")
+
+    assets: list[dict[str, str]] = []
+    for metadata_path in sorted(directory.glob("*-metadata.json")):
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        for name in metadata["artifacts"]:
+            path = directory / name
+            assets.append(
+                {
+                    "name": name,
+                    "platform": metadata["platform"],
+                    "architecture": metadata["architecture"],
+                    "signing": metadata["signing"],
+                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                }
+            )
+    assets.sort(key=lambda item: item["name"])
+    payload = {
+        "schema_version": 1,
+        "lifecycle": LIFECYCLE,
+        "native_tag": tag,
+        "native_version": native_version(root),
+        "source_commit": os.environ.get("GITHUB_SHA", "local"),
+        "verification": {
+            "sha256_manifest": "SHA256SUMS",
+            "github_artifact_attestation": "required",
+            "installer_smoke": "install, launch, and uninstall",
+        },
+        "sbom": {
+            "name": sbom.name,
+            "sha256": hashlib.sha256(sbom.read_bytes()).hexdigest(),
+            "format": "CycloneDX",
+        },
+        "artifacts": assets,
+    }
+    output.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return output
+
+
+def validate_website_release_manifest(path: Path, *, root: Path = ROOT) -> int:
+    """Refuse a malformed manifest or a signing claim not present in its files."""
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if data.get("schema_version") != 1 or data.get("lifecycle") != LIFECYCLE:
+        raise ValueError(f"invalid website release manifest: {path}")
+    validate_tag(str(data.get("native_tag", "")), root)
+    if data.get("native_version") != native_version(root):
+        raise ValueError(f"wrong native version in website release manifest: {path}")
+    assets = data.get("artifacts")
+    if not isinstance(assets, list) or len(assets) != 6:
+        raise ValueError(f"website release manifest has an incomplete artifact set: {path}")
+    for asset in assets:
+        if not isinstance(asset, dict) or asset.get("signing") not in SIGNING_MODES.get(
+            asset.get("platform"), set()
+        ):
+            raise ValueError(f"website release manifest has invalid signing metadata: {path}")
+        name = asset.get("name")
+        digest = asset.get("sha256")
+        if not isinstance(name, str) or not isinstance(digest, str) or len(digest) != 64:
+            raise ValueError(f"website release manifest has invalid artifact digest: {path}")
+    return len(assets)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -481,6 +568,12 @@ def _parser() -> argparse.ArgumentParser:
     validate_set_parser.add_argument("--directory", type=Path, required=True)
     validate_sbom_parser = subparsers.add_parser("validate-sbom")
     validate_sbom_parser.add_argument("--file", type=Path, required=True)
+    website_manifest_parser = subparsers.add_parser("website-manifest")
+    website_manifest_parser.add_argument("--directory", type=Path, required=True)
+    website_manifest_parser.add_argument("--tag", required=True)
+    website_manifest_parser.add_argument("--sbom", type=Path, required=True)
+    validate_website_manifest_parser = subparsers.add_parser("validate-website-manifest")
+    validate_website_manifest_parser.add_argument("--file", type=Path, required=True)
     return parser
 
 
@@ -545,6 +638,14 @@ def main() -> int:
         elif args.command == "validate-sbom":
             count = validate_sbom(args.file)
             print(f"Validated {count} components in {args.file}")
+        elif args.command == "website-manifest":
+            path = write_website_release_manifest(
+                args.directory, tag=args.tag, sbom=args.sbom
+            )
+            print(path)
+        elif args.command == "validate-website-manifest":
+            count = validate_website_release_manifest(args.file)
+            print(f"Validated {count} website release artifacts in {args.file}")
     except (OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

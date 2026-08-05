@@ -520,6 +520,15 @@ jobs:
           python scripts/native_release.py validate-sbom
           --file release-assets/OpenAdapt-Desktop-${{ github.ref_name }}.cyclonedx.json
 
+      - name: Generate and validate website-readable release manifest
+        run: |
+          python scripts/native_release.py website-manifest \
+            --directory release-assets \
+            --tag "${{ github.ref_name }}" \
+            --sbom release-assets/OpenAdapt-Desktop-${{ github.ref_name }}.cyclonedx.json
+          python scripts/native_release.py validate-website-manifest \
+            --file release-assets/openadapt-desktop-release-manifest.json
+
       - name: Generate and verify final checksums
         run: |
           python scripts/native_release.py checksums \

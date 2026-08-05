@@ -18,8 +18,10 @@ from scripts.native_release import (
     validate_release_set,
     validate_sbom,
     validate_tag,
+    validate_website_release_manifest,
     verify_checksums,
     write_checksums,
+    write_website_release_manifest,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -62,6 +64,8 @@ def test_native_workflows_are_pinned_and_preserve_beta_boundary() -> None:
     assert "upload-artifact: false" in release
     assert "upload-release-assets: false" in release
     assert "native_release.py validate-sbom" in release
+    assert "native_release.py website-manifest" in release
+    assert "native_release.py validate-website-manifest" in release
     assert release.index("anchore/sbom-action@") < release.index(
         "native_release.py validate-sbom"
     ) < release.index("- name: Generate and verify final checksums")
@@ -665,3 +669,42 @@ def test_validate_release_set_requires_every_platform_and_no_extra_files(tmp_pat
     (release / "unexpected.bin").write_bytes(b"unexpected")
     with pytest.raises(ValueError, match="release assets differ"):
         validate_release_set(release)
+
+
+def test_website_release_manifest_is_an_honest_index_of_staged_bytes(tmp_path: Path) -> None:
+    specifications = [
+        ("macos", "arm64", "adhoc", ["dmg/app-arm.dmg"]),
+        ("macos", "x86_64", "adhoc", ["dmg/app-intel.dmg"]),
+        ("windows", "x86_64", "unsigned", ["msi/app.msi", "nsis/app-setup.exe"]),
+        ("linux", "x86_64", "unsigned", ["deb/app.deb", "appimage/app.AppImage"]),
+    ]
+    release = tmp_path / "release"
+    release.mkdir()
+    for index, (platform, architecture, signing, files) in enumerate(specifications):
+        bundle = tmp_path / f"bundle-{index}"
+        for relative in files:
+            path = bundle / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(relative.encode())
+        for path in stage_artifacts(
+            bundle_root=bundle,
+            output=tmp_path / f"stage-{index}",
+            platform=platform,
+            architecture=architecture,
+            signing=signing,
+        ):
+            path.rename(release / path.name)
+    sbom = release / "release.cyclonedx.json"
+    sbom.write_text(
+        json.dumps({"bomFormat": "CycloneDX", "specVersion": "1.6", "version": 1,
+                    "metadata": {"tools": [{"name": "Syft"}]},
+                    "components": [{"name": "openadapt-flow"}]}),
+        encoding="utf-8",
+    )
+    output = write_website_release_manifest(
+        release, tag=f"desktop-v{native_version()}", sbom=sbom
+    )
+    assert validate_website_release_manifest(output) == 6
+    manifest = json.loads(output.read_text())
+    assert {asset["signing"] for asset in manifest["artifacts"]} == {"adhoc", "unsigned"}
+    assert manifest["verification"]["github_artifact_attestation"] == "required"
