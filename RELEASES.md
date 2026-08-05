@@ -146,10 +146,11 @@ alone:
   mirror exists for humans who land on `/releases/latest`.
 - `openadapt-desktop-release-manifest.json` is the website-readable index. It
   lists each artifact name, platform, architecture, signing state, and SHA-256,
-  plus the checked CycloneDX SBOM. The release workflow validates it before
-  checksumming and attesting it. A consumer must still verify `SHA256SUMS` and
-  the GitHub attestation; the manifest does not claim that unsigned artifacts
-  are signed.
+  plus the checked CycloneDX SBOM. The release workflow recomputes the named
+  hashes and validates the complete file set against `SHA256SUMS` before it
+  creates the GitHub attestation. A consumer must still verify the checksums
+  and attestation; the manifest does not claim that unsigned artifacts are
+  signed.
 
 ## Convergence plan (post-signing)
 

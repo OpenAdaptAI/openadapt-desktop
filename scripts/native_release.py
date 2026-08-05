@@ -327,13 +327,9 @@ def write_checksums(directory: Path, output: Path) -> list[tuple[str, str]]:
 
 
 def verify_checksums(directory: Path, manifest: Path) -> int:
+    entries = read_checksums(manifest)
     checked = 0
-    for line in manifest.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        digest, separator, name = line.partition("  ")
-        if not separator or len(digest) != 64 or Path(name).name != name:
-            raise ValueError(f"invalid checksum line: {line!r}")
+    for name, digest in entries.items():
         path = directory / name
         if not path.is_file():
             raise ValueError(f"checksum target is missing: {path}")
@@ -344,6 +340,29 @@ def verify_checksums(directory: Path, manifest: Path) -> int:
     if checked == 0:
         raise ValueError("checksum manifest is empty")
     return checked
+
+
+def read_checksums(manifest: Path) -> dict[str, str]:
+    """Read a strict SHA256SUMS file and reject duplicate asset names."""
+
+    entries: dict[str, str] = {}
+    for line in manifest.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        digest, separator, name = line.partition("  ")
+        if (
+            not separator
+            or not re.fullmatch(r"[0-9a-f]{64}", digest)
+            or Path(name).name != name
+            or not name
+        ):
+            raise ValueError(f"invalid checksum line: {line!r}")
+        if name in entries:
+            raise ValueError(f"duplicate checksum target: {name}")
+        entries[name] = digest
+    if not entries:
+        raise ValueError("checksum manifest is empty")
+    return entries
 
 
 def validate_release_set(directory: Path) -> int:
@@ -500,8 +519,10 @@ def write_website_release_manifest(
     return output
 
 
-def validate_website_release_manifest(path: Path, *, root: Path = ROOT) -> int:
-    """Refuse a malformed manifest or a signing claim not present in its files."""
+def validate_website_release_manifest(
+    path: Path, *, checksums: Path, root: Path = ROOT
+) -> int:
+    """Validate the public index against metadata, bytes, SBOM, and checksums."""
 
     data = json.loads(path.read_text(encoding="utf-8"))
     if data.get("schema_version") != 1 or data.get("lifecycle") != LIFECYCLE:
@@ -509,9 +530,28 @@ def validate_website_release_manifest(path: Path, *, root: Path = ROOT) -> int:
     validate_tag(str(data.get("native_tag", "")), root)
     if data.get("native_version") != native_version(root):
         raise ValueError(f"wrong native version in website release manifest: {path}")
+    directory = path.parent
+    if path.name != WEBSITE_RELEASE_MANIFEST or checksums.parent.resolve() != directory.resolve():
+        raise ValueError("website manifest and SHA256SUMS must be in the release directory")
+    validate_release_set(directory)
+    metadata_by_asset: dict[str, tuple[str, str, str]] = {}
+    for metadata_path in sorted(directory.glob("*-metadata.json")):
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        for name in metadata.get("artifacts", []):
+            if name in metadata_by_asset:
+                raise ValueError(f"duplicate artifact in platform metadata: {name}")
+            metadata_by_asset[name] = (
+                metadata.get("platform"),
+                metadata.get("architecture"),
+                metadata.get("signing"),
+            )
+    # Each release has one signing mode per platform. Platform metadata is the
+    # source of truth for which permitted mode the build selected.
+    expected_names = set(metadata_by_asset)
     assets = data.get("artifacts")
-    if not isinstance(assets, list) or len(assets) != 6:
+    if not isinstance(assets, list) or len(assets) != len(expected_names):
         raise ValueError(f"website release manifest has an incomplete artifact set: {path}")
+    observed_names: set[str] = set()
     for asset in assets:
         if not isinstance(asset, dict) or asset.get("signing") not in SIGNING_MODES.get(
             asset.get("platform"), set()
@@ -519,8 +559,58 @@ def validate_website_release_manifest(path: Path, *, root: Path = ROOT) -> int:
             raise ValueError(f"website release manifest has invalid signing metadata: {path}")
         name = asset.get("name")
         digest = asset.get("sha256")
-        if not isinstance(name, str) or not isinstance(digest, str) or len(digest) != 64:
+        if (
+            not isinstance(name, str)
+            or name in observed_names
+            or name not in expected_names
+            or not isinstance(digest, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", digest)
+        ):
             raise ValueError(f"website release manifest has invalid artifact digest: {path}")
+        observed_names.add(name)
+        platform, architecture, signing = metadata_by_asset[name]
+        if (asset.get("platform"), asset.get("architecture"), asset.get("signing")) != (
+            platform,
+            architecture,
+            signing,
+        ):
+            raise ValueError(f"website release manifest disagrees with platform metadata: {name}")
+        artifact_path = directory / name
+        if not artifact_path.is_file():
+            raise ValueError(f"website release manifest references missing artifact: {name}")
+        actual_digest = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+        if digest != actual_digest:
+            raise ValueError(f"website release manifest digest differs for {name}")
+    if observed_names != expected_names:
+        raise ValueError("website release manifest artifact names are incomplete")
+
+    sbom = data.get("sbom")
+    expected_sbom_name = f"OpenAdapt-Desktop-{data['native_tag']}.cyclonedx.json"
+    if not isinstance(sbom, dict) or sbom.get("name") != expected_sbom_name:
+        raise ValueError("website release manifest names the wrong SBOM")
+    sbom_path = directory / expected_sbom_name
+    if not sbom_path.is_file():
+        raise ValueError(f"website release manifest references missing SBOM: {sbom_path}")
+    validate_sbom(sbom_path)
+    sbom_digest = hashlib.sha256(sbom_path.read_bytes()).hexdigest()
+    if sbom.get("sha256") != sbom_digest:
+        raise ValueError("website release manifest SBOM digest differs")
+
+    checksum_entries = read_checksums(checksums)
+    expected_checksum_names = (
+        expected_names
+        | {metadata.name for metadata in directory.glob("*-metadata.json")}
+        | {expected_sbom_name, WEBSITE_RELEASE_MANIFEST}
+    )
+    if set(checksum_entries) != expected_checksum_names:
+        raise ValueError("SHA256SUMS does not describe the exact release file set")
+    for name in expected_names | {expected_sbom_name, WEBSITE_RELEASE_MANIFEST}:
+        actual_digest = hashlib.sha256((directory / name).read_bytes()).hexdigest()
+        if checksum_entries.get(name) != actual_digest:
+            raise ValueError(f"SHA256SUMS digest differs for {name}")
+    expected_commit = os.environ.get("GITHUB_SHA")
+    if expected_commit and data.get("source_commit") != expected_commit:
+        raise ValueError("website release manifest source commit differs")
     return len(assets)
 
 
@@ -574,6 +664,7 @@ def _parser() -> argparse.ArgumentParser:
     website_manifest_parser.add_argument("--sbom", type=Path, required=True)
     validate_website_manifest_parser = subparsers.add_parser("validate-website-manifest")
     validate_website_manifest_parser.add_argument("--file", type=Path, required=True)
+    validate_website_manifest_parser.add_argument("--checksums", type=Path, required=True)
     return parser
 
 
@@ -644,7 +735,7 @@ def main() -> int:
             )
             print(path)
         elif args.command == "validate-website-manifest":
-            count = validate_website_release_manifest(args.file)
+            count = validate_website_release_manifest(args.file, checksums=args.checksums)
             print(f"Validated {count} website release artifacts in {args.file}")
     except (OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
