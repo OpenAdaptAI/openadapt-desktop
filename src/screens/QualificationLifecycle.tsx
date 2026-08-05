@@ -15,6 +15,44 @@ import { Button, Callout, Card, CardHead, Field, Pill } from "../ui/primitives";
 
 const POLICY = "clinical-write";
 
+const GUIDED_FAULT_CASES: {
+  id: string;
+  kind: QualificationCaseKind;
+  label: string;
+  description: string;
+}[] = [
+  {
+    id: "ambiguity-1",
+    kind: "ambiguity",
+    label: "Ambiguous target",
+    description: "A competing target is present; the run must halt before actuation.",
+  },
+  {
+    id: "wrong-identity-1",
+    kind: "wrong_identity",
+    label: "Wrong record",
+    description: "The live record does not match the qualified identity; the run must halt.",
+  },
+  {
+    id: "stale-identity-1",
+    kind: "stale_identity",
+    label: "Stale record",
+    description: "Identity changes after resolution; the run must reacquire or halt.",
+  },
+  {
+    id: "weak-effect-1",
+    kind: "weak_effect",
+    label: "Weak effect evidence",
+    description: "The effect evidence is below the qualified tier; the run must halt.",
+  },
+  {
+    id: "missing-effect-1",
+    kind: "missing_effect",
+    label: "Missing effect",
+    description: "The intended persisted effect is absent; the run must halt.",
+  },
+];
+
 function secretEnvironmentReference(name: string): string {
   return `OPENADAPT_FLOW_SECRET_${name.replace(/[^a-zA-Z0-9]/g, "_").toUpperCase()}`;
 }
@@ -161,6 +199,14 @@ export function QualificationLifecycle({
       },
       "add",
     );
+  }
+
+  function selectGuidedFaultCase(
+    faultCase: (typeof GUIDED_FAULT_CASES)[number],
+  ) {
+    setCaseId(faultCase.id);
+    setCaseKind(faultCase.kind);
+    setDescription(faultCase.description);
   }
 
   async function runCase() {
@@ -528,6 +574,28 @@ export function QualificationLifecycle({
 
         <details style={{ marginTop: "var(--space-5)" }}>
           <summary>Add another qualification case</summary>
+          <div className="advanced-target-body">
+            <strong>Guided fault cases</strong>
+            <p className="page-sub">
+              Select a fault condition to use its typed Flow case kind, neutral case
+              identifier, and expected HALTED outcome. The current runner still has
+              to produce and sign the evidence.
+            </p>
+            <div className="row">
+              {GUIDED_FAULT_CASES.map((faultCase) => {
+                const exists = cases.some((item) => item.id === faultCase.id);
+                return (
+                  <Button
+                    key={faultCase.id}
+                    disabled={exists || Boolean(busy)}
+                    onClick={() => selectGuidedFaultCase(faultCase)}
+                  >
+                    {exists ? `${faultCase.label} added` : `Use ${faultCase.label}`}
+                  </Button>
+                );
+              })}
+            </div>
+          </div>
           <div className="grid grid-2" style={{ marginTop: "var(--space-3)" }}>
             <Field label="Case id" htmlFor="qualification-new-case-id">
               <input

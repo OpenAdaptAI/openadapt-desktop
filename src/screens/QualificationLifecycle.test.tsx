@@ -125,4 +125,53 @@ describe("Qualification lifecycle", () => {
     fireEvent.click(screen.getByRole("button", { name: "Create working version" }));
     await waitFor(() => expect(onOpenWorkflow).toHaveBeenCalledWith("wf-2"));
   });
+
+  it("prefills a typed fault case instead of requiring a hand-written case id", async () => {
+    render(
+      <QualificationLifecycle
+        workflowId="wf-1"
+        project={project()}
+        onProject={() => {}}
+        onOpenWorkflow={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByText("Add another qualification case"));
+    fireEvent.click(screen.getByRole("button", { name: "Use Wrong record" }));
+
+    expect((screen.getByLabelText("Case id") as HTMLInputElement).value).toBe(
+      "wrong-identity-1",
+    );
+    expect((screen.getByLabelText("Case type") as HTMLSelectElement).value).toBe(
+      "wrong_identity",
+    );
+    expect((screen.getByLabelText("Description") as HTMLInputElement).value).toBe(
+      "The live record does not match the qualified identity; the run must halt.",
+    );
+
+    fireEvent.change(screen.getByLabelText("record id"), {
+      target: { value: "CASE-42" },
+    });
+    fireEvent.change(screen.getByLabelText("amount"), {
+      target: { value: "75.5" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add case" }));
+    await waitFor(() =>
+      expect(mockedEngineInvoke).toHaveBeenCalledWith(
+        CMD.ADD_QUALIFICATION_CASE,
+        expect.objectContaining({
+          workflow_id: "wf-1",
+          case_id: "wrong-identity-1",
+          kind: "wrong_identity",
+          description:
+            "The live record does not match the qualified identity; the run must halt.",
+          parameters_json: JSON.stringify({
+            record_id: "CASE-42",
+            amount: 75.5,
+            priority: "routine",
+          }),
+        }),
+      ),
+    );
+  });
 });
