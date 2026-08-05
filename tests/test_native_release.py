@@ -66,9 +66,11 @@ def test_native_workflows_are_pinned_and_preserve_beta_boundary() -> None:
     assert "native_release.py validate-sbom" in release
     assert "native_release.py website-manifest" in release
     assert "native_release.py validate-website-manifest" in release
-    assert release.index("anchore/sbom-action@") < release.index(
-        "native_release.py validate-sbom"
-    ) < release.index("- name: Generate and verify final checksums")
+    assert (
+        release.index("anchore/sbom-action@")
+        < release.index("native_release.py validate-sbom")
+        < release.index("- name: Generate and verify final checksums")
+    )
     assert "attestations: write" in release
     assert "id-token: write" in release
     assert "contents: write" in release
@@ -111,9 +113,7 @@ def test_validate_sbom_requires_cyclonedx_generator_and_named_components(
                 "bomFormat": "CycloneDX",
                 "specVersion": "1.6",
                 "version": 1,
-                "metadata": {
-                    "tools": [{"vendor": "Anchore", "name": "Syft", "version": "1.44.0"}]
-                },
+                "metadata": {"tools": [{"vendor": "Anchore", "name": "Syft", "version": "1.44.0"}]},
                 "components": [
                     {
                         "type": "library",
@@ -171,8 +171,7 @@ def test_security_workflows_cover_all_languages_and_pin_every_dependency() -> No
     assert "GITLEAKS_VERSION: 8.30.1" in secret_scan
     assert (
         "GITLEAKS_SHA256: "
-        "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
-        in secret_scan
+        "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb" in secret_scan
     )
     assert "sha256sum --check --strict" in secret_scan
 
@@ -428,9 +427,7 @@ def test_superseded_notes_is_idempotent_and_upgrades_to_newer_pointer() -> None:
 def test_installer_pointer_prepends_block_and_preserves_engine_notes() -> None:
     body = "## v0.5.0 (2026-07-26)\n\n### Bug Fixes\n\n- Something.\n"
 
-    updated = installer_pointer_notes(
-        body, "desktop-v0.5.0", "OpenAdaptAI/openadapt-desktop"
-    )
+    updated = installer_pointer_notes(body, "desktop-v0.5.0", "OpenAdaptAI/openadapt-desktop")
 
     assert updated is not None
     assert updated.startswith("<!-- openadapt-installer-pointer:start -->\n")
@@ -458,9 +455,7 @@ def test_installer_pointer_is_idempotent_and_retargets_a_newer_native_tag() -> N
     # Re-running the same publish must not append a second block.
     assert installer_pointer_notes(once, "desktop-v0.5.0", "OpenAdaptAI/openadapt-desktop") is None
 
-    retargeted = installer_pointer_notes(
-        once, "desktop-v0.6.0", "OpenAdaptAI/openadapt-desktop"
-    )
+    retargeted = installer_pointer_notes(once, "desktop-v0.6.0", "OpenAdaptAI/openadapt-desktop")
     assert retargeted is not None
     assert retargeted.count("openadapt-installer-pointer:start") == 1
     assert retargeted.count("openadapt-installer-pointer:end") == 1
@@ -474,9 +469,7 @@ def test_installer_pointer_refuses_a_malformed_or_truncated_block() -> None:
 
     truncated = "<!-- openadapt-installer-pointer:start -->\nhalf a block\n"
     with pytest.raises(ValueError):
-        installer_pointer_notes(
-            truncated, "desktop-v0.5.0", "OpenAdaptAI/openadapt-desktop"
-        )
+        installer_pointer_notes(truncated, "desktop-v0.5.0", "OpenAdaptAI/openadapt-desktop")
 
 
 def test_native_release_workflow_points_latest_at_the_published_installers() -> None:
@@ -697,14 +690,18 @@ def _stage_complete_release(tmp_path: Path) -> tuple[Path, Path, Path]:
     tag = f"desktop-v{native_version()}"
     sbom = release / f"OpenAdapt-Desktop-{tag}.cyclonedx.json"
     sbom.write_text(
-        json.dumps({"bomFormat": "CycloneDX", "specVersion": "1.6", "version": 1,
-                    "metadata": {"tools": [{"name": "Syft"}]},
-                    "components": [{"name": "openadapt-flow"}]}),
+        json.dumps(
+            {
+                "bomFormat": "CycloneDX",
+                "specVersion": "1.6",
+                "version": 1,
+                "metadata": {"tools": [{"name": "Syft"}]},
+                "components": [{"name": "openadapt-flow"}],
+            }
+        ),
         encoding="utf-8",
     )
-    output = write_website_release_manifest(
-        release, tag=tag, sbom=sbom
-    )
+    output = write_website_release_manifest(release, tag=tag, sbom=sbom)
     checksums = release / "SHA256SUMS"
     write_checksums(release, checksums)
     return release, output, checksums
@@ -716,6 +713,37 @@ def test_website_release_manifest_is_an_honest_index_of_staged_bytes(tmp_path: P
     manifest = json.loads(output.read_text())
     assert {asset["signing"] for asset in manifest["artifacts"]} == {"adhoc", "unsigned"}
     assert manifest["verification"]["github_artifact_attestation"] == "required"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("sha256_manifest", "checksums.txt"),
+        ("github_artifact_attestation", "optional"),
+        ("installer_smoke", "install only"),
+        ("unexpected", "accepted"),
+    ],
+)
+def test_website_release_manifest_rejects_modified_verification_contract(
+    tmp_path: Path, field: str, value: str
+) -> None:
+    release, output, checksums = _stage_complete_release(tmp_path)
+    manifest = json.loads(output.read_text())
+    manifest["verification"][field] = value
+    output.write_text(json.dumps(manifest), encoding="utf-8")
+    write_checksums(release, checksums)
+    with pytest.raises(ValueError, match="invalid verification contract"):
+        validate_website_release_manifest(output, checksums=checksums)
+
+
+def test_website_release_manifest_rejects_modified_sbom_format(tmp_path: Path) -> None:
+    release, output, checksums = _stage_complete_release(tmp_path)
+    manifest = json.loads(output.read_text())
+    manifest["sbom"]["format"] = "SPDX"
+    output.write_text(json.dumps(manifest), encoding="utf-8")
+    write_checksums(release, checksums)
+    with pytest.raises(ValueError, match="invalid SBOM format"):
+        validate_website_release_manifest(output, checksums=checksums)
 
 
 def test_website_release_manifest_rejects_duplicate_and_nonexistent_assets(

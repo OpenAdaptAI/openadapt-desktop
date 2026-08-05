@@ -46,6 +46,12 @@ EXPECTED_PLATFORMS = {
     ("linux", "x86_64"),
 }
 WEBSITE_RELEASE_MANIFEST = "openadapt-desktop-release-manifest.json"
+WEBSITE_RELEASE_VERIFICATION = {
+    "sha256_manifest": "SHA256SUMS",
+    "github_artifact_attestation": "required",
+    "installer_smoke": "install, launch, and uninstall",
+}
+WEBSITE_RELEASE_SBOM_FORMAT = "CycloneDX"
 
 
 def native_versions(root: Path = ROOT) -> dict[str, str]:
@@ -92,9 +98,7 @@ def set_native_version(version: str, root: Path = ROOT) -> dict[str, str]:
     def rewrite_json(path: Path, mutate) -> None:
         data = json.loads(path.read_text(encoding="utf-8"))
         mutate(data)
-        path.write_text(
-            json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-        )
+        path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
     def set_lock_versions(lock: dict) -> None:
         lock["version"] = version
@@ -206,7 +210,7 @@ def installer_pointer_notes(body: str, native_tag: str, repo: str) -> str | None
         "> macOS DMG (arm64 and x86_64), Windows MSI and NSIS `.exe`, Linux\n"
         "> `.deb` and `.AppImage`, plus `SHA256SUMS` — the same attested bytes\n"
         f"> published at [`{native_tag}`]({base}/tag/{native_tag}), mirrored\n"
-        "> here so GitHub's \"Latest\" always carries an installer.\n"
+        '> here so GitHub\'s "Latest" always carries an installer.\n'
         ">\n"
         "> **These installers are Beta and are ad-hoc-signed (macOS) or\n"
         "> unsigned (Windows, Linux)** pending signing credentials; the signing\n"
@@ -503,15 +507,11 @@ def write_website_release_manifest(
         "native_tag": tag,
         "native_version": native_version(root),
         "source_commit": os.environ.get("GITHUB_SHA", "local"),
-        "verification": {
-            "sha256_manifest": "SHA256SUMS",
-            "github_artifact_attestation": "required",
-            "installer_smoke": "install, launch, and uninstall",
-        },
+        "verification": WEBSITE_RELEASE_VERIFICATION,
         "sbom": {
             "name": sbom.name,
             "sha256": hashlib.sha256(sbom.read_bytes()).hexdigest(),
-            "format": "CycloneDX",
+            "format": WEBSITE_RELEASE_SBOM_FORMAT,
         },
         "artifacts": assets,
     }
@@ -519,9 +519,7 @@ def write_website_release_manifest(
     return output
 
 
-def validate_website_release_manifest(
-    path: Path, *, checksums: Path, root: Path = ROOT
-) -> int:
+def validate_website_release_manifest(path: Path, *, checksums: Path, root: Path = ROOT) -> int:
     """Validate the public index against metadata, bytes, SBOM, and checksums."""
 
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -530,6 +528,8 @@ def validate_website_release_manifest(
     validate_tag(str(data.get("native_tag", "")), root)
     if data.get("native_version") != native_version(root):
         raise ValueError(f"wrong native version in website release manifest: {path}")
+    if data.get("verification") != WEBSITE_RELEASE_VERIFICATION:
+        raise ValueError("website release manifest has an invalid verification contract")
     directory = path.parent
     if path.name != WEBSITE_RELEASE_MANIFEST or checksums.parent.resolve() != directory.resolve():
         raise ValueError("website manifest and SHA256SUMS must be in the release directory")
@@ -586,8 +586,14 @@ def validate_website_release_manifest(
 
     sbom = data.get("sbom")
     expected_sbom_name = f"OpenAdapt-Desktop-{data['native_tag']}.cyclonedx.json"
-    if not isinstance(sbom, dict) or sbom.get("name") != expected_sbom_name:
+    if (
+        not isinstance(sbom, dict)
+        or set(sbom) != {"name", "sha256", "format"}
+        or sbom.get("name") != expected_sbom_name
+    ):
         raise ValueError("website release manifest names the wrong SBOM")
+    if sbom.get("format") != WEBSITE_RELEASE_SBOM_FORMAT:
+        raise ValueError("website release manifest has an invalid SBOM format")
     sbom_path = directory / expected_sbom_name
     if not sbom_path.is_file():
         raise ValueError(f"website release manifest references missing SBOM: {sbom_path}")
@@ -730,9 +736,7 @@ def main() -> int:
             count = validate_sbom(args.file)
             print(f"Validated {count} components in {args.file}")
         elif args.command == "website-manifest":
-            path = write_website_release_manifest(
-                args.directory, tag=args.tag, sbom=args.sbom
-            )
+            path = write_website_release_manifest(args.directory, tag=args.tag, sbom=args.sbom)
             print(path)
         elif args.command == "validate-website-manifest":
             count = validate_website_release_manifest(args.file, checksums=args.checksums)
