@@ -412,6 +412,59 @@ def test_desktop_binds_canonical_inputs_and_action_scope_before_case_run(
     ]
 
 
+def test_desktop_binds_one_exact_fault_target_in_a_two_action_scope(
+    tmp_path: Path,
+) -> None:
+    bundle = _bundle(
+        tmp_path / "bundle",
+        Step(id="open", intent="Open", action=ActionKind.CLICK),
+        Step(id="save", intent="Save", action=ActionKind.CLICK),
+        params={"record_id": "example"},
+    )
+    initialized = _initialize(bundle)
+    fault_case = next(
+        item
+        for item in initialized["project"]["cases"]
+        if item["kind"] == "wrong_identity"
+    )
+    assert initialized["controls"]["actions"]["open"]["execution_paths"] == ["gui"]
+    assert initialized["controls"]["actions"]["save"]["execution_paths"] == ["gui"]
+
+    parameters_path, _ = store_case_parameters(
+        tmp_path / "state",
+        workflow_id="wf-1",
+        case_id=fault_case["id"],
+        parameters_json='{"record_id":"case-1"}',
+    )
+    _inputs_path, inputs = stage_case_runtime_inputs(
+        tmp_path / "state",
+        workflow_id="wf-1",
+        case_id=fault_case["id"],
+        workflow=Workflow.load(bundle),
+        parameters_path=parameters_path,
+    )
+    set_local_qualification_case_scope(
+        bundle,
+        workflow_id="wf-1",
+        case_id=fault_case["id"],
+        runtime_input_bytes=inputs,
+        fault_target={"step_id": "save", "actuation_path": "gui"},
+    )
+
+    project = Workflow.load(bundle).qualification
+    assert project is not None
+    case = next(item for item in project.cases if item.id == fault_case["id"])
+    assert [(target.step_id, target.actuation_path) for target in case.action_targets] == [
+        ("open", "gui"),
+        ("save", "gui"),
+    ]
+    assert case.fault_target is not None
+    assert (case.fault_target.step_id, case.fault_target.actuation_path) == (
+        "save",
+        "gui",
+    )
+
+
 def test_inspection_exposes_durable_target_evidence_without_flattening_to_coordinates(
     tmp_path: Path,
 ) -> None:
