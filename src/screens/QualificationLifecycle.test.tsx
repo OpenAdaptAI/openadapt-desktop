@@ -94,7 +94,7 @@ function twoActionFaultProject(): QualificationProject {
     },
     save: {
       step_id: "save",
-      execution_paths: ["gui"],
+      execution_paths: ["api", "gui"],
       identity: { can_arm: false, armed: false, sources: [], policy: null },
       effects: [],
     },
@@ -225,7 +225,7 @@ describe("Qualification lifecycle", () => {
       target: { value: "save" },
     });
     fireEvent.change(screen.getByLabelText("Actuation path"), {
-      target: { value: "gui" },
+      target: { value: "api" },
     });
     fireEvent.change(screen.getByLabelText("record id"), {
       target: { value: "CASE-42" },
@@ -241,7 +241,7 @@ describe("Qualification lifecycle", () => {
         expect.objectContaining({
           workflow_id: "wf-1",
           case_id: "fault-wrong-identity",
-          fault_target: { step_id: "save", actuation_path: "gui" },
+          fault_target: { step_id: "save", actuation_path: "api" },
         }),
       ),
     );
