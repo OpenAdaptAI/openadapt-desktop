@@ -603,14 +603,20 @@ def validate_website_release_manifest(path: Path, *, checksums: Path, root: Path
         raise ValueError("website release manifest SBOM digest differs")
 
     checksum_entries = read_checksums(checksums)
+    metadata_names = {metadata.name for metadata in directory.glob("*-metadata.json")}
     expected_checksum_names = (
-        expected_names
-        | {metadata.name for metadata in directory.glob("*-metadata.json")}
-        | {expected_sbom_name, WEBSITE_RELEASE_MANIFEST}
+        expected_names | metadata_names | {expected_sbom_name, WEBSITE_RELEASE_MANIFEST}
     )
     if set(checksum_entries) != expected_checksum_names:
         raise ValueError("SHA256SUMS does not describe the exact release file set")
-    for name in expected_names | {expected_sbom_name, WEBSITE_RELEASE_MANIFEST}:
+    for name in (
+        expected_names
+        | metadata_names
+        | {
+            expected_sbom_name,
+            WEBSITE_RELEASE_MANIFEST,
+        }
+    ):
         actual_digest = hashlib.sha256((directory / name).read_bytes()).hexdigest()
         if checksum_entries.get(name) != actual_digest:
             raise ValueError(f"SHA256SUMS digest differs for {name}")

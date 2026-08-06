@@ -813,3 +813,18 @@ def test_website_release_manifest_rejects_sbom_and_checksum_tampering(tmp_path: 
     (release / manifest["sbom"]["name"]).unlink()
     with pytest.raises(ValueError, match="missing SBOM"):
         validate_website_release_manifest(output, checksums=checksums)
+
+
+def test_website_release_manifest_rejects_forged_metadata_checksum(tmp_path: Path) -> None:
+    _, output, checksums = _stage_complete_release(tmp_path)
+    lines = checksums.read_text(encoding="utf-8").splitlines()
+    metadata_index = next(
+        index for index, line in enumerate(lines) if line.endswith("-metadata.json")
+    )
+    _digest, separator, name = lines[metadata_index].partition("  ")
+    assert separator and name
+    lines[metadata_index] = f"{'0' * 64}  {name}"
+    checksums.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="SHA256SUMS digest differs"):
+        validate_website_release_manifest(output, checksums=checksums)
