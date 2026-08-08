@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import type {
+  JudgmentFactFieldV1,
   JudgmentCaseCaptureContextV1,
   JudgmentCaseV1,
   JudgmentDispositionV1,
@@ -30,9 +31,9 @@ function initialFacts(context: JudgmentCaseCaptureContextV1): Record<string, Fac
   );
 }
 
-function factFingerprint(caseItem: JudgmentCaseV1): string {
+function factFingerprint(facts: Record<string, FactValue>): string {
   return JSON.stringify(
-    Object.entries(caseItem.facts).sort(([left], [right]) => left.localeCompare(right)),
+    Object.entries(facts).sort(([left], [right]) => left.localeCompare(right)),
   );
 }
 
@@ -49,7 +50,7 @@ export function JudgmentCaseCapture({
   onCapture,
 }: {
   context: JudgmentCaseCaptureContextV1;
-  onCapture: (caseItem: JudgmentCaseV1) => Promise<void>;
+  onCapture: (caseItems: JudgmentCaseV1[]) => Promise<void>;
 }) {
   const [source, setSource] = useState<JudgmentSource>("demonstration");
   const [sourceRefSha256, setSourceRefSha256] = useState("");
@@ -58,6 +59,11 @@ export function JudgmentCaseCapture({
   const [reviewedRuleId, setReviewedRuleId] = useState("");
   const [reviewerRole, setReviewerRole] = useState(context.authorized_roles[0] || "");
   const [reviewerPrincipalRef, setReviewerPrincipalRef] = useState("");
+  const [addContrast, setAddContrast] = useState(false);
+  const [contrastFacts, setContrastFacts] = useState<Record<string, FactValue>>(() =>
+    initialFacts(context),
+  );
+  const [contrastOptionId, setContrastOptionId] = useState("");
   const [disposition, setDisposition] =
     useState<JudgmentDispositionV1>("human_node");
   const [evidence, setEvidence] = useState<LocalEvidenceRefV1[]>([]);
@@ -70,9 +76,9 @@ export function JudgmentCaseCapture({
     const groups = new Map<string, Set<string>>();
     for (const item of context.cases) {
       if (!item.option_id) continue;
-      const options = groups.get(factFingerprint(item)) || new Set<string>();
+      const options = groups.get(factFingerprint(item.facts)) || new Set<string>();
       options.add(item.option_id);
-      groups.set(factFingerprint(item), options);
+      groups.set(factFingerprint(item.facts), options);
     }
     return [...groups.values()].filter((options) => options.size > 1).length;
   }, [context.cases]);
@@ -93,6 +99,7 @@ export function JudgmentCaseCapture({
 
   async function capture() {
     setError("");
+    const pairedRule = disposition === "automatic_rule" && addContrast;
     if (!/^[a-f0-9]{64}$/i.test(sourceRefSha256.trim())) {
       setError("The local source reference needs a SHA-256 digest.");
       return;
@@ -125,32 +132,65 @@ export function JudgmentCaseCapture({
       setError("A contrast case must refer to a saved local case.");
       return;
     }
+    if (pairedRule && factFingerprint(facts) === factFingerprint(contrastFacts)) {
+      setError("A contrasting case must change at least one reviewed fact.");
+      return;
+    }
+    if (pairedRule && !contrastOptionId) {
+      setError("Select the qualified branch for the contrasting case.");
+      return;
+    }
     setBusy(true);
     try {
-      await onCapture({
-      id: caseId(),
-      decision: context.decision,
-      fact_schema_sha256: context.fact_schema_sha256,
-      facts,
-      local_evidence: evidence,
-      review_note_ref: note,
-      provenance: {
-        source,
-        source_ref_sha256: sourceRefSha256.trim(),
+      const primaryId = caseId();
+      const contrastId = pairedRule ? caseId() : null;
+      const common = {
+        decision: context.decision,
+        fact_schema_sha256: context.fact_schema_sha256,
+        local_evidence: evidence,
+        review_note_ref: note,
+        reviewed_rule_id: disposition === "automatic_rule" ? reviewedRuleId.trim() : null,
+      };
+      const primary: JudgmentCaseV1 = {
+        ...common,
+        id: primaryId,
+        facts,
+        provenance: {
+          source,
+          source_ref_sha256: sourceRefSha256.trim(),
           reviewer_role: reviewerRole,
           reviewer_principal_ref_sha256: reviewerPrincipalRef.trim(),
-      },
-      disposition,
-      reviewed_rule_id: disposition === "automatic_rule" ? reviewedRuleId.trim() : null,
-      option_id: disposition === "automatic_rule" ? optionId : null,
-      contrast_case_ids: contrastCaseIds,
-      });
+        },
+        disposition,
+        option_id: disposition === "automatic_rule" ? optionId : null,
+        contrast_case_ids: contrastId ? [...contrastCaseIds, contrastId] : contrastCaseIds,
+      };
+      const pair = contrastId
+        ? [{
+            ...common,
+            id: contrastId,
+            facts: contrastFacts,
+            provenance: {
+              source: "counterfactual" as const,
+              source_ref_sha256: sourceRefSha256.trim(),
+              reviewer_role: reviewerRole,
+              reviewer_principal_ref_sha256: reviewerPrincipalRef.trim(),
+            },
+            disposition: "automatic_rule" as const,
+            option_id: contrastOptionId,
+            contrast_case_ids: [primaryId],
+          } satisfies JudgmentCaseV1]
+        : [];
+      await onCapture([primary, ...pair]);
       setFacts(initialFacts(context));
       setOptionId("");
       setReviewedRuleId("");
       setEvidence([]);
       setNote(null);
       setContrastCaseIds([]);
+      setAddContrast(false);
+      setContrastFacts(initialFacts(context));
+      setContrastOptionId("");
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -324,7 +364,10 @@ export function JudgmentCaseCapture({
         <div style={{ marginTop: "var(--space-3)" }}>
           <SegControl
             value={disposition}
-            onChange={setDisposition}
+            onChange={(next) => {
+              setDisposition(next);
+              if (next !== "automatic_rule") setAddContrast(false);
+            }}
             options={dispositionOptions}
           />
           <p className="page-sub">
@@ -333,7 +376,8 @@ export function JudgmentCaseCapture({
             {disposition === "more_evidence_required" && "This records that the current facts do not justify a branch. Add a contrast case."}
           </p>
           {disposition === "automatic_rule" && (
-            <div className="field">
+            <>
+              <div className="field">
               <label htmlFor="judgment-reviewed-rule">Reviewed rule id</label>
               <input
                 id="judgment-reviewed-rule"
@@ -342,7 +386,48 @@ export function JudgmentCaseCapture({
                 onChange={(event) => setReviewedRuleId(event.target.value)}
                 placeholder="A reviewed policy identifier, not a natural-language rule"
               />
-            </div>
+              </div>
+              <label className="checkbox-row" style={{ marginTop: "var(--space-3)" }}>
+                <input
+                  type="checkbox"
+                  checked={addContrast}
+                  onChange={(event) => setAddContrast(event.target.checked)}
+                />
+                Add a contrasting reviewed case now
+              </label>
+              <span className="page-sub">
+                Flow requires reciprocal contrasting cases before a rule candidate can pass coverage.
+              </span>
+              {addContrast && (
+                <div className="card-inset" style={{ marginTop: "var(--space-3)" }}>
+                  <strong>Contrasting case</strong>
+                  <div className="grid grid-2" style={{ marginTop: "var(--space-3)" }}>
+                    {Object.entries(context.fact_schema.fields).map(([name, field]) => (
+                      <FactInput
+                        key={name}
+                        name={name}
+                        field={field}
+                        facts={contrastFacts}
+                        onChange={(next) => setContrastFacts((current) => ({ ...current, [name]: next }))}
+                        prefix="contrast"
+                      />
+                    ))}
+                  </div>
+                  <div className="field">
+                    <label htmlFor="judgment-contrast-option">Qualified branch for contrasting case</label>
+                    <select
+                      id="judgment-contrast-option"
+                      className="input"
+                      value={contrastOptionId}
+                      onChange={(event) => setContrastOptionId(event.target.value)}
+                    >
+                      <option value="">Select a qualified branch</option>
+                      {context.options.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
+                    </select>
+                  </div>
+                </div>
+              )}
+            </>
           )}
         </div>
         {context.cases.length > 0 && (
@@ -381,6 +466,47 @@ export function JudgmentCaseCapture({
         <span className="page-sub">Flow seals the case into the next qualification revision. This does not create a runtime task.</span>
       </div>
     </Card>
+  );
+}
+
+function FactInput({
+  name,
+  field,
+  facts,
+  onChange,
+  prefix,
+}: {
+  name: string;
+  field: JudgmentFactFieldV1;
+  facts: Record<string, FactValue>;
+  onChange: (value: FactValue) => void;
+  prefix: string;
+}) {
+  const inputId = `judgment-${prefix}-fact-${name}`;
+  return (
+    <div className="field">
+      <label htmlFor={inputId}>{name.replace(/_/g, " ")}</label>
+      {field.type === "boolean" ? (
+        <select id={inputId} className="input" value={String(facts[name])} onChange={(event) => onChange(event.target.value === "true")}>
+          <option value="false">No</option>
+          <option value="true">Yes</option>
+        </select>
+      ) : field.type === "enum" ? (
+        <select id={inputId} className="input" value={String(facts[name])} onChange={(event) => onChange(event.target.value)}>
+          <option value="">Select a value</option>
+          {(field.allowed_values || []).map((value) => <option key={value} value={value}>{value}</option>)}
+        </select>
+      ) : (
+        <input
+          id={inputId}
+          className="input"
+          type={field.type === "integer" || field.type === "number" ? "number" : "text"}
+          value={String(facts[name])}
+          onChange={(event) => onChange(field.type === "integer" || field.type === "number" ? Number(event.target.value) : event.target.value)}
+        />
+      )}
+      <span className="page-sub mono">{field.type}</span>
+    </div>
   );
 }
 
