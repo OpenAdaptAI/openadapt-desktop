@@ -1032,7 +1032,7 @@ export function Qualification({
                 <JudgmentCaseCapture
                   key={`${context.decision.graph_id}-${context.decision.state_id}`}
                   context={context}
-                  onCapture={async (caseItem) => {
+                  onCapture={async (caseItems) => {
                     const schemas = project.controls.judgment_cases.contexts.map((item) => ({
                       graph_id: item.decision.graph_id,
                       state_id: item.decision.state_id,
@@ -1040,7 +1040,7 @@ export function Qualification({
                     }));
                     const cases = [
                       ...project.controls.judgment_cases.contexts.flatMap((item) => item.cases),
-                      caseItem,
+                      ...caseItems,
                     ];
                     const response = await engineInvoke<QualificationResponse>(
                       CMD.SET_QUALIFICATION_JUDGMENT_CASES,
