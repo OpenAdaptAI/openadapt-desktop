@@ -174,8 +174,8 @@ export function DecisionPortal() {
       {!published && (
         <Callout tone="info">
           The portal is available on this computer only. To let a phone reach
-          it, publish it through your organization&rsquo;s own HTTPS or VPN
-          ingress: set <code>portal_ingress_mode</code> to{" "}
+          it, publish it as your organization&rsquo;s own HTTPS origin through a
+          reverse proxy or VPN: set <code>portal_ingress_mode</code> to{" "}
           <code>customer_ingress</code>, set <code>portal_public_origin</code> to
           the https hostname your reverse proxy serves, and set{" "}
           <code>portal_ingress_acknowledged</code> to true. OpenAdapt will not

@@ -93,7 +93,8 @@ typed result. A refusal leaves the run paused. The detailed portal guide shows
 the corresponding result screen.
 
 The local portal can serve an approved retained raster frame through the
-customer's own HTTPS or VPN ingress. The hosted outbound lane carries a signed,
+customer-operated HTTPS origin, published by a reverse proxy or VPN. The
+hosted outbound lane carries a signed,
 remote-safe task without pixels. Device pairing authenticates the device
 session; it does not authenticate the named operator principal that a
 qualification policy can require for decision attribution.

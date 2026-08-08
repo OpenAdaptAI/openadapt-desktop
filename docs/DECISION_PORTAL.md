@@ -4,11 +4,13 @@ When a governed run cannot confirm something, OpenAdapt halts instead of
 guessing. This portal is how that question reaches a staff member's phone with
 the approved local evidence -- raster screen crops, the gated control label,
 and the typed halt detail -- without sending that evidence to OpenAdapt Cloud.
-The phone fetches it through an HTTPS or VPN ingress that the customer controls.
+The phone fetches it through a customer-operated HTTPS origin, published by a
+reverse proxy or VPN.
 
 Customers can use this full-evidence local portal or Flow's hosted outbound
-lane. The local portal needs a customer-operated HTTPS or VPN ingress. The
-hosted lane dials **out** to the control plane and needs no inbound port; it
+lane. The local portal needs a customer-operated HTTPS origin, published by a
+reverse proxy or VPN. The hosted lane dials **out** to the control plane and
+needs no inbound port; it
 carries the signed remote-safe task and the closed halt context, never pixels.
 See
 [Answering a halt with no ingress](#answering-a-halt-with-no-ingress).
