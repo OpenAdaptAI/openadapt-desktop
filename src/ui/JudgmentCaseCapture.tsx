@@ -50,6 +50,7 @@ export function JudgmentCaseCapture({
   onCapture: (caseItem: JudgmentCaseV1) => void;
 }) {
   const [source, setSource] = useState(context.allowed_sources[0] || "demonstration");
+  const [sourceRefSha256, setSourceRefSha256] = useState("");
   const [facts, setFacts] = useState<Record<string, FactValue>>(() => initialFacts(context));
   const [optionId, setOptionId] = useState("");
   const [disposition, setDisposition] =
@@ -86,6 +87,10 @@ export function JudgmentCaseCapture({
 
   function capture() {
     setError("");
+    if (!/^[a-f0-9]{64}$/i.test(sourceRefSha256.trim())) {
+      setError("The local source reference needs a SHA-256 digest.");
+      return;
+    }
     if (disposition !== "more_evidence_required" && !optionId) {
       setError("Select the branch that this reviewed case supports.");
       return;
@@ -111,7 +116,7 @@ export function JudgmentCaseCapture({
       review_note_ref: note,
       provenance: {
         source,
-        source_ref_sha256: context.decision.decision_contract_sha256,
+        source_ref_sha256: sourceRefSha256.trim(),
         reviewer_role: context.reviewer.role,
         reviewer_principal_ref_sha256: context.reviewer.principal_ref_sha256,
       },
@@ -150,6 +155,17 @@ export function JudgmentCaseCapture({
               label: value.replace(/_/g, " "),
             }))}
           />
+        </div>
+        <div className="field">
+          <label htmlFor="judgment-source-digest">Local source SHA-256</label>
+          <input
+            id="judgment-source-digest"
+            className="input mono"
+            value={sourceRefSha256}
+            onChange={(event) => setSourceRefSha256(event.target.value)}
+            placeholder="Digest of the local demo, shadow run, or counterfactual source"
+          />
+          <span className="page-sub">The source stays local. Flow records only this reference.</span>
         </div>
         <div className="field">
           <label htmlFor="judgment-option">Reviewed branch</label>
