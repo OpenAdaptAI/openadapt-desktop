@@ -374,10 +374,7 @@ export interface JudgmentCaseCaptureContextV1 {
   fact_schema: JudgmentFactSchemaV1;
   fact_schema_sha256: string;
   options: { id: string; label: string }[];
-  reviewer: {
-    role: string;
-    principal_ref_sha256: string;
-  };
+  authorized_roles: string[];
   cases: JudgmentCaseV1[];
 }
 
@@ -389,6 +386,13 @@ export interface JudgmentCaseQualificationReportV1 {
   automatic_case_count: number;
   retained_human_authority_count: number;
   findings: { code: string; case_id?: string | null; message: string }[];
+}
+
+export interface QualificationJudgmentCaseControls {
+  available: boolean;
+  required_flow_capability: "qualification.set_judgment_cases";
+  contexts: JudgmentCaseCaptureContextV1[];
+  report: JudgmentCaseQualificationReportV1 | null;
 }
 
 export interface QualificationViolation {
@@ -527,6 +531,7 @@ export interface QualificationProject {
     parameters: QualificationParameter[];
     actions: Record<string, QualificationActionControls>;
     business_decisions: QualificationBusinessDecisionControls;
+    judgment_cases: QualificationJudgmentCaseControls;
   };
 }
 
