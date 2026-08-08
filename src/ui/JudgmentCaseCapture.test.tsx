@@ -39,6 +39,9 @@ describe("JudgmentCaseCapture", () => {
     const onCapture = vi.fn();
     render(<JudgmentCaseCapture context={context()} onCapture={onCapture} />);
 
+    fireEvent.change(screen.getByLabelText("Local source SHA-256"), {
+      target: { value: "f".repeat(64) },
+    });
     fireEvent.change(screen.getByLabelText("Reviewed branch"), {
       target: { value: "priority_review" },
     });
@@ -75,7 +78,7 @@ describe("JudgmentCaseCapture", () => {
         }),
         provenance: {
           source: "historical_case",
-          source_ref_sha256: "b".repeat(64),
+          source_ref_sha256: "f".repeat(64),
           reviewer_role: "scheduling_lead",
           reviewer_principal_ref_sha256: "d".repeat(64),
         },
@@ -87,6 +90,9 @@ describe("JudgmentCaseCapture", () => {
     const onCapture = vi.fn();
     render(<JudgmentCaseCapture context={context()} onCapture={onCapture} />);
 
+    fireEvent.change(screen.getByLabelText("Local source SHA-256"), {
+      target: { value: "f".repeat(64) },
+    });
     fireEvent.click(screen.getByRole("button", { name: "Rule candidate" }));
     fireEvent.click(screen.getByTestId("capture-judgment-case"));
 
