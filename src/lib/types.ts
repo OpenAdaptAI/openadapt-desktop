@@ -305,7 +305,7 @@ export interface QualificationBusinessDecisionControls {
 export interface LocalEvidenceRefV1 {
   relative_path: string;
   sha256: string;
-  kind: string;
+  kind: "frame" | "recording" | "report" | "document" | "system_read";
 }
 
 export type JudgmentFactTypeV1 =
@@ -321,7 +321,14 @@ export interface JudgmentFactFieldV1 {
 }
 
 export interface JudgmentFactSchemaV1 {
+  schema_version: "openadapt.judgment-fact-schema/v1";
   fields: Record<string, JudgmentFactFieldV1>;
+}
+
+export interface JudgmentFactSchemaBindingV1 {
+  graph_id: string;
+  state_id: string;
+  fact_schema: JudgmentFactSchemaV1;
 }
 
 export interface JudgmentCaseProvenanceV1 {
@@ -371,8 +378,17 @@ export interface JudgmentCaseCaptureContextV1 {
     role: string;
     principal_ref_sha256: string;
   };
-  allowed_sources: string[];
   cases: JudgmentCaseV1[];
+}
+
+export interface JudgmentCaseQualificationReportV1 {
+  schema_version: "openadapt.judgment-case-report/v1";
+  workflow_contract_sha256: string;
+  passed: boolean;
+  case_count: number;
+  automatic_case_count: number;
+  retained_human_authority_count: number;
+  findings: { code: string; case_id?: string | null; message: string }[];
 }
 
 export interface QualificationViolation {

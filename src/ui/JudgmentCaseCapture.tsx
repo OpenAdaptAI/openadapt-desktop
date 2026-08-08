@@ -9,6 +9,8 @@ import { Button, Callout, Card, CardHead, Pill, SegControl } from "./primitives"
 
 type FactValue = boolean | number | string;
 
+type JudgmentSource = "demonstration" | "counterfactual" | "policy_review" | "fault";
+
 const dispositionOptions: { value: JudgmentDispositionV1; label: string }[] = [
   { value: "automatic_rule", label: "Rule candidate" },
   { value: "human_node", label: "Keep human decision" },
@@ -49,10 +51,11 @@ export function JudgmentCaseCapture({
   context: JudgmentCaseCaptureContextV1;
   onCapture: (caseItem: JudgmentCaseV1) => void;
 }) {
-  const [source, setSource] = useState(context.allowed_sources[0] || "demonstration");
+  const [source, setSource] = useState<JudgmentSource>("demonstration");
   const [sourceRefSha256, setSourceRefSha256] = useState("");
   const [facts, setFacts] = useState<Record<string, FactValue>>(() => initialFacts(context));
   const [optionId, setOptionId] = useState("");
+  const [reviewedRuleId, setReviewedRuleId] = useState("");
   const [disposition, setDisposition] =
     useState<JudgmentDispositionV1>("human_node");
   const [evidence, setEvidence] = useState<LocalEvidenceRefV1[]>([]);
@@ -91,8 +94,12 @@ export function JudgmentCaseCapture({
       setError("The local source reference needs a SHA-256 digest.");
       return;
     }
-    if (disposition !== "more_evidence_required" && !optionId) {
-      setError("Select the branch that this reviewed case supports.");
+    if (disposition === "automatic_rule" && (!optionId || !reviewedRuleId.trim())) {
+      setError("A rule candidate needs a reviewed rule id and a qualified branch.");
+      return;
+    }
+    if (!evidence.length) {
+      setError("Add at least one local evidence reference for this reviewed case.");
       return;
     }
     for (const [index, reference] of evidence.entries()) {
@@ -121,11 +128,13 @@ export function JudgmentCaseCapture({
         reviewer_principal_ref_sha256: context.reviewer.principal_ref_sha256,
       },
       disposition,
-      option_id: optionId || null,
+      reviewed_rule_id: disposition === "automatic_rule" ? reviewedRuleId.trim() : null,
+      option_id: disposition === "automatic_rule" ? optionId : null,
       contrast_case_ids: contrastCaseIds,
     });
     setFacts(initialFacts(context));
     setOptionId("");
+    setReviewedRuleId("");
     setEvidence([]);
     setNote(null);
     setContrastCaseIds([]);
@@ -150,10 +159,12 @@ export function JudgmentCaseCapture({
           <SegControl
             value={source}
             onChange={setSource}
-            options={context.allowed_sources.map((value) => ({
-              value,
-              label: value.replace(/_/g, " "),
-            }))}
+            options={[
+              { value: "demonstration", label: "demonstration" },
+              { value: "counterfactual", label: "counterfactual" },
+              { value: "policy_review", label: "policy review" },
+              { value: "fault", label: "fault" },
+            ]}
           />
         </div>
         <div className="field">
@@ -168,13 +179,13 @@ export function JudgmentCaseCapture({
           <span className="page-sub">The source stays local. Flow records only this reference.</span>
         </div>
         <div className="field">
-          <label htmlFor="judgment-option">Reviewed branch</label>
+          <label htmlFor="judgment-option">Qualified branch for a rule candidate</label>
           <select
             id="judgment-option"
             className="input"
             value={optionId}
             onChange={(event) => setOptionId(event.target.value)}
-            disabled={disposition === "more_evidence_required"}
+            disabled={disposition !== "automatic_rule"}
           >
             <option value="">Select a qualified branch</option>
             {context.options.map((option) => (
@@ -281,6 +292,18 @@ export function JudgmentCaseCapture({
             {disposition === "human_node" && "This preserves a permanent human decision node for this case."}
             {disposition === "more_evidence_required" && "This records that the current facts do not justify a branch. Add a contrast case."}
           </p>
+          {disposition === "automatic_rule" && (
+            <div className="field">
+              <label htmlFor="judgment-reviewed-rule">Reviewed rule id</label>
+              <input
+                id="judgment-reviewed-rule"
+                className="input mono"
+                value={reviewedRuleId}
+                onChange={(event) => setReviewedRuleId(event.target.value)}
+                placeholder="A reviewed policy identifier, not a natural-language rule"
+              />
+            </div>
+          )}
         </div>
         {context.cases.length > 0 && (
           <div className="field" style={{ marginTop: "var(--space-3)" }}>
@@ -345,7 +368,23 @@ function EvidenceReference({
         </div>
         <div className="field">
           <label>Kind</label>
-          <input className="input" aria-label={`${label} kind`} value={value.kind} onChange={(event) => onChange({ ...value, kind: event.target.value })} />
+          <select
+            className="input"
+            aria-label={`${label} kind`}
+            value={value.kind}
+            onChange={(event) =>
+              onChange({
+                ...value,
+                kind: event.target.value as LocalEvidenceRefV1["kind"],
+              })
+            }
+          >
+            <option value="frame">frame</option>
+            <option value="recording">recording</option>
+            <option value="report">report</option>
+            <option value="document">document</option>
+            <option value="system_read">system read</option>
+          </select>
         </div>
       </div>
       <Button onClick={onRemove}>Remove</Button>

@@ -14,6 +14,7 @@ function context(): JudgmentCaseCaptureContextV1 {
       decision_contract_sha256: "b".repeat(64),
     },
     fact_schema: {
+      schema_version: "openadapt.judgment-fact-schema/v1",
       fields: {
         service_level: { type: "enum", allowed_values: ["standard", "urgent"] },
         reserved_capacity_available: { type: "boolean" },
@@ -27,7 +28,6 @@ function context(): JudgmentCaseCaptureContextV1 {
       { id: "supervisor", label: "Supervisor" },
     ],
     reviewer: { role: "scheduling_lead", principal_ref_sha256: "d".repeat(64) },
-    allowed_sources: ["historical_case", "counterfactual"],
     cases: [],
   };
 }
@@ -42,9 +42,6 @@ describe("JudgmentCaseCapture", () => {
     fireEvent.change(screen.getByLabelText("Local source SHA-256"), {
       target: { value: "f".repeat(64) },
     });
-    fireEvent.change(screen.getByLabelText("Reviewed branch"), {
-      target: { value: "priority_review" },
-    });
     fireEvent.change(screen.getByLabelText("service level"), {
       target: { value: "urgent" },
     });
@@ -53,6 +50,13 @@ describe("JudgmentCaseCapture", () => {
     });
     fireEvent.change(screen.getByLabelText("days waiting"), { target: { value: "4" } });
     fireEvent.click(screen.getByRole("button", { name: "Add local review note" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add local evidence" }));
+    fireEvent.change(screen.getByLabelText("Evidence reference 1 local path"), {
+      target: { value: "evidence/retained-frame.png" },
+    });
+    fireEvent.change(screen.getByLabelText("Evidence reference 1 SHA-256"), {
+      target: { value: "1".repeat(64) },
+    });
     fireEvent.change(screen.getByLabelText("Optional local review note local path"), {
       target: { value: "evidence/review-note.txt" },
     });
@@ -70,14 +74,14 @@ describe("JudgmentCaseCapture", () => {
           reserved_capacity_available: true,
           days_waiting: 4,
         },
-        option_id: "priority_review",
+        option_id: null,
         disposition: "human_node",
         review_note_ref: expect.objectContaining({
           relative_path: "evidence/review-note.txt",
           sha256: "e".repeat(64),
         }),
         provenance: {
-          source: "historical_case",
+          source: "demonstration",
           source_ref_sha256: "f".repeat(64),
           reviewer_role: "scheduling_lead",
           reviewer_principal_ref_sha256: "d".repeat(64),
@@ -97,6 +101,6 @@ describe("JudgmentCaseCapture", () => {
     fireEvent.click(screen.getByTestId("capture-judgment-case"));
 
     expect(onCapture).not.toHaveBeenCalled();
-    expect(screen.getByText("Select the branch that this reviewed case supports.")).toBeTruthy();
+    expect(screen.getByText("A rule candidate needs a reviewed rule id and a qualified branch.")).toBeTruthy();
   });
 });
