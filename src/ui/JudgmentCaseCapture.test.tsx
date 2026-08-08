@@ -27,7 +27,7 @@ function context(): JudgmentCaseCaptureContextV1 {
       { id: "standard_review", label: "Standard review" },
       { id: "supervisor", label: "Supervisor" },
     ],
-    reviewer: { role: "scheduling_lead", principal_ref_sha256: "d".repeat(64) },
+    authorized_roles: ["scheduling_lead", "supervisor"],
     cases: [],
   };
 }
@@ -41,6 +41,9 @@ describe("JudgmentCaseCapture", () => {
 
     fireEvent.change(screen.getByLabelText("Local source SHA-256"), {
       target: { value: "f".repeat(64) },
+    });
+    fireEvent.change(screen.getByLabelText("Local reviewer reference SHA-256"), {
+      target: { value: "d".repeat(64) },
     });
     fireEvent.change(screen.getByLabelText("service level"), {
       target: { value: "urgent" },
@@ -96,6 +99,9 @@ describe("JudgmentCaseCapture", () => {
 
     fireEvent.change(screen.getByLabelText("Local source SHA-256"), {
       target: { value: "f".repeat(64) },
+    });
+    fireEvent.change(screen.getByLabelText("Local reviewer reference SHA-256"), {
+      target: { value: "d".repeat(64) },
     });
     fireEvent.click(screen.getByRole("button", { name: "Rule candidate" }));
     fireEvent.click(screen.getByTestId("capture-judgment-case"));

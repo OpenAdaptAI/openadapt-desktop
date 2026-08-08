@@ -49,19 +49,22 @@ export function JudgmentCaseCapture({
   onCapture,
 }: {
   context: JudgmentCaseCaptureContextV1;
-  onCapture: (caseItem: JudgmentCaseV1) => void;
+  onCapture: (caseItem: JudgmentCaseV1) => Promise<void>;
 }) {
   const [source, setSource] = useState<JudgmentSource>("demonstration");
   const [sourceRefSha256, setSourceRefSha256] = useState("");
   const [facts, setFacts] = useState<Record<string, FactValue>>(() => initialFacts(context));
   const [optionId, setOptionId] = useState("");
   const [reviewedRuleId, setReviewedRuleId] = useState("");
+  const [reviewerRole, setReviewerRole] = useState(context.authorized_roles[0] || "");
+  const [reviewerPrincipalRef, setReviewerPrincipalRef] = useState("");
   const [disposition, setDisposition] =
     useState<JudgmentDispositionV1>("human_node");
   const [evidence, setEvidence] = useState<LocalEvidenceRefV1[]>([]);
   const [note, setNote] = useState<LocalEvidenceRefV1 | null>(null);
   const [contrastCaseIds, setContrastCaseIds] = useState<string[]>([]);
   const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
 
   const conflicts = useMemo(() => {
     const groups = new Map<string, Set<string>>();
@@ -88,10 +91,18 @@ export function JudgmentCaseCapture({
     return null;
   }
 
-  function capture() {
+  async function capture() {
     setError("");
     if (!/^[a-f0-9]{64}$/i.test(sourceRefSha256.trim())) {
       setError("The local source reference needs a SHA-256 digest.");
+      return;
+    }
+    if (!reviewerRole || !context.authorized_roles.includes(reviewerRole)) {
+      setError("Select a reviewer role that the qualified decision permits.");
+      return;
+    }
+    if (!/^[a-f0-9]{64}$/i.test(reviewerPrincipalRef.trim())) {
+      setError("The local reviewer reference needs a SHA-256 digest.");
       return;
     }
     if (disposition === "automatic_rule" && (!optionId || !reviewedRuleId.trim())) {
@@ -114,7 +125,9 @@ export function JudgmentCaseCapture({
       setError("A contrast case must refer to a saved local case.");
       return;
     }
-    onCapture({
+    setBusy(true);
+    try {
+      await onCapture({
       id: caseId(),
       decision: context.decision,
       fact_schema_sha256: context.fact_schema_sha256,
@@ -124,20 +137,25 @@ export function JudgmentCaseCapture({
       provenance: {
         source,
         source_ref_sha256: sourceRefSha256.trim(),
-        reviewer_role: context.reviewer.role,
-        reviewer_principal_ref_sha256: context.reviewer.principal_ref_sha256,
+          reviewer_role: reviewerRole,
+          reviewer_principal_ref_sha256: reviewerPrincipalRef.trim(),
       },
       disposition,
       reviewed_rule_id: disposition === "automatic_rule" ? reviewedRuleId.trim() : null,
       option_id: disposition === "automatic_rule" ? optionId : null,
       contrast_case_ids: contrastCaseIds,
-    });
-    setFacts(initialFacts(context));
-    setOptionId("");
-    setReviewedRuleId("");
-    setEvidence([]);
-    setNote(null);
-    setContrastCaseIds([]);
+      });
+      setFacts(initialFacts(context));
+      setOptionId("");
+      setReviewedRuleId("");
+      setEvidence([]);
+      setNote(null);
+      setContrastCaseIds([]);
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
@@ -165,6 +183,28 @@ export function JudgmentCaseCapture({
               { value: "policy_review", label: "policy review" },
               { value: "fault", label: "fault" },
             ]}
+          />
+        </div>
+        <div className="field">
+          <label htmlFor="judgment-reviewer-role">Reviewer role</label>
+          <select
+            id="judgment-reviewer-role"
+            className="input"
+            value={reviewerRole}
+            onChange={(event) => setReviewerRole(event.target.value)}
+          >
+            <option value="">Select an authorized role</option>
+            {context.authorized_roles.map((role) => <option key={role} value={role}>{role}</option>)}
+          </select>
+        </div>
+        <div className="field">
+          <label htmlFor="judgment-reviewer-digest">Local reviewer reference SHA-256</label>
+          <input
+            id="judgment-reviewer-digest"
+            className="input mono"
+            value={reviewerPrincipalRef}
+            onChange={(event) => setReviewerPrincipalRef(event.target.value)}
+            placeholder="Digest of the authenticated local reviewer reference"
           />
         </div>
         <div className="field">
@@ -335,8 +375,8 @@ export function JudgmentCaseCapture({
 
       {error && <Callout tone="crit" title="Case not saved">{error}</Callout>}
       <div className="row" style={{ marginTop: "var(--space-4)" }}>
-        <Button variant="primary" onClick={capture} data-testid="capture-judgment-case">
-          Save reviewed case locally
+        <Button variant="primary" disabled={busy} onClick={() => void capture()} data-testid="capture-judgment-case">
+          {busy ? "Saving…" : "Save reviewed case locally"}
         </Button>
         <span className="page-sub">Flow seals the case into the next qualification revision. This does not create a runtime task.</span>
       </div>
