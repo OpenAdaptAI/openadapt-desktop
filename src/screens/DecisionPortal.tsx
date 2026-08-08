@@ -122,8 +122,8 @@ export function DecisionPortal() {
       <header className="page-head">
         <h2>Decisions on a phone</h2>
         <span className="page-sub">
-          When a run halts, staff answer the question from their phone. The
-          question, the evidence, and the outcome stay on this computer.
+          When a run halts, a paired staff device can review the signed task.
+          The runner checks the live application again before an action resumes.
         </span>
       </header>
 
@@ -290,7 +290,14 @@ export function DecisionPortal() {
       </Card>
 
       <Card>
-        <CardHead eyebrow="Paired phones" title="Devices" />
+        <CardHead
+          eyebrow="Paired phones"
+          title="Devices"
+          sub={
+            "Pairing authenticates this device. It does not authenticate the " +
+            "operator identity that your policy can require."
+          }
+        />
         {status.devices.length === 0 ? (
           <EmptyState
             title="No phones paired"
