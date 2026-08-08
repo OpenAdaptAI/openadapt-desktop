@@ -296,6 +296,85 @@ export interface QualificationBusinessDecisionControls {
   }[];
 }
 
+/**
+ * Local-only qualification evidence for an institutional-judgment case.
+ *
+ * A reference never contains a screenshot, a record value, or free text. The
+ * Desktop and Flow resolve it inside the customer boundary.
+ */
+export interface LocalEvidenceRefV1 {
+  relative_path: string;
+  sha256: string;
+  kind: string;
+}
+
+export type JudgmentFactTypeV1 =
+  | "boolean"
+  | "integer"
+  | "number"
+  | "string"
+  | "enum";
+
+export interface JudgmentFactFieldV1 {
+  type: JudgmentFactTypeV1;
+  allowed_values?: string[];
+}
+
+export interface JudgmentFactSchemaV1 {
+  fields: Record<string, JudgmentFactFieldV1>;
+}
+
+export interface JudgmentCaseProvenanceV1 {
+  source: string;
+  source_ref_sha256: string;
+  reviewer_role: string;
+  reviewer_principal_ref_sha256: string;
+}
+
+export interface JudgmentDecisionBindingV1 {
+  graph_id: string;
+  state_id: string;
+  workflow_contract_sha256: string;
+  decision_contract_sha256: string;
+}
+
+export type JudgmentDispositionV1 =
+  | "automatic_rule"
+  | "human_node"
+  | "more_evidence_required";
+
+/** The exact local qualification payload owned and validated by Flow. */
+export interface JudgmentCaseV1 {
+  id: string;
+  decision: JudgmentDecisionBindingV1;
+  fact_schema_sha256: string;
+  facts: Record<string, boolean | number | string>;
+  local_evidence: LocalEvidenceRefV1[];
+  review_note_ref?: LocalEvidenceRefV1 | null;
+  provenance: JudgmentCaseProvenanceV1;
+  disposition: JudgmentDispositionV1;
+  reviewed_rule_id?: string | null;
+  option_id?: string | null;
+  contrast_case_ids: string[];
+}
+
+/**
+ * Flow supplies this local read model. It is intentionally not a portable
+ * decision-task type and it cannot authorize a runtime answer.
+ */
+export interface JudgmentCaseCaptureContextV1 {
+  decision: JudgmentDecisionBindingV1;
+  fact_schema: JudgmentFactSchemaV1;
+  fact_schema_sha256: string;
+  options: { id: string; label: string }[];
+  reviewer: {
+    role: string;
+    principal_ref_sha256: string;
+  };
+  allowed_sources: string[];
+  cases: JudgmentCaseV1[];
+}
+
 export interface QualificationViolation {
   rule: string;
   step_id?: string | null;
