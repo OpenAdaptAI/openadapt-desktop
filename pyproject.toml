@@ -43,7 +43,7 @@ dependencies = [
     # exporter and by the generated TypeScript projection checked into src/.
     # 0.7.0 carries the portable attended-reconciliation action used by the
     # Desktop phone portal and Flow's governed runner.
-    "openadapt-types==0.7.0",
+    "openadapt-types==0.10.0",
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
     "PyYAML>=6.0,<7",
@@ -89,14 +89,14 @@ build = [
     # purpose (see the pin below and the embedded ``-m playwright`` process
     # mode). Without it the driver becomes build-only and the artifact gate
     # correctly refuses the archive.
-    "openadapt-flow[browser,console]==1.27.1",
+    "openadapt-flow[browser,console]==1.31.0",
     # Desktop deliberately embeds the optional browser driver so selecting a
     # web workflow is one click. It does NOT bundle Chromium: that larger
     # runtime is fetched only after the operator chooses the browser surface.
     "playwright>=1.44",
     # ONNX Runtime 1.27 dropped macOS Intel wheels. Flow's RapidOCR dependency
     # accepts this universal2 release, which retains Python 3.12 Intel support.
-    "onnxruntime==1.20.1; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    "onnxruntime==1.28.0; sys_platform == 'darwin' and platform_machine == 'x86_64'",
     # Keep the current runtime everywhere it publishes a compatible wheel.
     "onnxruntime==1.27.0; sys_platform != 'darwin' or platform_machine != 'x86_64'",
 ]
