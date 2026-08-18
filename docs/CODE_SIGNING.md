@@ -4,17 +4,17 @@ This is the step-by-step guide to move OpenAdapt Desktop installers from
 **Beta / unsigned** to **signed and trusted**. It lists exactly what to
 buy, which secrets to add, and what each public surface may then truthfully say.
 
-Nothing here changes how the app is built until the secrets exist. The release
-workflow already fails **open** to today's ad-hoc/unsigned behaviour when a
-credential set is absent, and fails **closed** (the build errors) only when a
-set is *partially* configured. You can therefore add one platform at a time.
+The regular build workflow can still produce explicit ad-hoc or unsigned CI
+artifacts. The native release workflow is stricter. It fails closed unless
+macOS has the complete Developer ID and notarization set and Windows has one
+complete Authenticode method. It also fails closed on a partial set.
 
 ## How signing is wired (read once)
 
 - `scripts/native_signing.py preflight --platform <macos|windows|linux>` inspects
   the `native-release` environment secrets and emits two values to the workflow:
-  - `mode` — the honest signing label (`adhoc`/`unsigned` with no secrets, or
-    `developer-id-notarized`/`authenticode` once a complete set is present).
+  - `mode` — the honest signing label (`adhoc`/`unsigned` for local and CI
+    builds, or `developer-id-notarized`/`authenticode` for native releases).
   - `method` — *how* a signed Windows artifact is produced (`pfx` vs
     `trusted-signing`); `pfx`/`adhoc`/`unsigned` otherwise.
 - The `mode` is baked into every artifact **filename**:
@@ -32,8 +32,8 @@ set is *partially* configured. You can therefore add one platform at a time.
 - The macOS engine is a PyInstaller one-file sidecar. Developer ID jobs pass
   `APPLE_SIGNING_IDENTITY` into both PyInstaller and Tauri so the embedded
   Python libraries and final launcher share one Team ID under hardened runtime.
-  Identity-less prereleases use `tauri.adhoc.conf.json` without hardened
-  runtime. The installed-app smoke executes bundled Flow after Tauri's final
+  Identity-less CI builds use `tauri.adhoc.conf.json` without hardened runtime.
+  The installed-app smoke executes bundled Flow after Tauri's final
   signing pass; a bundle that is signed but cannot load its engine fails.
 
 All secrets below live in the protected **`native-release`** GitHub Actions
@@ -159,39 +159,34 @@ If you do have an importable `.pfx`:
 
 ---
 
-## 3. Linux — GPG (free, deferred by design)
+## 3. Linux — exact-byte GitHub attestation
 
-GPG is free (`gpg --full-generate-key`). Linux package signing is **intentionally
-disabled** in `native_signing.py` today: AppImage does not self-verify, and DEB
-signing is a separate repository-metadata boundary, so shipping a signature
-without a *pinned external validator and an authenticated public-key channel*
-would be signing-theatre. The secret names are reserved
-(`LINUX_GPG_PRIVATE_KEY`, `LINUX_GPG_KEY_ID`, `LINUX_GPG_PASSPHRASE`,
-`LINUX_GPG_FINGERPRINT`) and the preflight fails closed if any are set, to
-prevent accidental half-signing.
+DEB and AppImage do not share one native trust format. A detached GPG signature
+would also require a separate authenticated public-key channel. The production
+release therefore uses GitHub's OIDC artifact attestation as the Linux trust
+boundary. The release job attests the exact DEB and AppImage hashes and then
+runs `gh attestation verify` on both files before it can upload the release set.
 
-**To activate later** (a deliberate follow-up, not part of this readiness step):
-publish the public key fingerprint over an authenticated channel (e.g. the
-website + `SHA256SUMS` attestation), add a pinned AppImage signature validator to
-the smoke test, and add `gpg` to the Linux `SIGNING_MODES` in
-`scripts/native_release.py`. Until then Linux ships `unsigned` **plus** GitHub
-build provenance (attestation over `SHA256SUMS`), which is the honest state.
+This state is named `github-attested`. It is not called native-signed. It needs
+no founder-managed signing secret. GitHub issues the short-lived OIDC identity
+for the pinned release workflow. `SHA256SUMS` and the website manifest bind the
+same exact bytes for offline hash checks.
 
 ---
 
 ## What each surface can truthfully claim
 
-Only claim a state after the corresponding secret set is live and a signed
+Only claim a state after the corresponding secret set is live and a trusted
 release has actually built. The artifact filename token is the source of truth.
 
-| Surface | With no secrets (today) | After macOS Developer ID | After Windows Authenticode | After Linux GPG |
+| Surface | With no secrets | After macOS Developer ID | After Windows Authenticode | Linux OIDC attestation |
 | --- | --- | --- | --- | --- |
-| /download page | "Beta. macOS builds are ad-hoc signed; Windows/Linux are unsigned." | "**Signed and notarized by Apple** on macOS — opens without a Gatekeeper override." | "**Signed with a trusted Authenticode certificate** on Windows — no SmartScreen 'unknown publisher' warning." | "Linux packages are **GPG-signed**; verify against our published key." |
-| Trust center | "Ad-hoc/unsigned; verify via `SHA256SUMS` + GitHub attestation." | Add: "macOS DMGs pass Apple notarization (`spctl` accepted, ticket stapled)." | Add: "Windows installers carry a valid, timestamped Authenticode signature." | Add: "Linux packages carry a detached GPG signature; fingerprint published." |
-| README honesty note | "Native packages remain Beta and unsigned." | Update the note per platform as each lands. |  |  |
+| /download page | No new native release; the release gate stops. | "**Signed and notarized by Apple** on macOS — opens without a Gatekeeper override." | "**Signed with a trusted Authenticode certificate** on Windows." | "Linux DEB and AppImage downloads have **GitHub OIDC attestations over the exact bytes**." |
+| Trust center | Existing historical Beta artifacts keep their encoded signing state. | Add: "macOS DMGs pass Apple notarization (`spctl` accepted, ticket stapled)." | Add: "Windows installers carry a valid, timestamped Authenticode signature." | Add: "Linux packages pass `gh attestation verify` against this repository." |
+| README honesty note | Describe only the latest published artifact set. | Update the note after the first trusted release. | Update the note after the first trusted release. | Update the note after the first trusted release. |
 
 The README signing note and `docs/BETA_NATIVE_INSTALLERS.md` both point
-here; update their per-platform wording when each platform's first **signed**
+here; update their per-platform wording when each platform's first **trusted**
 release ships (not when the secrets are merely added). The download page needs no
 code change to detect signing — it reads the `-<signing>-` token in the asset
 name — only the human-readable claim wording changes.

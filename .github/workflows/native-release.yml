@@ -39,15 +39,9 @@ jobs:
     name: macOS ${{ matrix.architecture }}
     needs: validate
     runs-on: ${{ matrix.os }}
-    # No `environment:` gate: this job is sandboxed build-and-smoke-test compute
-    # on an ephemeral runner. It produces artifacts only and performs no
-    # irreversible external effect, so it runs without manual approval. The human
-    # `native-release` reviewer gate is retained on `publish-draft`, the single
-    # point where installer bytes are written to a GitHub Release.
-    # SIGNING CAVEAT: if Apple signing secrets are later activated they must be
-    # stored as REPOSITORY secrets (they are read directly from `secrets.*` here).
-    # If instead signing material must be gated behind manual approval before it
-    # is exercised, re-add `environment: native-release` to this job.
+    # The protected environment owns the Developer ID identity and notary
+    # credentials. A native release cannot fall back to an ad-hoc artifact.
+    environment: native-release
     permissions:
       contents: read
     strategy:
@@ -89,6 +83,7 @@ jobs:
         run: >-
           python scripts/native_signing.py preflight
           --platform macos
+          --require-mode developer-id-notarized
           --github-output "${GITHUB_OUTPUT}"
 
       - name: Import Developer ID certificate into an ephemeral keychain
@@ -194,10 +189,9 @@ jobs:
     name: Windows x86_64
     needs: validate
     runs-on: windows-2022
-    # No `environment:` gate: sandboxed build-and-smoke-test compute only (see the
-    # macOS job note). Windows Authenticode / Azure Trusted Signing secrets, when
-    # activated, must be REPOSITORY secrets, or re-add `environment: native-release`
-    # here to gate signing-material use behind manual approval.
+    # The protected environment owns either Azure Trusted Signing or the PFX
+    # identity. A native release cannot fall back to unsigned installers.
+    environment: native-release
     permissions:
       contents: read
     steps:
@@ -223,10 +217,17 @@ jobs:
           WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
           WINDOWS_CERTIFICATE_THUMBPRINT: ${{ secrets.WINDOWS_CERTIFICATE_THUMBPRINT }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          TRUSTED_SIGNING_ENDPOINT: ${{ secrets.TRUSTED_SIGNING_ENDPOINT }}
+          TRUSTED_SIGNING_ACCOUNT: ${{ secrets.TRUSTED_SIGNING_ACCOUNT }}
+          TRUSTED_SIGNING_CERTIFICATE_PROFILE: ${{ secrets.TRUSTED_SIGNING_CERTIFICATE_PROFILE }}
         shell: pwsh
         run: >-
           python scripts/native_signing.py preflight
           --platform windows
+          --require-mode authenticode
           --github-output "$env:GITHUB_OUTPUT"
 
       - name: Import Authenticode certificate and write signing config
@@ -374,11 +375,12 @@ jobs:
           Remove-Item -LiteralPath $env:OPENADAPT_WINDOWS_CERTIFICATE_PATH -Force -ErrorAction SilentlyContinue
 
   build-linux:
-    name: Linux x86_64 (unsigned + provenance)
+    name: Linux x86_64 (GitHub-attested bytes)
     needs: validate
     runs-on: ubuntu-22.04
-    # No `environment:` gate: sandboxed unsigned build-and-smoke-test compute only
-    # (see the macOS job note). Linux package signing is deferred by design.
+    # DEB and AppImage have no one shared native signing format. The attest job
+    # below uses GitHub OIDC to sign provenance for the exact staged bytes and
+    # verifies those attestations before any release can be created.
     permissions:
       contents: read
     steps:
@@ -409,14 +411,6 @@ jobs:
         with:
           toolchain: "1.97.0"
           targets: x86_64-unknown-linux-gnu
-
-      - name: Refuse unverified Linux package-signing configuration
-        env:
-          LINUX_GPG_PRIVATE_KEY: ${{ secrets.LINUX_GPG_PRIVATE_KEY }}
-          LINUX_GPG_KEY_ID: ${{ secrets.LINUX_GPG_KEY_ID }}
-          LINUX_GPG_PASSPHRASE: ${{ secrets.LINUX_GPG_PASSPHRASE }}
-          LINUX_GPG_FINGERPRINT: ${{ secrets.LINUX_GPG_FINGERPRINT }}
-        run: python scripts/native_signing.py preflight --platform linux
 
       - name: Install locked Tauri CLI
         run: npm ci --ignore-scripts
@@ -472,7 +466,7 @@ jobs:
           --output dist/native
           --platform linux
           --architecture x86_64
-          --signing unsigned
+          --signing github-attested
 
       - name: Upload smoke-tested Linux packages
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -546,6 +540,18 @@ jobs:
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-checksums: release-assets/SHA256SUMS
+
+      - name: Verify exact Linux package attestations before upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          linux_assets=(release-assets/*-linux-*.deb release-assets/*-linux-*.AppImage)
+          test "${#linux_assets[@]}" -eq 2
+          for artifact in "${linux_assets[@]}"; do
+            gh attestation verify "${artifact}" --repo "${GITHUB_REPOSITORY}"
+          done
 
       - name: Upload exact attested release set
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -685,13 +691,10 @@ jobs:
     # copies the exact attested asset set onto the engine release vX.Y.Z so
     # "Latest" carries both the wheel and a working installer.
     #
-    # Why this does not overstate maturity, which was the original objection to
-    # mirroring: every filename encodes its signing state
-    # (`...-macos-arm64-adhoc.dmg`, `...-windows-x86_64-unsigned.msi`), the
-    # pointer block prepended by `point-engine-release` leads with "Beta ...
-    # ad-hoc-signed or unsigned" and the verification commands, and
-    # `desktop-vX.Y.Z` stays a prerelease. Nothing here flips the native lane to
-    # non-prerelease.
+    # Why this does not overstate maturity: every filename encodes its trust
+    # state. macOS requires Developer ID and notarization. Windows requires
+    # Authenticode. Linux requires an OIDC attestation over the exact bytes.
+    # The pointer names these contracts and `desktop-vX.Y.Z` stays a prerelease.
     #
     # Why this does not break the machine-readable selection rule in RELEASES.md:
     # that rule selects releases carrying the `<!-- installer-release -->` marker

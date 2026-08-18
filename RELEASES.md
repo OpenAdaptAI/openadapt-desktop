@@ -1,8 +1,8 @@
 # Release Policy
 
-This repository publishes from two lanes until code signing lands. This
-document is the source of truth for what each lane produces, which release to
-download, and how the lanes converge.
+This repository publishes from two lanes while the native channel remains
+Beta. This document is the source of truth for what each lane produces, which
+release to download, and how the lanes converge.
 
 ## The two lanes
 
@@ -13,8 +13,9 @@ download, and how the lanes converge.
 
 The engine lane stays non-prerelease so GitHub's "Latest" pointer always names
 the canonical engine release. The native lane stays prerelease because its
-installers are Beta scaffold-shell artifacts and are ad-hoc signed or
-unsigned until external signing credentials are configured; see
+installer surface is Beta. The native release workflow now requires Developer
+ID plus notarization on macOS, Authenticode on Windows, and GitHub OIDC
+attestation over the exact Linux DEB and AppImage bytes; see
 [docs/BETA_NATIVE_INSTALLERS.md](docs/BETA_NATIVE_INSTALLERS.md)
 for the verification scope and signing states.
 
@@ -58,22 +59,21 @@ rewritten in place, so republishing is idempotent and pointers never accumulate.
 If the matching engine release is missing, both jobs fail loudly rather than
 leaving "Latest" without an installer.
 
-#### Why mirroring does not promote unsigned binaries
+#### Why mirroring does not promote the Beta channel
 
 The earlier policy here was "linked, not mirrored", on the reasoning that
-putting ~757 MB of ad-hoc-signed and unsigned binaries on the release GitHub
-labels "Latest" would overstate their maturity. A notes-only link was not
+putting ~757 MB of Beta binaries on the release GitHub labels "Latest" would
+overstate their maturity. A notes-only link was not
 enough: `/releases/latest` still showed a visitor nothing but a wheel and an
 sdist, and that link is what launch material points at. The maturity concern is
 addressed directly instead of by withholding the artifact:
 
 - `desktop-vX.Y.Z` **stays a prerelease**. Flipping it to non-prerelease would
   make the native lane GitHub's "Latest" outright, and that remains forbidden.
-- Every filename encodes its signing state — `…-macos-arm64-adhoc.dmg`,
-  `…-windows-x86_64-unsigned.msi`, `…-linux-x86_64-unsigned.AppImage`.
-- The pointer block leads with "Beta … ad-hoc-signed (macOS) or unsigned
-  (Windows, Linux)", says the OS will warn, and gives the `sha256sum -c` and
-  `gh attestation verify` commands before anything else.
+- Every filename encodes its trust state — `…-developer-id-notarized.dmg`,
+  `…-authenticode.msi`, or `…-github-attested.AppImage`.
+- The pointer block leads with the required platform trust contracts and gives
+  the `sha256sum -c` and `gh attestation verify` commands.
 - The mirror job re-verifies every downloaded byte against the attested
   `SHA256SUMS` before upload, so an engine release can never carry an installer
   that was not attested on the native tag.
@@ -149,16 +149,15 @@ alone:
   plus the checked CycloneDX SBOM. The release workflow recomputes the named
   hashes and validates the complete file set against `SHA256SUMS` before it
   creates the GitHub attestation. A consumer must still verify the checksums
-  and attestation; the manifest does not claim that unsigned artifacts are
-  signed.
+  and attestation; `github-attested` is an exact-byte Linux trust label and is
+  not a native-signing claim.
 
-## Convergence plan (post-signing)
+## Convergence plan
 
-The two lanes exist because installer signing is credential-gated: publishing
-unsigned or ad-hoc-signed binaries as the repository's "Latest" release would
-overstate their maturity. Once Apple Developer ID + notarization and Windows
-Authenticode credentials are configured (the workflows already fail closed on
-partial configuration) and installers build signed:
+The next native release cannot publish until Apple Developer ID plus
+notarization and Windows Authenticode are configured and the Linux exact-byte
+attestations verify. After the first complete trusted release proves the full
+channel, the repository can simplify the two upload targets:
 
 1. The native build workflow attaches its attested installer assets to the
    canonical `vX.Y.Z` engine release *instead of* also creating a separate

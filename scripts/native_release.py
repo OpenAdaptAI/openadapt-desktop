@@ -37,7 +37,14 @@ ARTIFACT_RULES = {
 SIGNING_MODES = {
     "macos": {"adhoc", "developer-id-notarized"},
     "windows": {"unsigned", "authenticode"},
-    "linux": {"unsigned"},
+    "linux": {"unsigned", "github-attested"},
+}
+PRODUCTION_TRUST_MODES = {
+    "macos": "developer-id-notarized",
+    "windows": "authenticode",
+    # Linux has no one native trust format shared by DEB and AppImage. The
+    # production boundary is the GitHub OIDC attestation over the exact bytes.
+    "linux": "github-attested",
 }
 EXPECTED_PLATFORMS = {
     ("macos", "arm64"),
@@ -49,6 +56,9 @@ WEBSITE_RELEASE_MANIFEST = "openadapt-desktop-release-manifest.json"
 WEBSITE_RELEASE_VERIFICATION = {
     "sha256_manifest": "SHA256SUMS",
     "github_artifact_attestation": "required",
+    "macos_native_trust": "Developer ID, notarization, and stapled ticket required",
+    "windows_native_trust": "valid timestamped Authenticode required",
+    "linux_byte_trust": "GitHub OIDC attestation over exact DEB and AppImage bytes required",
     "installer_smoke": "install, launch, and uninstall",
 }
 WEBSITE_RELEASE_SBOM_FORMAT = "CycloneDX"
@@ -212,11 +222,11 @@ def installer_pointer_notes(body: str, native_tag: str, repo: str) -> str | None
         f"> published at [`{native_tag}`]({base}/tag/{native_tag}), mirrored\n"
         '> here so GitHub\'s "Latest" always carries an installer.\n'
         ">\n"
-        "> **These installers are Beta and are ad-hoc-signed (macOS) or\n"
-        "> unsigned (Windows, Linux)** pending signing credentials; the signing\n"
-        "> state is in every filename. Your OS will warn. Verify before\n"
-        "> overriding that warning:\n"
-        "> `sha256sum -c SHA256SUMS` and `gh attestation verify`.\n"
+        "> **These installers are Beta, but the release trust gate is mandatory.**\n"
+        "> macOS requires Developer ID plus notarization. Windows requires\n"
+        "> timestamped Authenticode. Linux DEB and AppImage bytes require GitHub\n"
+        "> OIDC artifact attestations. The trust state is in every filename.\n"
+        "> Verify with `sha256sum -c SHA256SUMS` and `gh attestation verify`.\n"
         ">\n"
         f"> This `v{version}` release is also the Python engine package\n"
         f"> (wheel and sdist; `pip install openadapt-desktop`). `{native_tag}`\n"
@@ -393,6 +403,12 @@ def validate_release_set(directory: Path) -> int:
             raise ValueError(f"invalid signing metadata: {metadata_path}")
         version = native_version()
         signing = metadata["signing"]
+        expected_trust = PRODUCTION_TRUST_MODES.get(platform)
+        if signing != expected_trust:
+            raise ValueError(
+                f"production release requires {platform} trust mode "
+                f"{expected_trust!r}, got {signing!r}"
+            )
         if metadata.get("native_version") != version:
             raise ValueError(f"wrong native version in {metadata_path}")
         prefix = f"OpenAdapt-Desktop-Beta-v{version}-{platform}-{architecture}-{signing}"
@@ -472,8 +488,8 @@ def write_website_release_manifest(
 ) -> Path:
     """Write the verified, public release index consumed by download pages.
 
-    This is deliberately a description of the exact staged bytes, not a claim
-    that an unsigned artifact is signed.  ``SHA256SUMS`` subsequently binds the
+    This is deliberately a description of the exact staged bytes and their
+    platform-specific trust contracts. ``SHA256SUMS`` subsequently binds the
     manifest itself into the GitHub provenance attestation.
     """
 

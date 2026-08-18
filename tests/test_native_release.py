@@ -86,7 +86,9 @@ def test_native_workflows_are_pinned_and_preserve_beta_boundary() -> None:
         "LINUX_GPG_PASSPHRASE",
         "LINUX_GPG_FINGERPRINT",
     ):
-        assert f"{secret}: ${{{{ secrets.{secret} }}}}" in release
+        assert f"{secret}: ${{{{ secrets.{secret} }}}}" not in release
+    assert "--signing github-attested" in release
+    assert 'gh attestation verify "${artifact}"' in release
 
 
 def test_windows_installer_lifecycle_has_an_overall_fail_closed_timeout() -> None:
@@ -442,7 +444,9 @@ def test_installer_pointer_prepends_block_and_preserves_engine_notes() -> None:
     # so the copy on "Latest" cannot read as a maturity promotion.
     assert "this release has no installer" not in updated.lower()
     assert "attached" in updated.lower()
-    assert "ad-hoc-signed (macOS) or\n> unsigned (Windows, Linux)" in updated
+    assert "macOS requires Developer ID plus notarization" in updated
+    assert "Windows requires\n> timestamped Authenticode" in updated
+    assert "Linux DEB and AppImage bytes require GitHub" in updated
     # The original engine notes survive verbatim.
     assert updated.endswith(body)
 
@@ -629,15 +633,20 @@ def test_checksum_round_trip_and_tamper_detection(tmp_path: Path) -> None:
 
 def test_validate_release_set_requires_every_platform_and_no_extra_files(tmp_path: Path) -> None:
     specifications = [
-        ("macos", "arm64", "adhoc", ["dmg/app-arm.dmg"]),
-        ("macos", "x86_64", "adhoc", ["dmg/app-intel.dmg"]),
+        ("macos", "arm64", "developer-id-notarized", ["dmg/app-arm.dmg"]),
+        ("macos", "x86_64", "developer-id-notarized", ["dmg/app-intel.dmg"]),
         (
             "windows",
             "x86_64",
-            "unsigned",
+            "authenticode",
             ["msi/app.msi", "nsis/app-setup.exe"],
         ),
-        ("linux", "x86_64", "unsigned", ["deb/app.deb", "appimage/app.AppImage"]),
+        (
+            "linux",
+            "x86_64",
+            "github-attested",
+            ["deb/app.deb", "appimage/app.AppImage"],
+        ),
     ]
     release = tmp_path / "release"
     for index, (platform, architecture, signing, files) in enumerate(specifications):
@@ -664,12 +673,28 @@ def test_validate_release_set_requires_every_platform_and_no_extra_files(tmp_pat
         validate_release_set(release)
 
 
+def test_validate_release_set_refuses_nonproduction_trust_mode(tmp_path: Path) -> None:
+    release, _manifest, _checksums = _stage_complete_release(tmp_path)
+    linux_metadata = next(release.glob("*-linux-*-metadata.json"))
+    payload = json.loads(linux_metadata.read_text(encoding="utf-8"))
+    payload["signing"] = "unsigned"
+    linux_metadata.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="production release requires linux trust mode"):
+        validate_release_set(release)
+
+
 def _stage_complete_release(tmp_path: Path) -> tuple[Path, Path, Path]:
     specifications = [
-        ("macos", "arm64", "adhoc", ["dmg/app-arm.dmg"]),
-        ("macos", "x86_64", "adhoc", ["dmg/app-intel.dmg"]),
-        ("windows", "x86_64", "unsigned", ["msi/app.msi", "nsis/app-setup.exe"]),
-        ("linux", "x86_64", "unsigned", ["deb/app.deb", "appimage/app.AppImage"]),
+        ("macos", "arm64", "developer-id-notarized", ["dmg/app-arm.dmg"]),
+        ("macos", "x86_64", "developer-id-notarized", ["dmg/app-intel.dmg"]),
+        ("windows", "x86_64", "authenticode", ["msi/app.msi", "nsis/app-setup.exe"]),
+        (
+            "linux",
+            "x86_64",
+            "github-attested",
+            ["deb/app.deb", "appimage/app.AppImage"],
+        ),
     ]
     release = tmp_path / "release"
     release.mkdir(parents=True)
@@ -711,7 +736,11 @@ def test_website_release_manifest_is_an_honest_index_of_staged_bytes(tmp_path: P
     _, output, checksums = _stage_complete_release(tmp_path)
     assert validate_website_release_manifest(output, checksums=checksums) == 6
     manifest = json.loads(output.read_text())
-    assert {asset["signing"] for asset in manifest["artifacts"]} == {"adhoc", "unsigned"}
+    assert {asset["signing"] for asset in manifest["artifacts"]} == {
+        "developer-id-notarized",
+        "authenticode",
+        "github-attested",
+    }
     assert manifest["verification"]["github_artifact_attestation"] == "required"
 
 
