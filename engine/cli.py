@@ -248,7 +248,11 @@ def cmd_upload(args: argparse.Namespace, engine: types.SimpleNamespace) -> None:
     backends = _create_backends(engine.config)
     manager = UploadManager(engine.config, backends, engine.db, engine.audit)
 
-    job_id = manager.enqueue(args.capture_id, args.backend)
+    try:
+        job_id = manager.enqueue(args.capture_id, args.backend)
+    except ValueError as exc:
+        print(f"Upload refused: {exc}")
+        sys.exit(1)
     print(f"Upload queued: job {job_id[:8]}")
 
     results = manager.process_queue()

@@ -223,6 +223,28 @@ class TestUploadManager:
 
         backend.upload.assert_not_called()
 
+    def test_customer_storage_is_paused_without_network(
+        self,
+        db: IndexDB,
+        audit: AuditLogger,
+        tmp_path: Path,
+    ) -> None:
+        raw = tmp_path / "cap1"
+        scrubbed = tmp_path / "cap1.scrubbed"
+        raw.mkdir()
+        scrubbed.mkdir()
+        _write_review_files(scrubbed)
+        db.insert_capture("cap1", str(raw), "2026-03-01T10:00:00Z")
+        db.update_capture("cap1", review_status="reviewed", scrubbed_path=str(scrubbed))
+        backend = MagicMock()
+        backend.name = "s3"
+        manager = UploadManager(_config(tmp_path), [backend], db, audit)
+
+        with pytest.raises(ValueError, match="paused for this release"):
+            manager.enqueue("cap1", "s3")
+
+        backend.upload.assert_not_called()
+
 
 class TestDurableRetry:
     """Durable/offline queue behavior (spec section 5)."""

@@ -57,6 +57,13 @@ _FLOW_ONLY_ERROR = (
     "Direct hosted ingest is disabled. Use `openadapt-desktop push` so Flow can "
     "bind the upload to a reviewed, exact-hash sanitized artifact."
 )
+_PAUSED_STORAGE_BACKENDS = frozenset({"s3"})
+_PAUSED_STORAGE_ERROR = (
+    "Customer-storage upload is paused for this release. Its exit condition is a "
+    "Flow-owned complete artifact inventory, image-capable sanitization, and an "
+    "in-app exact-artifact review contract. Use governed hosted push or keep the "
+    "recording local."
+)
 _APPROVED_ARCHIVE_RE = re.compile(
     r"^(?P<job>[a-f0-9]{32})-(?P<digest>[a-f0-9]{64})\.approved\.zip$"
 )
@@ -124,6 +131,8 @@ class UploadManager:
         """
         if backend_name in _FLOW_ONLY_BACKENDS:
             raise ValueError(_FLOW_ONLY_ERROR)
+        if backend_name in _PAUSED_STORAGE_BACKENDS:
+            raise ValueError(_PAUSED_STORAGE_ERROR)
 
         if backend_name not in self.backends:
             raise ValueError(f"Backend not available: {backend_name}")
@@ -156,6 +165,8 @@ class UploadManager:
         """Send only an artifact returned by the queue's hash verifier."""
         if backend_name in _FLOW_ONLY_BACKENDS:
             return UploadResult(success=False, error=_FLOW_ONLY_ERROR)
+        if backend_name in _PAUSED_STORAGE_BACKENDS:
+            return UploadResult(success=False, error=_PAUSED_STORAGE_ERROR)
         backend = self.backends[backend_name]
         size_bytes = artifact.path.stat().st_size
         dest = f"{backend_name}://{metadata.get('capture_id', 'unknown')}"
@@ -320,6 +331,22 @@ class UploadManager:
                 self._cleanup_job_archive(job)
                 results.append(
                     self._result(job_id, capture_id, backend_name, False, "", _FLOW_ONLY_ERROR)
+                )
+                continue
+            if backend_name in _PAUSED_STORAGE_BACKENDS:
+                self._db.update_upload_job(
+                    job_id, status="failed", error=_PAUSED_STORAGE_ERROR
+                )
+                self._cleanup_job_archive(job)
+                results.append(
+                    self._result(
+                        job_id,
+                        capture_id,
+                        backend_name,
+                        False,
+                        "",
+                        _PAUSED_STORAGE_ERROR,
+                    )
                 )
                 continue
 

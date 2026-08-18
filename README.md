@@ -223,7 +223,8 @@ pinned sources, hashes, and modification status are recorded in
 
 The legacy `upload --backend hosted_ingest` command is a compatibility alias
 for the supported governed `push` path. It does not call the old direct ingest
-adapter. Optional customer-owned storage adapters remain separate legacy paths.
+adapter. Customer-owned storage upload is paused until it uses Flow's complete
+inventory, image-capable sanitization, and exact in-app review contract.
 
 ## Architecture
 
@@ -285,7 +286,7 @@ The Python engine exposes these Beta commands:
 | `openadapt-desktop compile` / `replay` / `run` | Invoke the bundled, pinned `openadapt-flow` runtime on a capture or bundle |
 | `openadapt-desktop login` / `push` / `report-break` | Authenticate to the hosted control plane, push a bundle, report a halted run |
 | `openadapt-desktop storage` / `health` / `cleanup` | Inspect and maintain local storage |
-| `openadapt-desktop backends` / `upload` | Inspect legacy customer-owned storage adapters; the hosted alias uses governed `push` |
+| `openadapt-desktop backends` / `upload` | Inspect legacy customer-owned storage adapters; hosted uses governed `push`, and customer-owned upload remains paused behind a fail-closed release gate |
 | `openadapt-desktop config` / `doctor` | Inspect local configuration and dependencies |
 
 Raw recordings are local by default. Any egress path still requires careful
@@ -298,7 +299,9 @@ derivative contract. It distinguishes a local review pause from an upload. It
 requires a returned hosted workflow identity before it reports success. It
 never falls back to a direct Desktop upload when Flow is missing or returns an
 error. The former direct hosted-ingest backend now refuses every upload. The
-legacy customer-owned adapter queue selects the reviewed scrubbed path again
+legacy customer-owned adapter queue remains paused for this release; its exit
+condition is a Flow-owned complete inventory, image-capable scrub, and exact
+in-app review. The dormant queue also selects the reviewed scrubbed path again
 immediately before egress; a dismissed raw capture is not uploadable.
 
 ## Development
