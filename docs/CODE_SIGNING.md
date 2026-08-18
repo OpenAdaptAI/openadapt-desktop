@@ -27,8 +27,8 @@ complete Authenticode method. It also fails closed on a partial set.
 - The launch-smoke test (`scripts/smoke_test_native_installer.py`) already
   installs, launches, and **verifies the signature** for the active mode:
   `codesign`/`spctl`/`stapler` on macOS, `Get-AuthenticodeSignature` on Windows.
-  Signed builds add signature verification; unsigned builds keep today's checks.
-  Signing is **not** yet a hard release gate, because the secrets do not exist.
+  The native release refuses ad-hoc or unsigned results. The regular build lane
+  can still test explicitly labeled ad-hoc and unsigned packages.
 - The macOS engine is a PyInstaller one-file sidecar. Developer ID jobs pass
   `APPLE_SIGNING_IDENTITY` into both PyInstaller and Tauri so the embedded
   Python libraries and final launcher share one Team ID under hardened runtime.
@@ -164,13 +164,21 @@ If you do have an importable `.pfx`:
 DEB and AppImage do not share one native trust format. A detached GPG signature
 would also require a separate authenticated public-key channel. The production
 release therefore uses GitHub's OIDC artifact attestation as the Linux trust
-boundary. The release job attests the exact DEB and AppImage hashes and then
-runs `gh attestation verify` on both files before it can upload the release set.
+boundary. The release job attests the complete `SHA256SUMS` subject set. It then
+runs `gh attestation verify` on the checksummed provenance file and requires the
+signed subjects to equal the complete release inventory before upload.
 
 This state is named `github-attested`. It is not called native-signed. It needs
 no founder-managed signing secret. GitHub issues the short-lived OIDC identity
-for the pinned release workflow. `SHA256SUMS` and the website manifest bind the
-same exact bytes for offline hash checks.
+for the pinned release workflow. The verifier also binds the tag commit, run ID,
+run attempt, GitHub-hosted runner, and successful protected publish job.
+`SHA256SUMS` and the website manifest bind the same exact bytes for offline hash
+checks.
+
+This workflow control is not sufficient without repository controls. Configure
+a no-bypass pull-request ruleset for `main` and a creation/update ruleset for
+`desktop-v*` before a release. The historical `desktop-v0.15.0` prerelease is
+ad-hoc/unsigned and does not satisfy this trust contract.
 
 ---
 

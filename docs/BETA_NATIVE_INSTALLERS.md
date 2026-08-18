@@ -44,8 +44,9 @@ native version comes from `package.json`, `src-tauri/Cargo.toml`, and
 `src-tauri/tauri.conf.json`; the Native Installer Freshness workflow
 synchronizes those sources to each published engine release and pushes the
 matching `desktop-vX.Y.Z` tag, so the native prerelease number mirrors the
-engine release it was built from. When a newer native prerelease is published,
-older native prereleases receive a prominent "Superseded — do not use" notice;
+engine release it was built from. When a native prerelease is published, the
+release workflow selects the highest published semantic version. All lower
+native prereleases receive a prominent "Superseded — do not use" notice;
 their assets are retained for provenance, and any deletion is a maintainer
 decision made outside CI. The full two-lane release policy and its planned
 convergence into a single release after code signing lands are documented in
@@ -77,15 +78,19 @@ do not replace qualification of a complete real workflow.
 Release jobs stage the exact post-signing, smoke-tested files and scan that
 assembled installer set with Syft to publish a machine-readable CycloneDX JSON
 software bill of materials (SBOM). The workflow refuses an empty or malformed
-SBOM, includes it in the sorted `SHA256SUMS` manifest, verifies the manifest,
-and creates GitHub artifact attestations over every named file. Consumers can
-verify downloaded assets with:
+SBOM, includes it and the public build-provenance identity in the sorted
+`SHA256SUMS` manifest, verifies the exact inventory, and creates a GitHub
+artifact attestation over every named file. The release verifier requires the
+signed subjects to equal that inventory. It also binds the exact workflow, tag
+commit, run ID, run attempt, GitHub-hosted runner, and successful protected
+publish job. Consumers can verify downloaded assets with:
 
 ```bash
 sha256sum -c SHA256SUMS
-for artifact in OpenAdapt-Desktop-Beta-*; do
-  gh attestation verify "$artifact" --repo OpenAdaptAI/openadapt-desktop
-done
+gh attestation verify openadapt-desktop-native-release-provenance.json \
+  --repo OpenAdaptAI/openadapt-desktop \
+  --signer-workflow OpenAdaptAI/openadapt-desktop/.github/workflows/native-release.yml \
+  --deny-self-hosted-runners
 ```
 
 An attestation binds bytes to a build identity; it does not establish that the
@@ -114,6 +119,11 @@ When either native credential set is absent, the release stops. Historical
 prereleases keep their original trust labels. The updater stays disabled until
 its independent public/private signing-key lifecycle and recovery procedure are
 established.
+
+Before a release, the repository must also have a no-bypass pull-request
+ruleset for `main` and a release-tag ruleset for `desktop-v*`. At this document
+update, those repository rules and the signing identities are not active. The
+historical `desktop-v0.15.0` prerelease does not satisfy the new trust contract.
 
 The founder activation runbook — exactly which certificates to buy, their costs,
 how to add each secret, and what each public surface may then truthfully claim —

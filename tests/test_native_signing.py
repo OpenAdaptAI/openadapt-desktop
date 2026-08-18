@@ -75,9 +75,7 @@ def test_release_gate_requires_macos_and_windows_trust_modes() -> None:
     ("platform", "required"),
     (("macos", "developer-id-notarized"), ("windows", "authenticode")),
 )
-def test_release_gate_refuses_missing_signing_credentials(
-    platform: str, required: str
-) -> None:
+def test_release_gate_refuses_missing_signing_credentials(platform: str, required: str) -> None:
     with pytest.raises(ValueError, match="release requires signing mode"):
         require_signing_mode(platform, required, {})
 
@@ -91,7 +89,11 @@ def test_native_release_workflow_requires_protected_signing_environment() -> Non
     assert "--require-mode developer-id-notarized" in workflow
     assert "--require-mode authenticode" in workflow
     assert "--signing github-attested" in workflow
-    assert 'gh attestation verify "${artifact}"' in workflow
+    assert "openadapt-desktop-native-release-provenance.json" in workflow
+    assert "--signer-workflow" in workflow
+    assert "--cert-identity" in workflow
+    assert "--deny-self-hosted-runners" in workflow
+    assert "validate-attestation" in workflow
     for secret in WINDOWS_TRUSTED_SIGNING_CREDENTIALS:
         assert f"{secret}: ${{{{ secrets.{secret} }}}}" in workflow
 

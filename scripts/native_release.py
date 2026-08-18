@@ -53,6 +53,14 @@ EXPECTED_PLATFORMS = {
     ("linux", "x86_64"),
 }
 WEBSITE_RELEASE_MANIFEST = "openadapt-desktop-release-manifest.json"
+NATIVE_RELEASE_PROVENANCE = "openadapt-desktop-native-release-provenance.json"
+NATIVE_RELEASE_PROVENANCE_SCHEMA = "openadapt.native-release-provenance/v1"
+NATIVE_RELEASE_WORKFLOW = ".github/workflows/native-release.yml"
+NATIVE_RELEASE_WORKFLOW_NAME = "Native Installer Release"
+GITHUB_WORKFLOW_BUILD_TYPE = "https://actions.github.io/buildtypes/workflow/v1"
+GITHUB_REPOSITORY_PATTERN = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+GIT_COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
+INSTALLER_RELEASE_MARKER = "<!-- installer-release -->"
 WEBSITE_RELEASE_VERIFICATION = {
     "sha256_manifest": "SHA256SUMS",
     "github_artifact_attestation": "required",
@@ -98,6 +106,67 @@ def native_tag_tuple(tag: str) -> tuple[int, int, int]:
         raise ValueError(f"native release tag must be {NATIVE_TAG_PREFIX}X.Y.Z, got {tag!r}")
     major, minor, patch = version.split(".")
     return (int(major), int(minor), int(patch))
+
+
+def _published_native_releases(releases: object) -> list[dict]:
+    """Return marked, published native prereleases from GitHub API data."""
+
+    if not isinstance(releases, list):
+        raise ValueError("GitHub releases payload must be a list")
+    flattened: list[object] = []
+    for entry in releases:
+        if isinstance(entry, list):
+            flattened.extend(entry)
+        else:
+            flattened.append(entry)
+
+    selected: list[dict] = []
+    seen: set[str] = set()
+    for release in flattened:
+        if not isinstance(release, dict):
+            raise ValueError("GitHub releases payload contains a non-object entry")
+        tag = release.get("tag_name")
+        body = release.get("body")
+        if (
+            release.get("draft") is False
+            and release.get("prerelease") is True
+            and isinstance(tag, str)
+            and tag.startswith(NATIVE_TAG_PREFIX)
+            and isinstance(body, str)
+            and INSTALLER_RELEASE_MARKER in body
+        ):
+            native_tag_tuple(tag)
+            if tag in seen:
+                raise ValueError(f"GitHub releases payload repeats native tag: {tag}")
+            seen.add(tag)
+            selected.append(release)
+    return selected
+
+
+def select_latest_native_release(releases: object) -> dict:
+    """Select the highest semantic version from published marked releases."""
+
+    candidates = _published_native_releases(releases)
+    if not candidates:
+        raise ValueError("no published marked native prerelease exists")
+    return max(candidates, key=lambda release: native_tag_tuple(release["tag_name"]))
+
+
+def validate_new_native_tag(candidate_tag: str, releases: object) -> str:
+    """Refuse a tag that does not advance the published native release."""
+
+    candidate = native_tag_tuple(candidate_tag)
+    published = _published_native_releases(releases)
+    if not published:
+        return candidate_tag
+    latest_tag = max(published, key=lambda release: native_tag_tuple(release["tag_name"]))[
+        "tag_name"
+    ]
+    if candidate <= native_tag_tuple(latest_tag):
+        raise ValueError(
+            f"native release {candidate_tag} does not advance published release {latest_tag}"
+        )
+    return candidate_tag
 
 
 def set_native_version(version: str, root: Path = ROOT) -> dict[str, str]:
@@ -324,11 +393,11 @@ def stage_artifacts(
 def write_checksums(directory: Path, output: Path) -> list[tuple[str, str]]:
     if output.parent.resolve() != directory.resolve():
         raise ValueError("checksum manifest must be written inside the artifact directory")
-    files = sorted(
-        path
-        for path in directory.iterdir()
-        if path.is_file() and path.resolve() != output.resolve()
-    )
+    members = [path for path in directory.iterdir() if path.resolve() != output.resolve()]
+    invalid = [path for path in members if not path.is_file() or path.is_symlink()]
+    if invalid:
+        raise ValueError(f"release directory contains a non-regular file: {invalid}")
+    files = sorted(members)
     if not files:
         raise ValueError(f"no release assets found in {directory}")
 
@@ -341,7 +410,19 @@ def write_checksums(directory: Path, output: Path) -> list[tuple[str, str]]:
 
 
 def verify_checksums(directory: Path, manifest: Path) -> int:
+    if manifest.parent.resolve() != directory.resolve() or manifest.name != "SHA256SUMS":
+        raise ValueError("SHA256SUMS must be inside the release asset directory")
     entries = read_checksums(manifest)
+    members = [path for path in directory.iterdir() if path.resolve() != manifest.resolve()]
+    invalid = [path for path in members if not path.is_file() or path.is_symlink()]
+    if invalid:
+        raise ValueError(f"release directory contains a non-regular file: {invalid}")
+    actual_names = {path.name for path in members}
+    if actual_names != set(entries):
+        raise ValueError(
+            "SHA256SUMS does not describe the exact release file set: "
+            f"actual={sorted(actual_names)}, checksummed={sorted(entries)}"
+        )
     checked = 0
     for name, digest in entries.items():
         path = directory / name
@@ -377,6 +458,325 @@ def read_checksums(manifest: Path) -> dict[str, str]:
     if not entries:
         raise ValueError("checksum manifest is empty")
     return entries
+
+
+def _validate_repository(repository: str) -> str:
+    if not GITHUB_REPOSITORY_PATTERN.fullmatch(repository):
+        raise ValueError(f"invalid GitHub repository: {repository!r}")
+    return repository
+
+
+def _validate_commit(commit: str) -> str:
+    if not GIT_COMMIT_PATTERN.fullmatch(commit):
+        raise ValueError(f"invalid Git commit: {commit!r}")
+    return commit
+
+
+def write_release_provenance(
+    output: Path,
+    *,
+    repository: str,
+    tag: str,
+    source_commit: str,
+    workflow_ref: str,
+    workflow_commit: str,
+    run_id: int,
+    run_attempt: int,
+    runner_environment: str,
+    root: Path = ROOT,
+) -> Path:
+    """Write the build identity that the signed subject inventory must bind."""
+
+    _validate_repository(repository)
+    validate_tag(tag, root)
+    _validate_commit(source_commit)
+    _validate_commit(workflow_commit)
+    expected_ref = f"{repository}/{NATIVE_RELEASE_WORKFLOW}@refs/tags/{tag}"
+    if workflow_ref != expected_ref:
+        raise ValueError(f"workflow ref must be exactly {expected_ref!r}, got {workflow_ref!r}")
+    if workflow_commit != source_commit:
+        raise ValueError("workflow commit must equal the native tag source commit")
+    if not isinstance(run_id, int) or run_id <= 0:
+        raise ValueError("GitHub run id must be a positive integer")
+    if not isinstance(run_attempt, int) or run_attempt <= 0:
+        raise ValueError("GitHub run attempt must be a positive integer")
+    if runner_environment != "github-hosted":
+        raise ValueError("native release provenance requires a GitHub-hosted runner")
+    if output.name != NATIVE_RELEASE_PROVENANCE or not output.parent.is_dir():
+        raise ValueError(f"native release provenance must be named {NATIVE_RELEASE_PROVENANCE!r}")
+    if output.exists():
+        raise ValueError(f"native release provenance already exists: {output}")
+
+    payload = {
+        "schema": NATIVE_RELEASE_PROVENANCE_SCHEMA,
+        "repository": repository,
+        "source_tag": tag,
+        "source_commit": source_commit,
+        "workflow_path": NATIVE_RELEASE_WORKFLOW,
+        "workflow_ref": workflow_ref,
+        "workflow_commit": workflow_commit,
+        "event": "push",
+        "run_id": run_id,
+        "run_attempt": run_attempt,
+        "runner_environment": runner_environment,
+    }
+    output.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return output
+
+
+def validate_release_provenance(
+    path: Path, *, repository: str, tag: str, source_commit: str
+) -> dict:
+    """Validate a closed release-provenance object against resolved Git refs."""
+
+    _validate_repository(repository)
+    native_tag_tuple(tag)
+    _validate_commit(source_commit)
+    if path.name != NATIVE_RELEASE_PROVENANCE or not path.is_file() or path.is_symlink():
+        raise ValueError(f"missing exact native release provenance file: {path}")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    expected_keys = {
+        "schema",
+        "repository",
+        "source_tag",
+        "source_commit",
+        "workflow_path",
+        "workflow_ref",
+        "workflow_commit",
+        "event",
+        "run_id",
+        "run_attempt",
+        "runner_environment",
+    }
+    if not isinstance(data, dict) or set(data) != expected_keys:
+        raise ValueError("native release provenance does not use the closed v1 schema")
+    expected_ref = f"{repository}/{NATIVE_RELEASE_WORKFLOW}@refs/tags/{tag}"
+    expected = {
+        "schema": NATIVE_RELEASE_PROVENANCE_SCHEMA,
+        "repository": repository,
+        "source_tag": tag,
+        "source_commit": source_commit,
+        "workflow_path": NATIVE_RELEASE_WORKFLOW,
+        "workflow_ref": expected_ref,
+        "workflow_commit": source_commit,
+        "event": "push",
+        "runner_environment": "github-hosted",
+    }
+    for field, value in expected.items():
+        if data.get(field) != value:
+            raise ValueError(
+                f"native release provenance {field} differs: expected {value!r}, "
+                f"got {data.get(field)!r}"
+            )
+    for field in ("run_id", "run_attempt"):
+        if not isinstance(data[field], int) or data[field] <= 0:
+            raise ValueError(f"native release provenance {field} must be a positive integer")
+    return data
+
+
+def _attestation_subjects(statement: dict) -> dict[str, str]:
+    subjects = statement.get("subject")
+    if not isinstance(subjects, list) or not subjects:
+        raise ValueError("attestation has no subjects")
+    result: dict[str, str] = {}
+    for subject in subjects:
+        if not isinstance(subject, dict) or set(subject) != {"name", "digest"}:
+            raise ValueError("attestation contains a malformed subject")
+        name = subject.get("name")
+        digest = subject.get("digest")
+        if (
+            not isinstance(name, str)
+            or Path(name).name != name
+            or name in result
+            or not isinstance(digest, dict)
+            or set(digest) != {"sha256"}
+            or not isinstance(digest.get("sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", digest["sha256"])
+        ):
+            raise ValueError("attestation contains an invalid or duplicate subject")
+        result[name] = digest["sha256"]
+    return result
+
+
+def _validate_attestation_record(record: object, *, provenance: dict, checksums: dict) -> None:
+    if not isinstance(record, dict):
+        raise ValueError("attestation result is not an object")
+    verification = record.get("verificationResult")
+    if not isinstance(verification, dict):
+        raise ValueError("attestation has no verified result")
+    signature = verification.get("signature")
+    statement = verification.get("statement")
+    certificate = signature.get("certificate") if isinstance(signature, dict) else None
+    if not isinstance(certificate, dict) or not isinstance(statement, dict):
+        raise ValueError("attestation lacks a certificate or statement")
+    if _attestation_subjects(statement) != checksums:
+        raise ValueError("signed attestation subjects differ from SHA256SUMS")
+
+    repository = provenance["repository"]
+    tag = provenance["source_tag"]
+    commit = provenance["source_commit"]
+    run_id = provenance["run_id"]
+    run_attempt = provenance["run_attempt"]
+    repository_url = f"https://github.com/{repository}"
+    workflow_uri = f"{repository_url}/{NATIVE_RELEASE_WORKFLOW}@refs/tags/{tag}"
+    invocation_uri = f"{repository_url}/actions/runs/{run_id}/attempts/{run_attempt}"
+    certificate_claims = {
+        "subjectAlternativeName": workflow_uri,
+        "githubWorkflowTrigger": "push",
+        "githubWorkflowSHA": commit,
+        "githubWorkflowName": NATIVE_RELEASE_WORKFLOW_NAME,
+        "githubWorkflowRepository": repository,
+        "githubWorkflowRef": f"refs/tags/{tag}",
+        "buildSignerURI": workflow_uri,
+        "buildSignerDigest": commit,
+        "runnerEnvironment": "github-hosted",
+        "sourceRepositoryURI": repository_url,
+        "sourceRepositoryDigest": commit,
+        "sourceRepositoryRef": f"refs/tags/{tag}",
+        "buildConfigURI": workflow_uri,
+        "buildConfigDigest": commit,
+        "buildTrigger": "push",
+        "runInvocationURI": invocation_uri,
+    }
+    for field, value in certificate_claims.items():
+        if certificate.get(field) != value:
+            raise ValueError(
+                f"attestation certificate {field} differs: expected {value!r}, "
+                f"got {certificate.get(field)!r}"
+            )
+
+    predicate = statement.get("predicate")
+    build_definition = predicate.get("buildDefinition") if isinstance(predicate, dict) else None
+    run_details = predicate.get("runDetails") if isinstance(predicate, dict) else None
+    if not isinstance(build_definition, dict) or not isinstance(run_details, dict):
+        raise ValueError("attestation lacks GitHub workflow provenance")
+    if build_definition.get("buildType") != GITHUB_WORKFLOW_BUILD_TYPE:
+        raise ValueError("attestation has the wrong GitHub workflow build type")
+    external = build_definition.get("externalParameters")
+    workflow = external.get("workflow") if isinstance(external, dict) else None
+    if workflow != {
+        "path": NATIVE_RELEASE_WORKFLOW,
+        "ref": f"refs/tags/{tag}",
+        "repository": repository_url,
+    }:
+        raise ValueError("attestation external workflow identity differs")
+    internal = build_definition.get("internalParameters")
+    github = internal.get("github") if isinstance(internal, dict) else None
+    if not isinstance(github, dict) or github.get("event_name") != "push":
+        raise ValueError("attestation was not produced by a push event")
+    if github.get("runner_environment") != "github-hosted":
+        raise ValueError("attestation was not produced on a GitHub-hosted runner")
+    if build_definition.get("resolvedDependencies") != [
+        {
+            "digest": {"gitCommit": commit},
+            "uri": f"git+{repository_url}@refs/tags/{tag}",
+        }
+    ]:
+        raise ValueError("attestation resolved source differs")
+    builder = run_details.get("builder")
+    metadata = run_details.get("metadata")
+    if not isinstance(builder, dict) or builder.get("id") != workflow_uri:
+        raise ValueError("attestation builder identity differs")
+    if not isinstance(metadata, dict) or metadata.get("invocationId") != invocation_uri:
+        raise ValueError("attestation workflow invocation differs")
+
+
+def validate_release_attestation(
+    attestation: Path,
+    *,
+    directory: Path,
+    checksums: Path,
+    provenance_path: Path,
+    repository: str,
+    tag: str,
+    source_commit: str,
+) -> dict:
+    """Bind downloaded bytes to a verified GitHub workflow invocation."""
+
+    verify_checksums(directory, checksums)
+    provenance = validate_release_provenance(
+        provenance_path,
+        repository=repository,
+        tag=tag,
+        source_commit=source_commit,
+    )
+    records = json.loads(attestation.read_text(encoding="utf-8"))
+    if not isinstance(records, list) or not records:
+        raise ValueError("gh attestation verify returned no records")
+    matches = 0
+    failures: list[str] = []
+    for record in records:
+        try:
+            _validate_attestation_record(
+                record,
+                provenance=provenance,
+                checksums=read_checksums(checksums),
+            )
+        except ValueError as exc:
+            failures.append(str(exc))
+        else:
+            matches += 1
+    if matches != 1:
+        raise ValueError(
+            f"expected exactly one matching native release attestation, got {matches}; "
+            f"rejections={failures}"
+        )
+    return provenance
+
+
+def validate_release_workflow_run(path: Path, *, provenance: dict) -> int:
+    """Require the exact source run and its protected publish job to succeed."""
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("GitHub workflow run payload must be an object")
+    expected = {
+        "databaseId": provenance["run_id"],
+        "attempt": provenance["run_attempt"],
+        "conclusion": "success",
+        "event": "push",
+        "headBranch": provenance["source_tag"],
+        "headSha": provenance["source_commit"],
+        "name": NATIVE_RELEASE_WORKFLOW_NAME,
+        "status": "completed",
+        "workflowName": NATIVE_RELEASE_WORKFLOW_NAME,
+        "url": (
+            f"https://github.com/{provenance['repository']}/actions/runs/{provenance['run_id']}"
+        ),
+    }
+    for field, value in expected.items():
+        if data.get(field) != value:
+            raise ValueError(
+                f"native release workflow run {field} differs: expected {value!r}, "
+                f"got {data.get(field)!r}"
+            )
+    jobs = data.get("jobs")
+    if not isinstance(jobs, list):
+        raise ValueError("native release workflow run has no job evidence")
+    conclusions: dict[str, str] = {}
+    for job in jobs:
+        if not isinstance(job, dict) or not isinstance(job.get("name"), str):
+            raise ValueError("native release workflow run has malformed job evidence")
+        if job["name"] in conclusions:
+            raise ValueError(f"native release workflow run repeats job {job['name']!r}")
+        conclusions[job["name"]] = job.get("conclusion")
+        if job.get("status") != "completed":
+            raise ValueError(f"native release workflow job is not complete: {job['name']}")
+    required = {
+        "Validate immutable native tag",
+        "macOS arm64",
+        "macOS x86_64",
+        "Windows x86_64",
+        "Linux x86_64 (GitHub-attested bytes)",
+        "Checksum and attest exact release bytes",
+        "Create or update Beta draft prerelease",
+    }
+    failed = {
+        name: conclusions.get(name) for name in required if conclusions.get(name) != "success"
+    }
+    if failed:
+        raise ValueError(f"native release workflow did not pass every required job: {failed}")
+    return len(required)
 
 
 def validate_release_set(directory: Path) -> int:
@@ -445,6 +845,7 @@ def validate_release_set(directory: Path) -> int:
         # are not installers themselves.
         and not path.name.endswith(".cyclonedx.json")
         and path.name != WEBSITE_RELEASE_MANIFEST
+        and path.name != NATIVE_RELEASE_PROVENANCE
     }
     if actual_assets != referenced_assets:
         raise ValueError(
@@ -621,7 +1022,13 @@ def validate_website_release_manifest(path: Path, *, checksums: Path, root: Path
     checksum_entries = read_checksums(checksums)
     metadata_names = {metadata.name for metadata in directory.glob("*-metadata.json")}
     expected_checksum_names = (
-        expected_names | metadata_names | {expected_sbom_name, WEBSITE_RELEASE_MANIFEST}
+        expected_names
+        | metadata_names
+        | {
+            expected_sbom_name,
+            WEBSITE_RELEASE_MANIFEST,
+            NATIVE_RELEASE_PROVENANCE,
+        }
     )
     if set(checksum_entries) != expected_checksum_names:
         raise ValueError("SHA256SUMS does not describe the exact release file set")
@@ -631,6 +1038,7 @@ def validate_website_release_manifest(path: Path, *, checksums: Path, root: Path
         | {
             expected_sbom_name,
             WEBSITE_RELEASE_MANIFEST,
+            NATIVE_RELEASE_PROVENANCE,
         }
     ):
         actual_digest = hashlib.sha256((directory / name).read_bytes()).hexdigest()
@@ -693,7 +1101,61 @@ def _parser() -> argparse.ArgumentParser:
     validate_website_manifest_parser = subparsers.add_parser("validate-website-manifest")
     validate_website_manifest_parser.add_argument("--file", type=Path, required=True)
     validate_website_manifest_parser.add_argument("--checksums", type=Path, required=True)
+
+    provenance_parser = subparsers.add_parser("write-provenance")
+    provenance_parser.add_argument("--output", type=Path, required=True)
+    provenance_parser.add_argument("--repository", required=True)
+    provenance_parser.add_argument("--tag", required=True)
+    provenance_parser.add_argument("--source-commit", required=True)
+    provenance_parser.add_argument("--workflow-ref", required=True)
+    provenance_parser.add_argument("--workflow-commit", required=True)
+    provenance_parser.add_argument("--run-id", type=int, required=True)
+    provenance_parser.add_argument("--run-attempt", type=int, required=True)
+    provenance_parser.add_argument("--runner-environment", required=True)
+
+    validate_provenance_parser = subparsers.add_parser("validate-provenance")
+    validate_provenance_parser.add_argument("--file", type=Path, required=True)
+    validate_provenance_parser.add_argument("--repository", required=True)
+    validate_provenance_parser.add_argument("--tag", required=True)
+    validate_provenance_parser.add_argument("--source-commit", required=True)
+
+    attestation_parser = subparsers.add_parser("validate-attestation")
+    attestation_parser.add_argument("--file", type=Path, required=True)
+    attestation_parser.add_argument("--directory", type=Path, required=True)
+    attestation_parser.add_argument("--checksums", type=Path, required=True)
+    attestation_parser.add_argument("--provenance", type=Path, required=True)
+    attestation_parser.add_argument("--repository", required=True)
+    attestation_parser.add_argument("--tag", required=True)
+    attestation_parser.add_argument("--source-commit", required=True)
+    attestation_parser.add_argument("--github-output", type=Path)
+
+    workflow_run_parser = subparsers.add_parser("validate-workflow-run")
+    workflow_run_parser.add_argument("--file", type=Path, required=True)
+    workflow_run_parser.add_argument("--provenance", type=Path, required=True)
+    workflow_run_parser.add_argument("--repository", required=True)
+    workflow_run_parser.add_argument("--tag", required=True)
+    workflow_run_parser.add_argument("--source-commit", required=True)
+
+    selection_parser = subparsers.add_parser("select-published-native")
+    selection_parser.add_argument("--releases", type=Path, required=True)
+    selection_parser.add_argument("--event-tag")
+    selection_parser.add_argument("--github-output", type=Path)
+
+    order_parser = subparsers.add_parser("validate-release-order")
+    order_parser.add_argument("--releases", type=Path, required=True)
+    order_parser.add_argument("--candidate-tag", required=True)
     return parser
+
+
+def _write_github_output(path: Path | None, values: dict[str, str | int]) -> None:
+    if path is None:
+        return
+    with path.open("a", encoding="utf-8") as stream:
+        for key, value in values.items():
+            text = str(value)
+            if not re.fullmatch(r"[A-Za-z0-9._/-]+", text):
+                raise ValueError(f"unsafe GitHub output value for {key}: {text!r}")
+            stream.write(f"{key}={text}\n")
 
 
 def main() -> int:
@@ -763,6 +1225,73 @@ def main() -> int:
         elif args.command == "validate-website-manifest":
             count = validate_website_release_manifest(args.file, checksums=args.checksums)
             print(f"Validated {count} website release artifacts in {args.file}")
+        elif args.command == "write-provenance":
+            path = write_release_provenance(
+                args.output,
+                repository=args.repository,
+                tag=args.tag,
+                source_commit=args.source_commit,
+                workflow_ref=args.workflow_ref,
+                workflow_commit=args.workflow_commit,
+                run_id=args.run_id,
+                run_attempt=args.run_attempt,
+                runner_environment=args.runner_environment,
+            )
+            print(path)
+        elif args.command == "validate-provenance":
+            provenance = validate_release_provenance(
+                args.file,
+                repository=args.repository,
+                tag=args.tag,
+                source_commit=args.source_commit,
+            )
+            print(
+                f"Validated native release provenance for run {provenance['run_id']} "
+                f"attempt {provenance['run_attempt']}"
+            )
+        elif args.command == "validate-attestation":
+            provenance = validate_release_attestation(
+                args.file,
+                directory=args.directory,
+                checksums=args.checksums,
+                provenance_path=args.provenance,
+                repository=args.repository,
+                tag=args.tag,
+                source_commit=args.source_commit,
+            )
+            _write_github_output(
+                args.github_output,
+                {
+                    "run_id": provenance["run_id"],
+                    "run_attempt": provenance["run_attempt"],
+                },
+            )
+            print(
+                f"Validated exact release attestation for run {provenance['run_id']} "
+                f"attempt {provenance['run_attempt']}"
+            )
+        elif args.command == "validate-workflow-run":
+            provenance = validate_release_provenance(
+                args.provenance,
+                repository=args.repository,
+                tag=args.tag,
+                source_commit=args.source_commit,
+            )
+            count = validate_release_workflow_run(args.file, provenance=provenance)
+            print(f"Validated {count} required native release workflow jobs")
+        elif args.command == "select-published-native":
+            releases = json.loads(args.releases.read_text(encoding="utf-8"))
+            selected = select_latest_native_release(releases)
+            tag = selected["tag_name"]
+            values = {
+                "native_tag": tag,
+                "event_is_selected": str(args.event_tag == tag).lower(),
+            }
+            _write_github_output(args.github_output, values)
+            print(json.dumps(values, sort_keys=True))
+        elif args.command == "validate-release-order":
+            releases = json.loads(args.releases.read_text(encoding="utf-8"))
+            print(validate_new_native_tag(args.candidate_tag, releases))
     except (OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

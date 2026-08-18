@@ -8,10 +8,9 @@ name: Native Installer Freshness
 # prerelease exactly as before — no signing, checksum, or provenance gate is
 # bypassed here.
 #
-# ADMIN_TOKEN (PAT with repo scope) is required for two reasons: main is
-# protected, and refs pushed with the default GITHUB_TOKEN do not trigger
-# downstream workflows, so the desktop-v* tag must be pushed with a PAT for
-# the native release workflow to fire.
+# ADMIN_TOKEN (PAT with repo scope) is required because refs pushed with the
+# default GITHUB_TOKEN do not trigger downstream workflows. Repository rules
+# for main and desktop-v* are a separate release-activation requirement.
 
 on:
   release:
@@ -160,61 +159,3 @@ jobs:
             git tag "${NATIVE_TAG}"
             git push origin "refs/tags/${NATIVE_TAG}"
           fi
-
-  supersede-published-native:
-    name: Mark older native prereleases superseded
-    # Keep the last published installer valid while its replacement is still a
-    # draft. This job runs only after a marked native prerelease is published
-    # and therefore publicly available.
-    if: >-
-      github.event_name == 'release' &&
-      startsWith(github.event.release.tag_name, 'desktop-v') &&
-      github.event.release.prerelease &&
-      !github.event.release.draft &&
-      contains(github.event.release.body, '<!-- installer-release -->')
-    runs-on: ubuntu-22.04
-    # No `environment:` gate: this job only runs AFTER a maintainer has already
-    # published (un-drafted) a native prerelease -- the publish decision is made.
-    # It just prepends a reversible "superseded" notice to OLDER prereleases, so a
-    # second manual approval added no protection and stalled the freshness pipeline
-    # (a pending approval held the `native-freshness` concurrency lock, blocking
-    # later native releases). Running it automatically resolves that.
-    permissions:
-      contents: write
-    env:
-      GH_TOKEN: ${{ github.token }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.12"
-
-      # Edits release notes only. Never deletes releases or assets: removal
-      # stays a human decision made outside CI.
-      - name: Prepend a superseded notice to older native prereleases
-        env:
-          NEWER_TAG: ${{ github.event.release.tag_name }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate \
-            --jq '.[] | select(.draft == false and .prerelease == true)
-                  | select(.tag_name | startswith("desktop-v")) | .tag_name' \
-            > native-tags.txt
-          while IFS= read -r tag; do
-            if [ -z "${tag}" ] || [ "${tag}" = "${NEWER_TAG}" ]; then
-              continue
-            fi
-            gh release view "${tag}" --json body --jq .body > candidate-notes.md
-            result="$(python scripts/native_release.py supersede-notes \
-              --newer-tag "${NEWER_TAG}" \
-              --candidate-tag "${tag}" \
-              --notes-file candidate-notes.md \
-              --output superseded-notes.md \
-              --repo "${GITHUB_REPOSITORY}")"
-            echo "${tag}: ${result}"
-            if [ "${result}" = "update" ]; then
-              gh release edit "${tag}" --notes-file superseded-notes.md
-            fi
-          done < native-tags.txt
