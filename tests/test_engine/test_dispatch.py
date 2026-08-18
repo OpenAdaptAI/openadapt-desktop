@@ -1384,6 +1384,29 @@ class TestSyncCommands:
         assert r["workflow_id"] == "wf_1"
         assert any(e == "sync_state" for e, _ in events)
 
+    def test_push_workflow_preserves_local_review_handoff(self, deps, monkeypatch) -> None:
+        disp, db, events = deps
+        db.insert_bundle("bnd1", str(disp.config.data_dir), capture_id="cap1")
+        monkeypatch.setattr(
+            "engine.hosted.push",
+            lambda *a, **k: {
+                "success": False,
+                "pending_review": True,
+                "sanitized_path": "/private/sanitized/artifact",
+                "review_command": "openadapt-flow review-sanitized ...",
+                "workflow_id": "",
+                "error": "",
+            },
+        )
+
+        result = disp.dispatch("push_workflow", {"workflow_id": "bnd1"})
+
+        assert result["ok"] is False
+        assert result["pending_review"] is True
+        assert result["sanitized_path"] == "/private/sanitized/artifact"
+        assert result["review_command"].startswith("openadapt-flow review-sanitized")
+        assert ("sync_state", {"state": "paused", "queued": 0}) in events
+
 
 class TestAuthCommands:
     def test_login_paste(self, deps, monkeypatch, fake_keyring) -> None:

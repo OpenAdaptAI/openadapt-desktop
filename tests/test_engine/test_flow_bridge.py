@@ -66,6 +66,47 @@ class TestFlowBridgeInvocation:
         assert "--name" in command
         assert command[command.index("--name") + 1] == "bundle"
 
+    def test_report_break_keeps_token_out_of_argv(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        monkeypatch.setattr("engine.flow_bridge.shutil.which", lambda _: "/usr/bin/openadapt-flow")
+        calls: list = []
+        bridge = FlowBridge(runner=_runner(calls, stdout="Nothing emitted: no halt"))
+
+        bridge.report_break(
+            tmp_path / "run",
+            workflow_id="workflow-1",
+            host="https://app.openadapt.ai",
+            env_overrides={"OPENADAPT_INGEST_TOKEN": "secret-value"},
+        )
+
+        command, env = calls[0]
+        assert "secret-value" not in command
+        assert "--token" not in command
+        assert env["OPENADAPT_INGEST_TOKEN"] == "secret-value"
+
+    def test_push_keeps_token_and_local_name_out_of_argv(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        monkeypatch.setattr("engine.flow_bridge.shutil.which", lambda _: "/usr/bin/openadapt-flow")
+        calls: list = []
+        bridge = FlowBridge(runner=_runner(calls, stdout="ok"))
+
+        bridge.push(
+            tmp_path / "bundle",
+            kind="bundle",
+            host="https://app.openadapt.ai",
+            name="Jane Doe patient transfer",
+            token="secret-value",
+        )
+
+        command, env = calls[0]
+        assert "secret-value" not in command
+        assert "Jane Doe patient transfer" not in command
+        assert "--token" not in command
+        assert "--name" not in command
+        assert env["OPENADAPT_INGEST_TOKEN"] == "secret-value"
+
     def test_demo_record_uses_canonical_bundled_flow_command(
         self, tmp_path: Path, monkeypatch
     ) -> None:
@@ -417,6 +458,19 @@ class TestFlowBridgeInvocation:
         )
         assert "oar_secret" not in rendered
         assert rendered == "openadapt-flow push --token [REDACTED] --kind bundle"
+
+    def test_egress_local_paths_are_redacted_from_debug_command(self) -> None:
+        rendered = _safe_command_for_log(
+            [
+                "openadapt-flow",
+                "push",
+                "/captures/Jane-Doe-12345.scrubbed",
+                "--kind",
+                "recording",
+            ]
+        )
+        assert "Jane-Doe" not in rendered
+        assert rendered == "openadapt-flow push [LOCAL_PATH] --kind recording"
 
     def test_phi_capable_selector_values_are_redacted_from_debug_command(self) -> None:
         rendered = _safe_command_for_log(

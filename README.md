@@ -221,9 +221,9 @@ pinned sources, hashes, and modification status are recorded in
   each surface may then truthfully claim) is in
   [docs/CODE_SIGNING.md](docs/CODE_SIGNING.md).
 
-Do not treat the legacy `upload` command or optional upload extras as the
-supported hosted path; they predate the current workflow-bundle and
-break-report contract.
+The legacy `upload --backend hosted_ingest` command is a compatibility alias
+for the supported governed `push` path. It does not call the old direct ingest
+adapter. Optional customer-owned storage adapters remain separate legacy paths.
 
 ## Architecture
 
@@ -281,17 +281,25 @@ The Python engine exposes these Beta commands:
 | `openadapt-desktop record` | Capture a local session |
 | `openadapt-desktop list` / `info` | Inspect capture metadata |
 | `openadapt-desktop scrub` | Run configured PII scrubbing |
-| `openadapt-desktop review` / `approve` / `dismiss` | Operate the local review state machine |
+| `openadapt-desktop review` / `approve` / `dismiss` | Operate the local review state machine; dismissal keeps raw data local |
 | `openadapt-desktop compile` / `replay` / `run` | Invoke the bundled, pinned `openadapt-flow` runtime on a capture or bundle |
 | `openadapt-desktop login` / `push` / `report-break` | Authenticate to the hosted control plane, push a bundle, report a halted run |
 | `openadapt-desktop storage` / `health` / `cleanup` | Inspect and maintain local storage |
-| `openadapt-desktop backends` / `upload` | Inspect or invoke legacy upload adapters |
+| `openadapt-desktop backends` / `upload` | Inspect legacy customer-owned storage adapters; the hosted alias uses governed `push` |
 | `openadapt-desktop config` / `doctor` | Inspect local configuration and dependencies |
 
 Raw recordings are local by default. Any egress path still requires careful
 review of the selected adapter, configuration, logs, and data-classification
 policy. This repository does not by itself establish a HIPAA-compliant or
 production-safe deployment.
+
+The supported `push` command delegates to Flow's exact-hash sanitized
+derivative contract. It distinguishes a local review pause from an upload. It
+requires a returned hosted workflow identity before it reports success. It
+never falls back to a direct Desktop upload when Flow is missing or returns an
+error. The former direct hosted-ingest backend now refuses every upload. The
+legacy customer-owned adapter queue selects the reviewed scrubbed path again
+immediately before egress; a dismissed raw capture is not uploadable.
 
 ## Development
 
@@ -316,7 +324,7 @@ current public product boundary.
 | [`openadapt-flow`](https://github.com/OpenAdaptAI/openadapt-flow) | Canonical workflow compiler, runtime, certification, and governed repair engine |
 | [`OpenAdapt`](https://github.com/OpenAdaptAI/OpenAdapt) | Flagship launcher and meta-repository |
 | [`openadapt-tray`](https://github.com/OpenAdaptAI/openadapt-tray) | Experimental system-tray status and launcher companion for this cockpit |
-| [`openadapt-capture`](https://github.com/OpenAdaptAI/openadapt-capture) | Experimental capture component used by this Python engine |
+| [`openadapt-capture`](https://github.com/OpenAdaptAI/openadapt-capture) | Beta canonical native screen, mouse, keyboard, timing, window-scoping, and media-capture component |
 | [`openadapt-privacy`](https://github.com/OpenAdaptAI/openadapt-privacy) | Experimental PII detection and redaction component |
 
 Documentation for the wider stack lives at

@@ -120,6 +120,7 @@ _POSTCONDITION_ACTION_KINDS = frozenset(
     }
 )
 _SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
+_INGEST_TOKEN_ENV = "OPENADAPT_INGEST_TOKEN"
 
 
 def _contract_counts(value: object) -> dict[str, int] | None:
@@ -426,10 +427,21 @@ def _safe_command_for_log(cmd: list[str]) -> str:
     }
     safe: list[str] = []
     redact_next = False
-    for value in cmd:
+    egress_verb_index = next(
+        (index for index, value in enumerate(cmd) if value in {"push", "report-break"}),
+        None,
+    )
+    for index, value in enumerate(cmd):
         if redact_next:
             safe.append("[REDACTED]")
             redact_next = False
+            continue
+        if (
+            egress_verb_index is not None
+            and index == egress_verb_index + 1
+            and not value.startswith("-")
+        ):
+            safe.append("[LOCAL_PATH]")
             continue
         safe.append(value)
         redact_next = value in redacted_after
@@ -782,9 +794,43 @@ class FlowBridge:
 
         args = ["push", str(path), "--kind", kind, "--host", host]
         if name:
-            args += ["--name", name]
+            # A Desktop task description can contain a record identity. Do not
+            # put it in argv or logs. Cloud can suggest a safe display name.
+            logger.warning("Desktop omitted a local workflow name from the Flow command")
+        child_env = dict(env_overrides or {})
         if token:
-            args += ["--token", token]
+            child_env[_INGEST_TOKEN_ENV] = token
+        return self._run(args, timeout=timeout, env_overrides=child_env or None)
+
+    def report_break(
+        self,
+        run_dir: Path,
+        *,
+        workflow_id: str,
+        host: str,
+        deployment_kind: str = "cloud",
+        org_id: str | None = None,
+        timeout: float | None = None,
+        env_overrides: dict[str, str] | None = None,
+    ) -> FlowResult:
+        """Send Flow's closed-schema break summary.
+
+        The bearer token belongs in ``env_overrides``. It must not appear in
+        the child process argument list.
+        """
+
+        args = [
+            "report-break",
+            str(run_dir),
+            "--workflow-id",
+            workflow_id,
+            "--host",
+            host,
+            "--deployment-kind",
+            deployment_kind,
+        ]
+        if org_id:
+            args += ["--org-id", org_id]
         return self._run(args, timeout=timeout, env_overrides=env_overrides)
 
     def teach(

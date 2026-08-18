@@ -10,6 +10,7 @@ import stat
 import zipfile
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 
 class QualificationLifecycleError(RuntimeError):
@@ -267,7 +268,13 @@ def parse_flow_push(stdout: str, stderr: str, *, ok: bool) -> dict[str, Any]:
     """Project Flow's bounded push states without treating review as deployment."""
 
     if not ok:
-        return {"ok": False, "deployed": False, "error": stderr or "Cloud deploy failed"}
+        detail = (stderr or stdout or "Cloud deploy failed").strip()[:500]
+        return {
+            "ok": False,
+            "deployed": False,
+            "delivery_uncertain": True,
+            "error": detail,
+        }
     if "Upload paused for local review" in stdout:
         sanitized_path = ""
         marker = "Sanitized derivative created at "
@@ -288,6 +295,10 @@ def parse_flow_push(stdout: str, stderr: str, *, ok: bool) -> dict[str, Any]:
             workflow_id = line.split("workflow_id=", 1)[1].split()[0].rstrip(",).")
         if line.startswith("Dashboard: "):
             dashboard_url = line.removeprefix("Dashboard: ").strip()
+    try:
+        workflow_id = str(UUID(workflow_id))
+    except (ValueError, AttributeError):
+        workflow_id = ""
     return {
         "ok": bool(workflow_id),
         "deployed": bool(workflow_id),

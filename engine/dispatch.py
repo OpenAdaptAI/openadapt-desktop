@@ -2587,7 +2587,7 @@ class EngineDispatcher:
     # ------------------------------------------------------- sync / push
 
     def push_workflow(self, **params: Any) -> dict:
-        """Push a compiled bundle to ``/api/ingest`` and mirror sync state."""
+        """Start a governed push and preserve a required local-review pause."""
         from engine import hosted
 
         workflow_id = params.get("workflow_id")
@@ -2606,9 +2606,18 @@ class EngineDispatcher:
         except Exception as exc:
             self._emit_sync("offline")
             return {"ok": False, "error": str(exc), "workflow_id": ""}
-        self._emit_sync("synced" if result.get("success") else "offline")
+        if result.get("success"):
+            self._emit_sync("synced")
+        elif result.get("pending_review"):
+            self._emit_sync("paused")
+        else:
+            self._emit_sync("offline")
         return {
             "ok": bool(result.get("success")),
+            "pending_review": bool(result.get("pending_review")),
+            "delivery_uncertain": bool(result.get("delivery_uncertain")),
+            "sanitized_path": result.get("sanitized_path", ""),
+            "review_command": result.get("review_command", ""),
             "workflow_id": result.get("workflow_id", ""),
             "dashboard_url": result.get("dashboard_url", ""),
             "error": result.get("error", ""),
