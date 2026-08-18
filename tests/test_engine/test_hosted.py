@@ -13,6 +13,109 @@ from engine.backends.protocol import UploadResult
 from engine.flow_bridge import FlowResult
 from engine.hosted import PhiBoundaryError, report_break, zip_dir
 
+_SHA_A = "a" * 64
+_SHA_B = "b" * 64
+_SHA_C = "c" * 64
+_SHA_D = "d" * 64
+_WORKFLOW_ID = "123e4567-e89b-12d3-a456-426614174000"
+_INGEST_ID = "223e4567-e89b-42d3-a456-426614174000"
+_ORG_ID = "323e4567-e89b-42d3-a456-426614174000"
+_BUNDLE_VERSION_ID = "423e4567-e89b-42d3-a456-426614174000"
+_RUNTIME_VALIDATION_ID = "523e4567-e89b-42d3-a456-426614174000"
+
+
+def _push_document(
+    *, status: str = "accepted_for_ingest", kind: str = "recording"
+) -> dict:
+    document = {
+        "schema": "openadapt.push-result/v1",
+        "status": status,
+        "workflow_id": None,
+        "artifact_ingest_id": None,
+        "review": None,
+        "attestation": None,
+        "binding": {
+            "kind": kind,
+            "source_tree_sha256": _SHA_A,
+            "derivative_tree_sha256": _SHA_B,
+            "approved_archive_sha256": None,
+            "artifact_sha256": None,
+            "bundle_sha256": None,
+            "source_recording_sha256": None,
+            "sanitization_policy": "outbound-phi-v1",
+            "certification_policy": None,
+            "certification_evidence_sha256": None,
+            "governed_authorization_template_sha256": None,
+            "parameter_schema_sha256": None,
+            "attested_run_report_sha256": None,
+            "resolves_run_id": None,
+            "organization_id": None,
+            "bundle_version_id": None,
+            "bundle_version": None,
+            "runtime_validation_id": None,
+        },
+        "next_action": None,
+        "dashboard_url": None,
+        "delivery": {"attempted": False, "certainty": "not_attempted"},
+        "error": None,
+    }
+    if status == "paused_for_review":
+        document["review"] = {
+            "id": _SHA_C,
+            "scope": "local_non_authoritative",
+            "sanitized_path": "/safe/derivative",
+            "command": "openadapt-flow review-sanitized /safe/derivative",
+        }
+        document["next_action"] = "review_local"
+    elif status == "accepted_for_ingest":
+        document["artifact_ingest_id"] = _INGEST_ID
+        document["review"] = {
+            "id": _SHA_C,
+            "scope": "local_non_authoritative",
+            "sanitized_path": None,
+            "command": None,
+        }
+        document["binding"]["approved_archive_sha256"] = _SHA_D
+        document["binding"]["artifact_sha256"] = _SHA_D
+        document["delivery"] = {"attempted": True, "certainty": "accepted"}
+        if kind == "recording":
+            document["next_action"] = "parameterize"
+        else:
+            document["workflow_id"] = _WORKFLOW_ID
+            document["attestation"] = {
+                "id": "challenge-1",
+                "schema": "openadapt.runtime-validation/v3",
+            }
+            document["binding"].update(
+                {
+                    "bundle_sha256": _SHA_D,
+                    "source_recording_sha256": _SHA_A,
+                    "certification_policy": "regulated",
+                    "certification_evidence_sha256": _SHA_B,
+                    "parameter_schema_sha256": _SHA_C,
+                    "attested_run_report_sha256": _SHA_D,
+                    "organization_id": _ORG_ID,
+                    "bundle_version_id": _BUNDLE_VERSION_ID,
+                    "bundle_version": 3,
+                    "runtime_validation_id": _RUNTIME_VALIDATION_ID,
+                }
+            )
+            document["next_action"] = "open_dashboard"
+            document["dashboard_url"] = (
+                f"https://app.openadapt.ai/dashboard/workflows/{_WORKFLOW_ID}"
+            )
+    elif status == "failed":
+        document["binding"]["kind"] = None
+        document["binding"]["source_tree_sha256"] = None
+        document["binding"]["derivative_tree_sha256"] = None
+        document["binding"]["sanitization_policy"] = None
+        document["delivery"] = {"attempted": None, "certainty": "not_accepted"}
+        document["error"] = {
+            "code": "push_failed",
+            "message": "The artifact was not accepted for ingest.",
+        }
+    return document
+
 
 class _StubBackend:
     name = "hosted_ingest"
@@ -152,9 +255,31 @@ class TestPush:
         result = hosted.push(rec)
 
         assert result["success"] is False
-        assert result["workflow_id"] == ""
+        assert result["workflow_id"] is None
         assert result["delivery_uncertain"] is True
         assert "Do not retry blindly" in result["error"]
+
+    def test_push_exception_detail_is_not_logged(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        rec = tmp_path / "rec"
+        rec.mkdir()
+        secret = "/captures/Jane-Doe-12345/raw.sqlite"
+        warnings: list[tuple[tuple, dict]] = []
+        monkeypatch.setattr(
+            hosted,
+            "_push_via_flow",
+            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError(secret)),
+        )
+        monkeypatch.setattr(
+            "engine.hosted.logger.warning",
+            lambda *args, **kwargs: warnings.append((args, kwargs)),
+        )
+
+        result = hosted.push(rec)
+
+        assert result["delivery_uncertain"] is True
+        assert secret not in repr(warnings)
 
     def test_flow_review_pause_is_not_reported_as_upload_success(
         self,
@@ -163,23 +288,20 @@ class TestPush:
     ) -> None:
         rec = tmp_path / "rec"
         rec.mkdir()
-        derivative = tmp_path / "sanitized" / "artifact-abc"
-        output = (
-            f"Sanitized derivative created at {derivative}.\n"
-            "Upload paused for local review; the original was not modified or uploaded.\n"
-            f"openadapt-flow review-sanitized {derivative} --original {rec}\n"
-        )
+        document = _push_document(status="paused_for_review")
         monkeypatch.setattr(
             "engine.hosted.FlowBridge.push",
-            lambda *args, **kwargs: FlowResult(ok=True, returncode=0, stdout=output),
+            lambda *args, **kwargs: FlowResult(
+                ok=True, returncode=0, stdout=json.dumps(document)
+            ),
         )
 
         result = hosted.push(rec)
 
         assert result["success"] is False
         assert result["pending_review"] is True
-        assert result["sanitized_path"] == str(derivative)
-        assert result["workflow_id"] == ""
+        assert result["sanitized_path"] == "/safe/derivative"
+        assert result["workflow_id"] is None
 
     def test_desktop_credential_reaches_flow_only_through_environment(
         self,
@@ -191,12 +313,8 @@ class TestPush:
         calls: list[dict] = []
         monkeypatch.setattr(
             hosted,
-            "active_credential",
-            lambda: {
-                "host": "https://app.openadapt.ai",
-                "token": "stored-secret",
-                "org_id": "org-1",
-            },
+            "token_for_host",
+            lambda host, explicit=None: explicit or "stored-secret",
         )
 
         def fake_push(*_args, **kwargs):
@@ -204,10 +322,7 @@ class TestPush:
             return FlowResult(
                 ok=True,
                 returncode=0,
-                stdout=(
-                    "Pushed. workflow_id=123e4567-e89b-12d3-a456-426614174000 "
-                    "(name='Example', kind=recording, compile=ok).\n"
-                ),
+                stdout=json.dumps(_push_document()),
             )
 
         monkeypatch.setattr("engine.hosted.FlowBridge.push", fake_push)
@@ -230,14 +345,18 @@ class TestPush:
         calls: list[dict] = []
         monkeypatch.setattr(
             hosted,
-            "active_credential",
-            lambda: {"host": "https://other.example", "token": "wrong-host-secret"},
+            "token_for_host",
+            lambda host, explicit=None: explicit or "",
         )
         monkeypatch.setattr(
             "engine.hosted.FlowBridge.push",
             lambda *_args, **kwargs: (
                 calls.append(kwargs)
-                or FlowResult(ok=False, returncode=1, stdout="Not logged in")
+                or FlowResult(
+                    ok=False,
+                    returncode=1,
+                    stdout=json.dumps(_push_document(status="failed")),
+                )
             ),
         )
 
@@ -252,17 +371,17 @@ class TestPush:
     ) -> None:
         rec = tmp_path / "rec"
         rec.mkdir()
-        workflow_id = "123e4567-e89b-12d3-a456-426614174000"
-        output = (
-            f"Pushed. workflow_id={workflow_id} (name='Example', kind=recording, compile=ok).\n"
-            f"Dashboard: https://app.openadapt.ai/dashboard/workflows/{workflow_id}\n"
-        )
+        workflow_id = _WORKFLOW_ID
         monkeypatch.setattr(
             "engine.hosted.FlowBridge.push",
-            lambda *args, **kwargs: FlowResult(ok=True, returncode=0, stdout=output),
+            lambda *args, **kwargs: FlowResult(
+                ok=True,
+                returncode=0,
+                stdout=json.dumps(_push_document(kind="bundle")),
+            ),
         )
 
-        result = hosted.push(rec)
+        result = hosted.push(rec, kind="bundle")
 
         assert result["success"] is True
         assert result["workflow_id"] == workflow_id
@@ -277,13 +396,16 @@ class TestPush:
         rec.mkdir()
         monkeypatch.setattr(
             "engine.hosted.FlowBridge.push",
-            lambda *args, **kwargs: FlowResult(ok=True, returncode=0, stdout="Pushed."),
+            lambda *args, **kwargs: FlowResult(
+                ok=True, returncode=0, stdout=json.dumps(_push_document(status="failed"))
+            ),
         )
 
         result = hosted.push(rec)
 
         assert result["success"] is False
-        assert "without an authenticated hosted workflow identity" in result["error"]
+        assert result["delivery_uncertain"] is True
+        assert result["error_code"] == "invalid_ingest_response"
 
     def test_flow_none_workflow_identity_is_not_success(
         self,
@@ -292,19 +414,21 @@ class TestPush:
     ) -> None:
         rec = tmp_path / "rec"
         rec.mkdir()
+        malformed = _push_document(kind="bundle")
+        malformed["workflow_id"] = None
         monkeypatch.setattr(
             "engine.hosted.FlowBridge.push",
             lambda *args, **kwargs: FlowResult(
                 ok=True,
                 returncode=0,
-                stdout="Pushed. workflow_id=None (name='Example', kind=recording, compile=?).",
+                stdout=json.dumps(malformed),
             ),
         )
 
-        result = hosted.push(rec)
+        result = hosted.push(rec, kind="bundle")
 
         assert result["success"] is False
-        assert result["workflow_id"] == ""
+        assert result["workflow_id"] is None
 
     def test_flow_failure_uses_bounded_stdout_and_marks_delivery_uncertain(
         self,
@@ -313,12 +437,13 @@ class TestPush:
     ) -> None:
         rec = tmp_path / "rec"
         rec.mkdir()
+        document = _push_document(status="failed")
         monkeypatch.setattr(
             "engine.hosted.FlowBridge.push",
             lambda *args, **kwargs: FlowResult(
                 ok=False,
                 returncode=1,
-                stdout="request outcome unknown",
+                stdout=json.dumps(document),
                 stderr="",
             ),
         )
@@ -326,8 +451,8 @@ class TestPush:
         result = hosted.push(rec, token="secret-value")
 
         assert result["success"] is False
-        assert result["delivery_uncertain"] is True
-        assert result["error"] == "request outcome unknown"
+        assert result["delivery_uncertain"] is False
+        assert result["error"] == "The artifact was not accepted for ingest."
 
 
 class TestReportBreak:
@@ -408,6 +533,25 @@ class TestReportBreak:
         result = report_break(run_dir, workflow_id="wf_1")
         assert result["ok"] is False
         assert "Not logged in" in result["error"]
+
+    def test_report_exception_detail_is_not_logged(self, tmp_path: Path, monkeypatch) -> None:
+        run_dir = tmp_path / "run"
+        self._write_report(run_dir, {"reason": "drift"})
+        secret = "/runs/Jane-Doe-12345/report.json"
+        warnings: list[tuple[tuple, dict]] = []
+        monkeypatch.setattr(
+            "engine.hosted.FlowBridge.report_break",
+            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError(secret)),
+        )
+        monkeypatch.setattr(
+            "engine.hosted.logger.warning",
+            lambda *args, **kwargs: warnings.append((args, kwargs)),
+        )
+
+        result = report_break(run_dir, workflow_id="wf_1", token="oai_ingest_x")
+
+        assert result["delivery_uncertain"] is True
+        assert secret not in repr(warnings)
 
     def test_free_text_is_not_sent_by_desktop(self, tmp_path: Path, monkeypatch) -> None:
         run_dir = tmp_path / "run"

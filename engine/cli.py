@@ -752,7 +752,7 @@ def cmd_doctor(args: argparse.Namespace, engine: types.SimpleNamespace) -> None:
     # Hosted credential
     from engine.auth.store import auth_header
 
-    logged_in = "Authorization" in auth_header()
+    logged_in = "Authorization" in auth_header(engine.config.hosted_host)
     checks.append(
         (
             "Hosted credential",

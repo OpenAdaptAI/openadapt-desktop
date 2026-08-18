@@ -459,6 +459,19 @@ class TestFlowBridgeInvocation:
         assert "oar_secret" not in rendered
         assert rendered == "openadapt-flow push --token [REDACTED] --kind bundle"
 
+    def test_host_is_redacted_from_debug_command(self) -> None:
+        rendered = _safe_command_for_log(
+            [
+                "openadapt-flow",
+                "push",
+                "artifact",
+                "--host",
+                "https://customer-private.example",
+            ]
+        )
+        assert "customer-private" not in rendered
+        assert "--host [REDACTED]" in rendered
+
     def test_egress_local_paths_are_redacted_from_debug_command(self) -> None:
         rendered = _safe_command_for_log(
             [

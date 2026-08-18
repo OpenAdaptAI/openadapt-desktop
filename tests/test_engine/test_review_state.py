@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,26 @@ from engine.review import (
     get_pending_reviews,
     transition_status,
 )
+
+
+def test_derivative_tree_digest_distinguishes_member_type_and_path(tmp_path: Path) -> None:
+    """A directory name cannot collide with a file path plus its content hash."""
+
+    from engine.review import derivative_tree_sha256
+
+    derivative = tmp_path / "capture.scrubbed"
+    derivative.mkdir()
+    secret = b"secret bytes that must not pass an old approval"
+    collision_name = "a" + hashlib.sha256(secret).hexdigest()
+    directory = derivative / collision_name
+    directory.mkdir()
+    directory_digest = derivative_tree_sha256(derivative)
+
+    directory.rmdir()
+    (derivative / "a").write_bytes(secret)
+    file_digest = derivative_tree_sha256(derivative)
+
+    assert file_digest != directory_digest
 
 
 @pytest.fixture

@@ -18,12 +18,18 @@ import tempfile
 import zipfile
 from pathlib import Path
 from typing import Any
-from uuid import UUID
 
 from loguru import logger
 
-from engine.auth.store import DEFAULT_HOST, INGEST_TOKEN_ENV, active_credential
+from engine.auth.store import (
+    DEFAULT_HOST,
+    INGEST_TOKEN_ENV,
+    active_credential,
+    canonical_host_origin,
+    token_for_host,
+)
 from engine.flow_bridge import FlowBridge
+from engine.qualification_lifecycle import parse_flow_push
 
 _MAX_FLOW_ERROR_CHARS = 500
 
@@ -136,8 +142,8 @@ def push(
     if backend is not None or not prefer_flow:
         return {
             "success": False,
-            "workflow_id": "",
-            "dashboard_url": "",
+            "workflow_id": None,
+            "dashboard_url": None,
             "error": (
                 "Direct Desktop ingest is disabled. Use the pinned Flow push command so "
                 "only an approved, exact-hash sanitized derivative can leave the machine."
@@ -149,12 +155,18 @@ def push(
         # A launch or transport failure must never select a raw upload
         # fallback. The exception can occur after Flow dispatched a request,
         # so Desktop must not claim that no bytes crossed the boundary.
-        logger.warning("Flow push did not return a confirmed outcome: {e}", e=exc)
+        logger.warning(
+            "Flow push did not return a confirmed outcome ({kind})",
+            kind=type(exc).__name__,
+        )
         return {
             "success": False,
             "delivery_uncertain": True,
-            "workflow_id": "",
-            "dashboard_url": "",
+            "workflow_id": None,
+            "artifact_ingest_id": None,
+            "next_action": "reconcile",
+            "error_code": "delivery_uncertain",
+            "dashboard_url": None,
             "error": (
                 "Flow did not return a confirmed upload outcome. Do not retry blindly; "
                 "reconcile the exact artifact in Cloud first."
@@ -192,76 +204,25 @@ def _push_via_flow(
         host=host,
         token=None,
         env_overrides=env,
+        json_output=True,
     )
-    stdout = result.stdout or ""
-    if result.ok and "Upload paused for local review" in stdout:
-        derivative_match = re.search(
-            r"^Sanitized derivative created at (.+)\.$", stdout, re.MULTILINE
-        )
-        review_command = next(
-            (
-                line
-                for line in stdout.splitlines()
-                if line.startswith("openadapt-flow review-sanitized ")
-            ),
-            "",
-        )
-        if derivative_match is None or not review_command:
-            return {
-                "success": False,
-                "pending_review": False,
-                "workflow_id": "",
-                "dashboard_url": "",
-                "error": "Flow paused, but Desktop could not verify the review handoff.",
-            }
-        return {
-            "success": False,
-            "pending_review": True,
-            "sanitized_path": derivative_match.group(1),
-            "review_command": review_command,
-            "workflow_id": "",
-            "dashboard_url": "",
-            "error": "",
-        }
-
-    workflow_match = re.search(r"\bworkflow_id=([^\s,\)]+)", stdout)
-    workflow_id = workflow_match.group(1) if workflow_match else ""
-    try:
-        workflow_id = str(UUID(workflow_id))
-    except (ValueError, AttributeError):
-        workflow_id = ""
-    dashboard_match = re.search(r"^Dashboard:\s+(\S+)\s*$", stdout, re.MULTILINE)
-    dashboard_url = dashboard_match.group(1) if dashboard_match else ""
-    success = bool(result.ok and workflow_id)
-    error = (
-        _bounded_flow_error(result.stderr or result.stdout, secret=resolved_token)
-        if not result.ok
-        else ""
+    parsed = parse_flow_push(
+        result.stdout or "",
+        result.stderr or "",
+        ok=result.ok,
+        expected_host=host,
     )
-    if result.ok and not workflow_id:
-        error = "Flow returned success without an authenticated hosted workflow identity."
+    success = bool(parsed.get("accepted_for_ingest"))
     return {
+        **parsed,
         "success": success,
-        "pending_review": False,
-        "delivery_uncertain": not result.ok,
-        "workflow_id": workflow_id,
-        "dashboard_url": dashboard_url,
-        "error": error,
     }
 
 
 def _token_for_host(host: str, *, explicit: str | None = None) -> str:
     """Resolve a Desktop credential without sending it to another origin."""
 
-    if explicit and explicit.strip():
-        return explicit.strip()
-    env_token = os.environ.get(INGEST_TOKEN_ENV, "").strip()
-    if env_token:
-        return env_token
-    credential = active_credential()
-    if credential and str(credential.get("host", "")).rstrip("/") == host.rstrip("/"):
-        return str(credential.get("token") or "").strip()
-    return ""
+    return token_for_host(host, explicit=explicit)
 
 
 def _bounded_flow_error(message: str, *, secret: str = "") -> str:
@@ -297,7 +258,9 @@ def report_break(
 
     if org_id is None:
         cred = active_credential()
-        if cred and str(cred.get("host", "")).rstrip("/") == host.rstrip("/"):
+        if cred and canonical_host_origin(
+            str(cred.get("host", ""))
+        ) == canonical_host_origin(host):
             org_id = cred.get("org_id")
     try:
         result = FlowBridge().report_break(
@@ -310,7 +273,10 @@ def report_break(
             env_overrides={INGEST_TOKEN_ENV: resolved_token},
         )
     except Exception as exc:
-        logger.warning("Flow report-break did not return a confirmed outcome: {e}", e=exc)
+        logger.warning(
+            "Flow report-break did not return a confirmed outcome ({kind})",
+            kind=type(exc).__name__,
+        )
         return {
             "ok": False,
             "delivery_uncertain": True,

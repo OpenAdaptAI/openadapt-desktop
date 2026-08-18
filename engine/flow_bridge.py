@@ -411,6 +411,7 @@ def _safe_command_for_log(cmd: list[str]) -> str:
 
     redacted_after = {
         "--token",
+        "--host",
         "--password",
         "--rdp-password",
         "--agent-token",
@@ -789,10 +790,13 @@ class FlowBridge:
         token: str | None = None,
         timeout: float | None = None,
         env_overrides: dict[str, str] | None = None,
+        json_output: bool = True,
     ) -> FlowResult:
         """Upload through the same pinned Flow runtime as every other verb."""
 
         args = ["push", str(path), "--kind", kind, "--host", host]
+        if json_output:
+            args.append("--json")
         if name:
             # A Desktop task description can contain a record identity. Do not
             # put it in argv or logs. Cloud can suggest a safe display name.

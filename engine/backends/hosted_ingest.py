@@ -61,7 +61,7 @@ class HostedIngestBackend:
 
     def verify_credentials(self) -> bool:
         """True when a bearer token is resolvable from the auth store/env."""
-        return "Authorization" in auth_header()
+        return "Authorization" in auth_header(self.host)
 
     def estimate_cost(self, size_bytes: int) -> float | None:
         """Hosted ingest has no per-upload storage cost surfaced to the client."""

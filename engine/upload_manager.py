@@ -44,6 +44,7 @@ from engine.review import (
     approved_egress_path,
     derivative_tree_sha256,
     load_derivative_approval,
+    update_derivative_tree_digest,
 )
 
 # Durable/offline retry policy (spec section 5): jobs survive restarts (they
@@ -233,9 +234,17 @@ class UploadManager:
                     )
                     if relative == "review_status.json":
                         continue
-                    frozen_tree.update(relative.encode("utf-8"))
                     if not member.is_file():
-                        continue
+                        if member.is_dir():
+                            update_derivative_tree_digest(
+                                frozen_tree,
+                                relative_path=relative,
+                                member_type="directory",
+                            )
+                            continue
+                        raise EgressArtifactError(
+                            "The sanitized derivative has an unsupported member type."
+                        )
                     stat = os.stat(member, follow_symlinks=False)
                     if stat.st_nlink != 1:
                         raise EgressArtifactError(
@@ -250,7 +259,12 @@ class UploadManager:
                         while chunk := input_file.read(1024 * 1024):
                             file_digest.update(chunk)
                             output_file.write(chunk)
-                    frozen_tree.update(file_digest.hexdigest().encode("ascii"))
+                    update_derivative_tree_digest(
+                        frozen_tree,
+                        relative_path=relative,
+                        member_type="file",
+                        file_sha256=file_digest.hexdigest(),
+                    )
             if (
                 frozen_tree.hexdigest() != approved_tree_sha256
                 or derivative_tree_sha256(source) != approved_tree_sha256

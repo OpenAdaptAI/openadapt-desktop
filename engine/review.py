@@ -48,7 +48,7 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from engine.audit import AuditLogger
@@ -136,6 +136,28 @@ def _stream_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def update_derivative_tree_digest(
+    digest: Any,
+    *,
+    relative_path: str,
+    member_type: str,
+    file_sha256: str | None = None,
+) -> None:
+    """Add one unambiguous, type-aware record to a derivative tree hash."""
+
+    path_bytes = relative_path.encode("utf-8")
+    if member_type not in {"directory", "file"}:
+        raise EgressArtifactError("The sanitized derivative has an unsupported member type.")
+    digest.update(b"openadapt.desktop-derivative-member/v1\0")
+    digest.update(b"D" if member_type == "directory" else b"F")
+    digest.update(len(path_bytes).to_bytes(8, "big"))
+    digest.update(path_bytes)
+    if member_type == "file":
+        if not isinstance(file_sha256, str) or not _SHA256_RE.fullmatch(file_sha256):
+            raise EgressArtifactError("The sanitized derivative file digest is invalid.")
+        digest.update(bytes.fromhex(file_sha256))
+
+
 def derivative_tree_sha256(path: Path) -> str:
     """Hash a derivative tree without loading recording media into memory."""
 
@@ -147,14 +169,28 @@ def derivative_tree_sha256(path: Path) -> str:
         relative = "." if member == path else member.relative_to(path).as_posix()
         if relative == "review_status.json":
             continue
-        digest.update(relative.encode("utf-8"))
         if member.is_file():
             stat = os.stat(member, follow_symlinks=False)
             if stat.st_nlink != 1:
                 raise EgressArtifactError(
                     "The sanitized derivative contains a hard-linked file."
                 )
-            digest.update(_stream_sha256(member).encode("ascii"))
+            update_derivative_tree_digest(
+                digest,
+                relative_path=relative,
+                member_type="file",
+                file_sha256=_stream_sha256(member),
+            )
+        elif member.is_dir():
+            update_derivative_tree_digest(
+                digest,
+                relative_path=relative,
+                member_type="directory",
+            )
+        else:
+            raise EgressArtifactError(
+                "The sanitized derivative has an unsupported member type."
+            )
     return digest.hexdigest()
 
 

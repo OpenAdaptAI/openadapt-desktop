@@ -12,9 +12,16 @@ Covers, against a FAKE cloud (httpx.MockTransport -- no network):
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import io
 import json
 import random
+import stat
+import threading
+import time
+import zipfile
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -43,10 +50,12 @@ from engine.runner_loop import (
     assert_phi_free,
     backoff_delay,
     bundle_content_digest,
+    safe_extract_zip,
     validate_dispatch,
 )
 
 HOST = "https://cloud.test"
+CONTRACT_HASH = f"sha256:{'a' * 64}"
 
 # A report whose steps carry PHI booby traps that must NEVER cross the wire.
 TRAPPED_REPORT = {
@@ -56,7 +65,7 @@ TRAPPED_REPORT = {
         {
             "step_id": "s1",
             "rung": "structural",
-            "effect_contract_hashes": ["sha256:aa"],
+            "effect_contract_hashes": [CONTRACT_HASH],
             "effect_verified": True,
             "identity_verified": True,
             "elapsed_ms": 10,
@@ -81,7 +90,7 @@ TRAPPED_HALT = {
     "kind": "effect_refuted",
     "substrate": "fhir",
     "effect_kind": "record_written",
-    "contract_hash": "sha256:aa",
+    "contract_hash": CONTRACT_HASH,
     "verdict": "refuted",
     "reason": "observed 2 records, expected 1",
     "suggested_action": "inspect the matched records and remove the duplicate(s)",
@@ -198,6 +207,8 @@ class FakeCloud:
         self.poll_count = 0
         self.poll_status: int | None = None  # force a status (401/500) when set
         self.ack_status: int | None = None
+        self.evidence_status: int | None = None
+        self.extend_status: int | None = None
         self.bundles: dict[str, bytes] = {}  # url path -> zip bytes
 
     def handler(self, request: httpx.Request) -> httpx.Response:
@@ -219,6 +230,8 @@ class FakeCloud:
             return httpx.Response(204)
         if path == EXTEND_PATH:
             self.extends.append(body)
+            if self.extend_status is not None:
+                return httpx.Response(self.extend_status)
             return httpx.Response(200, json={"ok": True})
         if path == ACK_PATH:
             if self.ack_status is not None:
@@ -228,6 +241,8 @@ class FakeCloud:
             )
             return httpx.Response(200, json={"ok": True})
         if path.startswith("/api/runs/") and path.endswith("/evidence"):
+            if self.evidence_status is not None:
+                return httpx.Response(self.evidence_status)
             self.evidence.append(body)
             return httpx.Response(202, json={"ok": True})
         if path in self.bundles:
@@ -348,6 +363,7 @@ class TestHappyPath:
         run_dir = config.data_dir / "runner" / "runs" / "run_1"
         auth_json = json.loads((run_dir / "authorization.json").read_text())
         assert auth_json["authorization_id"] == "auth_1"
+        assert stat.S_IMODE((run_dir / "authorization.json").stat().st_mode) == 0o600
 
         # evidence: started state, one step event per step, terminal summary
         kinds = [e["kind"] for e in cloud.evidence]
@@ -390,7 +406,9 @@ class TestHappyPath:
         assert halt["kind"] == "effect_refuted"
         assert halt["substrate"] == "fhir"
         assert halt["verdict"] == "refuted"
-        assert halt["contract_hash"] == "sha256:aa"
+        assert halt["contract_hash"] == CONTRACT_HASH
+        assert halt["reason"] == "halt at step s1"
+        assert "suggested_action" not in halt
         # counts ONLY -- observed/expected VALUES and matched_records stripped
         assert halt["evidence_digest"] == {"observed_count": 2, "expected_count": 1}
         assert cloud.evidence[-1]["run_summary"]["status"] == "halted-needs-attention"
@@ -402,9 +420,6 @@ class TestHappyPath:
     async def test_bundle_staged_from_signed_url(self, rig, tmp_path: Path) -> None:
         svc, cloud, flow, config, _db, _events = rig
         login()
-        import io
-        import zipfile
-
         manifest = json.dumps({"workflow": "wf_remote"}).encode()
         digest = hashlib.sha256(manifest).hexdigest()
         buf = io.BytesIO()
@@ -423,11 +438,59 @@ class TestHappyPath:
         staged = config.data_dir / "runner" / "bundles" / digest / "manifest.json"
         assert staged.is_file()
 
+    def test_bundle_archive_rejects_prefix_traversal_and_symlinks(
+        self, tmp_path: Path
+    ) -> None:
+        traversal = tmp_path / "traversal.zip"
+        with zipfile.ZipFile(traversal, "w") as archive:
+            archive.writestr("../outside/manifest.json", "{}")
+        with pytest.raises(Refusal, match="unsafe member path"):
+            safe_extract_zip(traversal, tmp_path / "bundle-a")
+        assert not (tmp_path / "outside" / "manifest.json").exists()
+
+        symlink = tmp_path / "symlink.zip"
+        info = zipfile.ZipInfo("manifest.json")
+        info.create_system = 3
+        info.external_attr = (stat.S_IFLNK | 0o777) << 16
+        with zipfile.ZipFile(symlink, "w") as archive:
+            archive.writestr(info, "/private/target")
+        with pytest.raises(Refusal, match="unsupported member type"):
+            safe_extract_zip(symlink, tmp_path / "bundle-b")
+
 
 # ------------------------------------------------------------------ refusal
 
 
 class TestRefusal:
+    @pytest.mark.asyncio
+    async def test_refuses_digest_path_and_remote_cleartext_staging_url(
+        self, rig
+    ) -> None:
+        svc, cloud, flow, _config, _db, _events = rig
+        login()
+        unsafe_digest = "../../outside"
+        job = make_job(unsafe_digest)
+        job["bundle"]["url"] = "https://cloud.test/bundles/job.zip"
+
+        async with svc._http_factory() as http:
+            client = RunnerClient(http, token="oar_test")
+            await svc.handle_job(client, job)
+
+        assert flow.calls == []
+        assert cloud.acks[-1]["outcome"] == "refused"
+        assert "digest is invalid" in cloud.acks[-1]["reason"]
+
+        job = make_job("a" * 64, run_id="run_2")
+        job["bundle"]["url"] = "http://downloads.example/bundle.zip"
+        job["lease"] = {"job_id": "job_2", "visibility_timeout_s": 900}
+        async with svc._http_factory() as http:
+            client = RunnerClient(http, token="oar_test")
+            await svc.handle_job(client, job)
+
+        assert flow.calls == []
+        assert cloud.acks[-1]["outcome"] == "refused"
+        assert "staging URL is invalid" in cloud.acks[-1]["reason"]
+
     @pytest.mark.asyncio
     async def test_refuses_on_local_digest_mismatch(self, rig) -> None:
         svc, cloud, flow, config, _db, _events = rig
@@ -842,6 +905,131 @@ class TestUncertainOnRestart:
         assert flow.calls == []
         assert cloud.acks[-1]["outcome"] == "confirmed"
 
+    @pytest.mark.asyncio
+    async def test_corrupt_journal_refuses_to_reexecute_the_run(self, rig) -> None:
+        svc, cloud, flow, config, _db, _events = rig
+        login()
+        _bundle, digest = make_bundle(config)
+        journal_path = svc.journal._path("run_1")
+        journal_path.parent.mkdir(parents=True)
+        journal_path.write_text('{"run_id":"run_1","phase":"started"')
+
+        async with svc._http_factory() as http:
+            client = RunnerClient(http, token="oar_test")
+            await svc.handle_job(client, make_job(digest))
+
+        assert flow.calls == []
+        assert cloud.acks[-1]["outcome"] == "uncertain"
+
+
+class TestLeaseDiscipline:
+    @pytest.mark.asyncio
+    async def test_expired_lease_refuses_before_execution(self, rig) -> None:
+        svc, cloud, flow, config, _db, _events = rig
+        login()
+        _bundle, digest = make_bundle(config)
+        expired = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+        job = make_job(digest)
+        job["lease"] = {
+            "job_id": "job_1",
+            "visibility_timeout_s": 900,
+            "expires_at": expired,
+        }
+
+        async with svc._http_factory() as http:
+            client = RunnerClient(http, token="oar_test")
+            await svc.handle_job(client, job)
+
+        assert flow.calls == []
+        assert cloud.acks[-1]["outcome"] == "refused"
+        assert "lease expired" in cloud.acks[-1]["reason"]
+
+    @pytest.mark.asyncio
+    async def test_start_must_be_confirmed_before_any_gui_execution(self, rig) -> None:
+        svc, cloud, flow, config, _db, _events = rig
+        login()
+        _bundle, digest = make_bundle(config)
+        cloud.evidence_status = 503
+
+        async with svc._http_factory() as http:
+            client = RunnerClient(http, token="oar_test")
+            await svc.handle_job(client, make_job(digest))
+
+        assert flow.calls == []
+        assert cloud.acks[-1]["outcome"] == "uncertain"
+        entry = svc.journal.get("run_1")
+        assert entry["phase"] == "finished"
+        assert entry["outcome"] == "uncertain"
+
+    @pytest.mark.asyncio
+    async def test_expired_unrenewed_lease_cannot_report_false_success(
+        self, rig, monkeypatch
+    ) -> None:
+        svc, cloud, flow, config, _db, _events = rig
+        login()
+        _bundle, digest = make_bundle(config)
+        cloud.extend_status = 503
+        job = make_job(digest)
+        job["lease"] = {
+            "job_id": "job_1",
+            "visibility_timeout_s": 900,
+            "expires_at": (datetime.now(UTC) + timedelta(seconds=0.08)).isoformat(),
+        }
+        original_run = flow.run
+
+        def slow_run(*args, **kwargs):
+            time.sleep(0.12)
+            return original_run(*args, **kwargs)
+
+        monkeypatch.setattr(flow, "run", slow_run)
+        monkeypatch.setattr("engine.runner_loop.LEASE_EXTEND_INTERVAL_S", 0.01)
+
+        async with svc._http_factory() as http:
+            client = RunnerClient(http, token="oar_test")
+            await svc.handle_job(client, job)
+
+        assert len(flow.calls) == 1
+        assert cloud.extends
+        assert cloud.acks[-1]["outcome"] == "uncertain"
+        assert not any(event["kind"] == "run_summary" for event in cloud.evidence)
+        entry = svc.journal.get("run_1")
+        assert entry["outcome"] == "uncertain"
+
+    @pytest.mark.asyncio
+    async def test_concurrent_ticks_never_actuate_two_jobs_at_once(
+        self, rig, monkeypatch
+    ) -> None:
+        svc, cloud, flow, config, _db, _events = rig
+        login()
+        _bundle, digest = make_bundle(config)
+        cloud.jobs.extend(
+            [make_job(digest, run_id="run_1"), make_job(digest, run_id="run_2")]
+        )
+        active = 0
+        maximum_active = 0
+        guard = threading.Lock()
+        original_run = flow.run
+
+        def slow_run(*args, **kwargs):
+            nonlocal active, maximum_active
+            with guard:
+                active += 1
+                maximum_active = max(maximum_active, active)
+            try:
+                time.sleep(0.05)
+                return original_run(*args, **kwargs)
+            finally:
+                with guard:
+                    active -= 1
+
+        monkeypatch.setattr(flow, "run", slow_run)
+        async with svc._http_factory() as http:
+            client = RunnerClient(http, token="oar_test")
+            await asyncio.gather(svc._tick(client), svc._tick(client))
+
+        assert len(flow.calls) == 2
+        assert maximum_active == 1
+
 
 # ------------------------------------------------------------------ PHI boundary
 
@@ -863,6 +1051,8 @@ class TestPhiBoundary:
         assert "SENSITIVE" not in wire
         assert "123-45-6789" not in wire
         assert "frame-004.png" not in wire
+        assert TRAPPED_HALT["reason"] not in wire
+        assert TRAPPED_HALT["suggested_action"] not in wire
 
     def test_assert_phi_free_fails_closed(self) -> None:
         with pytest.raises(PhiBoundaryError):
@@ -896,6 +1086,24 @@ class TestPhiBoundary:
 
 
 class TestTransport:
+    @pytest.mark.asyncio
+    async def test_signed_download_error_does_not_expose_url_query(self, rig) -> None:
+        svc, cloud, flow, _config, _db, _events = rig
+        login()
+        secret = "SENSITIVE-SIGNED-QUERY"
+        job = make_job("a" * 64)
+        job["bundle"]["url"] = f"{HOST}/missing.zip?signature={secret}"
+        cloud.jobs.append(job)
+
+        async with svc._http_factory() as http:
+            client = RunnerClient(http, token="oar_test")
+            delay = await svc._tick(client)
+
+        assert delay is not None and delay > 0
+        assert flow.calls == []
+        assert secret not in repr(svc.status())
+        assert secret not in all_wire_payloads(cloud)
+
     def test_backoff_is_exponential_jittered_and_capped(self) -> None:
         rng = random.Random(42)
         for attempt in range(10):

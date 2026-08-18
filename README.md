@@ -116,7 +116,7 @@ teaching, escalation, and terminal receipts.
 | Python sidecar IPC | JSON-lines handler backed by a shared `EngineDispatcher` (recording, compile/replay/run/teach, auth, sync/push, review, config) | Beta; unit and e2e tests with mocked boundaries |
 | Tray IPC socket server | Token-authenticated loopback TCP server plus a `~/.openadapt/desktop_ipc.json` discovery file for `openadapt-tray` | Beta; not yet validated end to end against the shipped tray |
 | Desktop-to-flow handoff | `FlowBridge` launches the pinned Flow runtime embedded in the frozen sidecar as an isolated subprocess | Self-contained; no separate Python or Flow installation |
-| Hosted auth and push | Browser-PKCE and paste-token sign-in, keychain-stored credential, bundle push, and halted-run break reports to the hosted control plane | Beta |
+| Hosted auth and governed handoff | Browser-PKCE and paste-token sign-in; host-bound keychain credentials; exact `openadapt.push-result/v1` review, accepted-ingest, and uncertain-delivery state; local handoff retention; and halted-run break reports | Beta implementation candidate; distribution requires a release-qualified Flow build and live Cloud acceptance before Desktop updates its exact runtime pin |
 | Attended phone decisions | One-use QR pairing, protected local evidence, typed allowed actions, runner revalidation, receipts, device revocation, and an optional outbound hosted lane | Beta; device pairing does not replace the deployment's authenticated operator principal |
 | Build artifacts | Wheel/sdist, a self-contained PyInstaller engine+Flow runtime, and DMG/MSI/NSIS/DEB/AppImage native jobs | Native jobs prove the frozen browser lifecycle, structurally install/uninstall, and label every platform, architecture, and signing state |
 | Native installers | Distinct `desktop-v*` draft-prerelease workflow with final-byte checksums and GitHub provenance, auto-triggered at each engine release | Beta distribution lane; signing state is encoded in every filename and workflow qualification remains specific |
@@ -294,12 +294,19 @@ review of the selected adapter, configuration, logs, and data-classification
 policy. This repository does not by itself establish a HIPAA-compliant or
 production-safe deployment.
 
-The supported `push` command delegates to Flow's exact-hash sanitized
-derivative contract. It distinguishes a local review pause from an upload. It
-requires a returned hosted workflow identity before it reports success. It
-never falls back to a direct Desktop upload when Flow is missing or returns an
-error. The former direct hosted-ingest backend now refuses every upload. The
-legacy customer-owned adapter queue remains paused for this release; its exit
+The governed `push` implementation delegates to Flow's exact-hash sanitized
+derivative contract. It consumes the closed `openadapt.push-result/v1` schema
+and retains the exact review or ingest handoff locally. A recording acceptance
+requires the server-owned `artifact_ingest_id` and a governed next action. A
+bundle acceptance additionally requires the server-owned workflow identity,
+the runtime-attestation binding, and the exact trusted dashboard path. An
+unknown child or delivery outcome requires reconciliation and never becomes an
+automatic retry. The command never falls back to a direct Desktop upload when
+Flow is missing or returns an error. The former direct hosted-ingest backend
+now refuses every upload. The
+This path does not enter a native release until the exact pinned Flow artifact
+and the managed Cloud runtime pass the same live acceptance contract. The legacy
+customer-owned adapter queue remains paused for this release; its exit
 condition is a Flow-owned complete inventory, image-capable scrub, and exact
 in-app review. The dormant queue also selects the reviewed scrubbed path again
 immediately before egress; a dismissed raw capture is not uploadable.
