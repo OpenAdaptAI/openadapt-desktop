@@ -60,8 +60,14 @@ NATIVE_RELEASE_PROVENANCE_SCHEMA = "openadapt.native-release-provenance/v2"
 NATIVE_RELEASE_WORKFLOW = ".github/workflows/native-release.yml"
 NATIVE_RELEASE_WORKFLOW_NAME = "Native Installer Release"
 ENGINE_RELEASE_WORKFLOW = ".github/workflows/release.yml"
+ENGINE_RELEASE_PROVENANCE = "openadapt-desktop-engine-release-provenance.json"
+ENGINE_RELEASE_PROVENANCE_SCHEMA = "openadapt.engine-release-provenance/v1"
 VERIFIED_RELEASE_INDEX = "openadapt-desktop-verified-release.json"
 VERIFIED_RELEASE_INDEX_SCHEMA = "openadapt.desktop-verified-release/v1"
+VERIFIED_RELEASE_CHANNEL = "openadapt-desktop-channel.json"
+VERIFIED_RELEASE_CHANNEL_SCHEMA = "openadapt.desktop-release-channel/v1"
+VERIFIED_RELEASE_CHANNEL_TAG = "desktop-channel"
+NATIVE_PROMOTION_WORKFLOW = ".github/workflows/native-release.yml"
 NATIVE_RELEASE_VERIFIER = "verify-openadapt-native-release.py"
 GITHUB_WORKFLOW_BUILD_TYPE = "https://actions.github.io/buildtypes/workflow/v1"
 GITHUB_REPOSITORY_PATTERN = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
@@ -76,6 +82,17 @@ WEBSITE_RELEASE_VERIFICATION = {
     "installer_smoke": "install, launch, and uninstall",
 }
 WEBSITE_RELEASE_SBOM_FORMAT = "CycloneDX"
+
+
+def expected_engine_asset_names(version: str) -> set[str]:
+    """Return the exact Python artifacts made by the engine release."""
+
+    if not VERSION_PATTERN.fullmatch(version):
+        raise ValueError(f"invalid engine release version: {version!r}")
+    return {
+        f"openadapt_desktop-{version}-py3-none-any.whl",
+        f"openadapt_desktop-{version}.tar.gz",
+    }
 
 
 def expected_release_asset_names(version: str) -> set[str]:
@@ -313,6 +330,42 @@ def validate_git_version_transform(
             + ", ".join(mismatches)
         )
     return len(VERSION_TRANSFORM_PATHS)
+
+
+def validate_git_version_advance(
+    base_ref: str,
+    candidate_ref: str,
+    version: str,
+    *,
+    root: Path = ROOT,
+) -> int:
+    """Require an exact version transform that strictly advances its base.
+
+    A version pull request is safe to merge only against the current protected
+    base that it was built from. A transform from an older engine commit can
+    otherwise overwrite newer native versions when GitHub merges it later.
+    """
+
+    base_versions = {
+        relative: json.loads(_git_bytes(root, base_ref, relative))
+        for relative in ("package.json", "src-tauri/tauri.conf.json")
+    }
+    observed = {
+        str(base_versions["package.json"].get("version") or ""),
+        str(base_versions["src-tauri/tauri.conf.json"].get("version") or ""),
+    }
+    cargo = tomllib.loads(_git_bytes(root, base_ref, "src-tauri/Cargo.toml").decode())
+    observed.add(str(cargo.get("package", {}).get("version") or ""))
+    if len(observed) != 1:
+        raise ValueError(f"base native versions differ: {sorted(observed)}")
+    base_version = observed.pop()
+    if not VERSION_PATTERN.fullmatch(base_version):
+        raise ValueError(f"base native version is invalid: {base_version!r}")
+    if native_tag_tuple(f"{NATIVE_TAG_PREFIX}{version}") <= native_tag_tuple(
+        f"{NATIVE_TAG_PREFIX}{base_version}"
+    ):
+        raise ValueError(f"native version {version} does not advance protected base {base_version}")
+    return validate_git_version_transform(base_ref, candidate_ref, version, root=root)
 
 
 def sync_native_version_from_engine(root: Path = ROOT) -> dict[str, str]:
@@ -754,6 +807,166 @@ def validate_engine_release(
     return release
 
 
+def write_engine_release_provenance(
+    output: Path,
+    *,
+    directory: Path,
+    release_path: Path,
+    repository: str,
+    engine_tag: str,
+    engine_commit: str,
+    workflow_ref: str,
+    workflow_commit: str,
+    run_id: int,
+    run_attempt: int,
+    runner_environment: str,
+) -> Path:
+    """Write the attested identity receipt for one engine release.
+
+    The receipt binds the exact wheel and sdist bytes to the protected-main
+    release workflow that created the tag and public GitHub release.
+    """
+
+    release = validate_engine_release(
+        release_path,
+        repository=repository,
+        engine_tag=engine_tag,
+        engine_commit=engine_commit,
+    )
+    _validate_commit(workflow_commit)
+    expected_ref = f"{repository}/{ENGINE_RELEASE_WORKFLOW}@refs/heads/main"
+    if workflow_ref != expected_ref:
+        raise ValueError(f"engine release workflow ref must be exactly {expected_ref!r}")
+    if workflow_commit != engine_commit:
+        raise ValueError("engine release workflow commit must equal the released source commit")
+    if not isinstance(run_id, int) or run_id <= 0:
+        raise ValueError("engine release run id must be a positive integer")
+    if not isinstance(run_attempt, int) or run_attempt <= 0:
+        raise ValueError("engine release run attempt must be a positive integer")
+    if runner_environment != "github-hosted":
+        raise ValueError("engine release provenance requires a GitHub-hosted runner")
+    version = engine_tag.removeprefix("v")
+    expected_names = expected_engine_asset_names(version)
+    members = {
+        path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in directory.iterdir()
+        if path.is_file() and not path.is_symlink()
+    }
+    if set(members) != expected_names:
+        raise ValueError(
+            "engine release provenance requires the exact wheel and sdist: "
+            f"actual={sorted(members)}, expected={sorted(expected_names)}"
+        )
+    if output.exists() or output.name != ENGINE_RELEASE_PROVENANCE:
+        raise ValueError(f"engine release provenance must be a new {ENGINE_RELEASE_PROVENANCE}")
+    payload = {
+        "schema": ENGINE_RELEASE_PROVENANCE_SCHEMA,
+        "repository": repository,
+        "engine_tag": engine_tag,
+        "engine_commit": engine_commit,
+        "engine_release_id": release["databaseId"],
+        "engine_release_url": release["url"],
+        "workflow_path": ENGINE_RELEASE_WORKFLOW,
+        "workflow_ref": workflow_ref,
+        "workflow_commit": workflow_commit,
+        "event": "workflow_dispatch",
+        "run_id": run_id,
+        "run_attempt": run_attempt,
+        "runner_environment": runner_environment,
+        "assets": [{"name": name, "sha256": digest} for name, digest in sorted(members.items())],
+    }
+    output.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return output
+
+
+def validate_engine_release_provenance(
+    path: Path,
+    *,
+    repository: str,
+    engine_tag: str,
+    engine_commit: str,
+    release_path: Path,
+    directory: Path | None = None,
+) -> dict:
+    """Validate a closed engine receipt and its optional downloaded artifacts."""
+
+    if path.name != ENGINE_RELEASE_PROVENANCE or not path.is_file() or path.is_symlink():
+        raise ValueError(f"engine release provenance must be a regular {ENGINE_RELEASE_PROVENANCE}")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    expected_keys = {
+        "schema",
+        "repository",
+        "engine_tag",
+        "engine_commit",
+        "engine_release_id",
+        "engine_release_url",
+        "workflow_path",
+        "workflow_ref",
+        "workflow_commit",
+        "event",
+        "run_id",
+        "run_attempt",
+        "runner_environment",
+        "assets",
+    }
+    if not isinstance(data, dict) or set(data) != expected_keys:
+        raise ValueError("engine release provenance does not use the closed v1 schema")
+    release = validate_engine_release(
+        release_path,
+        repository=repository,
+        engine_tag=engine_tag,
+        engine_commit=engine_commit,
+    )
+    expected = {
+        "schema": ENGINE_RELEASE_PROVENANCE_SCHEMA,
+        "repository": repository,
+        "engine_tag": engine_tag,
+        "engine_commit": engine_commit,
+        "engine_release_id": release["databaseId"],
+        "engine_release_url": release["url"],
+        "workflow_path": ENGINE_RELEASE_WORKFLOW,
+        "workflow_ref": f"{repository}/{ENGINE_RELEASE_WORKFLOW}@refs/heads/main",
+        "workflow_commit": engine_commit,
+        "event": "workflow_dispatch",
+        "runner_environment": "github-hosted",
+    }
+    for field, value in expected.items():
+        if data.get(field) != value:
+            raise ValueError(f"engine release provenance {field} differs")
+    _validate_commit(str(data.get("workflow_commit") or ""))
+    for field in ("run_id", "run_attempt"):
+        if not isinstance(data.get(field), int) or data[field] <= 0:
+            raise ValueError(f"engine release provenance {field} is invalid")
+    assets = data.get("assets")
+    if not isinstance(assets, list):
+        raise ValueError("engine release provenance assets are invalid")
+    entries: dict[str, str] = {}
+    for asset in assets:
+        if (
+            not isinstance(asset, dict)
+            or set(asset) != {"name", "sha256"}
+            or not isinstance(asset.get("name"), str)
+            or Path(asset["name"]).name != asset["name"]
+            or asset["name"] in entries
+            or not re.fullmatch(r"[0-9a-f]{64}", str(asset.get("sha256") or ""))
+        ):
+            raise ValueError("engine release provenance contains an invalid asset")
+        entries[asset["name"]] = asset["sha256"]
+    if list(entries) != sorted(entries) or set(entries) != expected_engine_asset_names(
+        engine_tag.removeprefix("v")
+    ):
+        raise ValueError("engine release provenance does not bind the exact asset set")
+    if directory is not None:
+        observed = {
+            item.name: hashlib.sha256(item.read_bytes()).hexdigest()
+            for item in directory.iterdir()
+            if item.is_file() and not item.is_symlink() and item.name != ENGINE_RELEASE_PROVENANCE
+        }
+        if observed != entries:
+            raise ValueError("downloaded engine release artifacts differ from provenance")
+    return data
+
+
 def write_verified_release_index(
     output: Path,
     *,
@@ -897,6 +1110,192 @@ def validate_verified_release_index(path: Path) -> dict:
     expected_assets = expected_release_asset_names(data["native_version"])
     if set(names) != expected_assets:
         raise ValueError("verified release index does not contain the complete native asset set")
+    return data
+
+
+def write_verified_release_channel(
+    output: Path,
+    *,
+    index_path: Path,
+    repository: str,
+    workflow_ref: str,
+    workflow_commit: str,
+    run_id: int,
+    run_attempt: int,
+    existing: Path | None = None,
+) -> Path:
+    """Write the stable, attested, strictly monotonic release descriptor."""
+
+    repository = _validate_repository(repository)
+    index = validate_verified_release_index(index_path)
+    if index["repository"] != repository:
+        raise ValueError("verified index belongs to a different repository")
+    _validate_commit(workflow_commit)
+    expected_ref = f"{repository}/{NATIVE_PROMOTION_WORKFLOW}@refs/heads/main"
+    if workflow_ref != expected_ref:
+        raise ValueError(f"release channel workflow ref must be exactly {expected_ref!r}")
+    if workflow_commit != index["native_source_commit"]:
+        raise ValueError("release channel workflow commit must equal the native source commit")
+    if not isinstance(run_id, int) or run_id <= 0:
+        raise ValueError("release channel run id must be a positive integer")
+    if not isinstance(run_attempt, int) or run_attempt <= 0:
+        raise ValueError("release channel run attempt must be a positive integer")
+    prior_sha256 = None
+    prior_version = None
+    if existing is not None and existing.is_file():
+        prior = validate_verified_release_channel(existing)
+        if prior["repository"] != repository:
+            raise ValueError("prior release channel belongs to a different repository")
+        if native_tag_tuple(index["native_tag"]) <= native_tag_tuple(prior["native_tag"]):
+            raise ValueError(
+                "release channel must strictly advance from "
+                f"{prior['native_tag']} to {index['native_tag']}"
+            )
+        prior_sha256 = hashlib.sha256(existing.read_bytes()).hexdigest()
+        prior_version = prior["native_version"]
+    engine_base = f"https://github.com/{repository}/releases/download/{index['engine_tag']}"
+    payload = {
+        "schema": VERIFIED_RELEASE_CHANNEL_SCHEMA,
+        "repository": repository,
+        "channel": "stable-native",
+        "native_tag": index["native_tag"],
+        "native_version": index["native_version"],
+        "native_source_commit": index["native_source_commit"],
+        "native_release_url": (
+            f"https://github.com/{repository}/releases/tag/{index['native_tag']}"
+        ),
+        "engine_tag": index["engine_tag"],
+        "engine_commit": index["engine_commit"],
+        "engine_release_id": index["engine_release_id"],
+        "engine_release_url": index["engine_release_url"],
+        "verified_index": {
+            "name": VERIFIED_RELEASE_INDEX,
+            "sha256": hashlib.sha256(index_path.read_bytes()).hexdigest(),
+            "url": f"{engine_base}/{VERIFIED_RELEASE_INDEX}",
+        },
+        "checksums": {
+            **index["checksums"],
+            "url": f"{engine_base}/SHA256SUMS",
+        },
+        "previous": (
+            {"native_version": prior_version, "sha256": prior_sha256}
+            if prior_sha256 is not None
+            else None
+        ),
+        "promotion": {
+            "workflow_path": NATIVE_PROMOTION_WORKFLOW,
+            "workflow_ref": workflow_ref,
+            "workflow_commit": workflow_commit,
+            "event": "workflow_dispatch",
+            "run_id": run_id,
+            "run_attempt": run_attempt,
+            "runner_environment": "github-hosted",
+        },
+    }
+    if output.exists() or output.name != VERIFIED_RELEASE_CHANNEL:
+        raise ValueError(f"release channel must be a new {VERIFIED_RELEASE_CHANNEL}")
+    output.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return output
+
+
+def validate_verified_release_channel(path: Path) -> dict:
+    """Validate the closed stable-channel descriptor without network trust."""
+
+    if path.name != VERIFIED_RELEASE_CHANNEL or not path.is_file() or path.is_symlink():
+        raise ValueError(f"release channel must be a regular {VERIFIED_RELEASE_CHANNEL}")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    expected_keys = {
+        "schema",
+        "repository",
+        "channel",
+        "native_tag",
+        "native_version",
+        "native_source_commit",
+        "native_release_url",
+        "engine_tag",
+        "engine_commit",
+        "engine_release_id",
+        "engine_release_url",
+        "verified_index",
+        "checksums",
+        "previous",
+        "promotion",
+    }
+    if not isinstance(data, dict) or set(data) != expected_keys:
+        raise ValueError("release channel does not use the closed v1 schema")
+    if data.get("schema") != VERIFIED_RELEASE_CHANNEL_SCHEMA:
+        raise ValueError("release channel has the wrong schema")
+    repository = _validate_repository(str(data.get("repository") or ""))
+    if data.get("channel") != "stable-native":
+        raise ValueError("release channel has the wrong channel name")
+    native_tag_tuple(str(data.get("native_tag") or ""))
+    version = data["native_tag"].removeprefix(NATIVE_TAG_PREFIX)
+    if data.get("native_version") != version:
+        raise ValueError("release channel version differs from its native tag")
+    _validate_commit(str(data.get("native_source_commit") or ""))
+    _validate_commit(str(data.get("engine_commit") or ""))
+    if data.get("engine_tag") != f"v{version}":
+        raise ValueError("release channel engine tag differs")
+    expected_urls = {
+        "native_release_url": (
+            f"https://github.com/{repository}/releases/tag/{data['native_tag']}"
+        ),
+        "engine_release_url": (
+            f"https://github.com/{repository}/releases/tag/{data['engine_tag']}"
+        ),
+    }
+    for field, expected in expected_urls.items():
+        if data.get(field) != expected:
+            raise ValueError(f"release channel {field} differs")
+    if not isinstance(data.get("engine_release_id"), int) or data["engine_release_id"] <= 0:
+        raise ValueError("release channel engine release id is invalid")
+    engine_base = f"https://github.com/{repository}/releases/download/{data['engine_tag']}"
+    for field, name in (
+        ("verified_index", VERIFIED_RELEASE_INDEX),
+        ("checksums", "SHA256SUMS"),
+    ):
+        value = data.get(field)
+        if (
+            not isinstance(value, dict)
+            or set(value) != {"name", "sha256", "url"}
+            or value.get("name") != name
+            or not re.fullmatch(r"[0-9a-f]{64}", str(value.get("sha256") or ""))
+            or value.get("url") != f"{engine_base}/{name}"
+        ):
+            raise ValueError(f"release channel {field} binding is invalid")
+    previous = data.get("previous")
+    if previous is not None and (
+        not isinstance(previous, dict)
+        or set(previous) != {"native_version", "sha256"}
+        or not VERSION_PATTERN.fullmatch(str(previous.get("native_version") or ""))
+        or not re.fullmatch(r"[0-9a-f]{64}", str(previous.get("sha256") or ""))
+        or native_tag_tuple(f"{NATIVE_TAG_PREFIX}{previous['native_version']}")
+        >= native_tag_tuple(data["native_tag"])
+    ):
+        raise ValueError("release channel prior binding is invalid")
+    promotion = data.get("promotion")
+    expected_promotion = {
+        "workflow_path": NATIVE_PROMOTION_WORKFLOW,
+        "workflow_ref": (f"{repository}/{NATIVE_PROMOTION_WORKFLOW}@refs/heads/main"),
+        "event": "workflow_dispatch",
+        "runner_environment": "github-hosted",
+    }
+    if not isinstance(promotion, dict) or set(promotion) != {
+        *expected_promotion,
+        "workflow_commit",
+        "run_id",
+        "run_attempt",
+    }:
+        raise ValueError("release channel promotion binding is invalid")
+    for field, expected in expected_promotion.items():
+        if promotion.get(field) != expected:
+            raise ValueError(f"release channel promotion {field} differs")
+    _validate_commit(str(promotion.get("workflow_commit") or ""))
+    if promotion.get("workflow_commit") != data["native_source_commit"]:
+        raise ValueError("release channel promotion commit differs from the native source")
+    for field in ("run_id", "run_attempt"):
+        if not isinstance(promotion.get(field), int) or promotion[field] <= 0:
+            raise ValueError(f"release channel promotion {field} is invalid")
     return data
 
 
@@ -1393,6 +1792,10 @@ def _parser() -> argparse.ArgumentParser:
     transform_parser.add_argument("--base-ref", required=True)
     transform_parser.add_argument("--candidate-ref", required=True)
     transform_parser.add_argument("--version", required=True)
+    advance_parser = subparsers.add_parser("validate-version-advance")
+    advance_parser.add_argument("--base-ref", required=True)
+    advance_parser.add_argument("--candidate-ref", required=True)
+    advance_parser.add_argument("--version", required=True)
     subparsers.add_parser("sync-from-engine")
 
     supersede_parser = subparsers.add_parser("supersede-notes")
@@ -1490,6 +1893,27 @@ def _parser() -> argparse.ArgumentParser:
     engine_release_parser.add_argument("--provenance", type=Path)
     engine_release_parser.add_argument("--github-output", type=Path)
 
+    engine_provenance_parser = subparsers.add_parser("write-engine-provenance")
+    engine_provenance_parser.add_argument("--output", type=Path, required=True)
+    engine_provenance_parser.add_argument("--directory", type=Path, required=True)
+    engine_provenance_parser.add_argument("--release", type=Path, required=True)
+    engine_provenance_parser.add_argument("--repository", required=True)
+    engine_provenance_parser.add_argument("--engine-tag", required=True)
+    engine_provenance_parser.add_argument("--engine-commit", required=True)
+    engine_provenance_parser.add_argument("--workflow-ref", required=True)
+    engine_provenance_parser.add_argument("--workflow-commit", required=True)
+    engine_provenance_parser.add_argument("--run-id", type=int, required=True)
+    engine_provenance_parser.add_argument("--run-attempt", type=int, required=True)
+    engine_provenance_parser.add_argument("--runner-environment", required=True)
+
+    validate_engine_provenance_parser = subparsers.add_parser("validate-engine-provenance")
+    validate_engine_provenance_parser.add_argument("--file", type=Path, required=True)
+    validate_engine_provenance_parser.add_argument("--directory", type=Path, required=True)
+    validate_engine_provenance_parser.add_argument("--release", type=Path, required=True)
+    validate_engine_provenance_parser.add_argument("--repository", required=True)
+    validate_engine_provenance_parser.add_argument("--engine-tag", required=True)
+    validate_engine_provenance_parser.add_argument("--engine-commit", required=True)
+
     index_parser = subparsers.add_parser("write-verified-index")
     index_parser.add_argument("--output", type=Path, required=True)
     index_parser.add_argument("--directory", type=Path, required=True)
@@ -1502,6 +1926,17 @@ def _parser() -> argparse.ArgumentParser:
     index_parser.add_argument("--existing", type=Path)
     validate_index_parser = subparsers.add_parser("validate-verified-index")
     validate_index_parser.add_argument("--file", type=Path, required=True)
+    channel_parser = subparsers.add_parser("write-release-channel")
+    channel_parser.add_argument("--output", type=Path, required=True)
+    channel_parser.add_argument("--index", type=Path, required=True)
+    channel_parser.add_argument("--repository", required=True)
+    channel_parser.add_argument("--workflow-ref", required=True)
+    channel_parser.add_argument("--workflow-commit", required=True)
+    channel_parser.add_argument("--run-id", type=int, required=True)
+    channel_parser.add_argument("--run-attempt", type=int, required=True)
+    channel_parser.add_argument("--existing", type=Path)
+    validate_channel_parser = subparsers.add_parser("validate-release-channel")
+    validate_channel_parser.add_argument("--file", type=Path, required=True)
     return parser
 
 
@@ -1534,6 +1969,13 @@ def main() -> int:
                 args.version,
             )
             print(f"Validated {count} deterministic native version files")
+        elif args.command == "validate-version-advance":
+            count = validate_git_version_advance(
+                args.base_ref,
+                args.candidate_ref,
+                args.version,
+            )
+            print(f"Validated {count} advancing native version files")
         elif args.command == "sync-from-engine":
             versions = sync_native_version_from_engine()
             for source, value in sorted(versions.items()):
@@ -1685,6 +2127,35 @@ def main() -> int:
                 },
             )
             print(f"Validated engine release {args.engine_tag} ({release['databaseId']})")
+        elif args.command == "write-engine-provenance":
+            print(
+                write_engine_release_provenance(
+                    args.output,
+                    directory=args.directory,
+                    release_path=args.release,
+                    repository=args.repository,
+                    engine_tag=args.engine_tag,
+                    engine_commit=args.engine_commit,
+                    workflow_ref=args.workflow_ref,
+                    workflow_commit=args.workflow_commit,
+                    run_id=args.run_id,
+                    run_attempt=args.run_attempt,
+                    runner_environment=args.runner_environment,
+                )
+            )
+        elif args.command == "validate-engine-provenance":
+            receipt = validate_engine_release_provenance(
+                args.file,
+                directory=args.directory,
+                release_path=args.release,
+                repository=args.repository,
+                engine_tag=args.engine_tag,
+                engine_commit=args.engine_commit,
+            )
+            print(
+                "Validated protected-main engine release provenance for run "
+                f"{receipt['run_id']} attempt {receipt['run_attempt']}"
+            )
         elif args.command == "write-verified-index":
             print(
                 write_verified_release_index(
@@ -1702,6 +2173,22 @@ def main() -> int:
         elif args.command == "validate-verified-index":
             index = validate_verified_release_index(args.file)
             print(f"Validated verified release index for {index['native_tag']}")
+        elif args.command == "write-release-channel":
+            print(
+                write_verified_release_channel(
+                    args.output,
+                    index_path=args.index,
+                    repository=args.repository,
+                    workflow_ref=args.workflow_ref,
+                    workflow_commit=args.workflow_commit,
+                    run_id=args.run_id,
+                    run_attempt=args.run_attempt,
+                    existing=args.existing,
+                )
+            )
+        elif args.command == "validate-release-channel":
+            channel = validate_verified_release_channel(args.file)
+            print(f"Validated stable release channel for {channel['native_tag']}")
     except (OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

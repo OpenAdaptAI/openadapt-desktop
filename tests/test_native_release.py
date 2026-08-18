@@ -9,9 +9,12 @@ from pathlib import Path
 import pytest
 import yaml
 
+import scripts.verify_native_release_download as download_verifier
 from scripts.native_release import (
+    ENGINE_RELEASE_PROVENANCE,
     NATIVE_RELEASE_PROVENANCE,
     NATIVE_RELEASE_VERIFIER,
+    VERIFIED_RELEASE_CHANNEL,
     VERIFIED_RELEASE_INDEX,
     installer_pointer_notes,
     native_tag_tuple,
@@ -22,6 +25,8 @@ from scripts.native_release import (
     superseded_notes,
     sync_native_version_from_engine,
     validate_engine_release,
+    validate_engine_release_provenance,
+    validate_git_version_advance,
     validate_git_version_transform,
     validate_new_native_tag,
     validate_release_attestation,
@@ -30,15 +35,23 @@ from scripts.native_release import (
     validate_release_workflow_run,
     validate_sbom,
     validate_tag,
+    validate_verified_release_channel,
     validate_verified_release_index,
     validate_website_release_manifest,
     verify_checksums,
     write_checksums,
+    write_engine_release_provenance,
     write_release_provenance,
+    write_verified_release_channel,
     write_verified_release_index,
     write_website_release_manifest,
 )
-from scripts.verify_native_release_download import verify as verify_download_inventory
+from scripts.verify_native_release_download import (
+    verify as verify_download_inventory,
+)
+from scripts.verify_native_release_download import (
+    verify_authenticated_channel,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -261,7 +274,10 @@ def test_freshness_workflow_syncs_engine_releases_into_the_native_lane() -> None
         "token": "${{ secrets.ADMIN_TOKEN }}",
     }
     branch_script = proposal_steps["Create or validate the exact version branch"]["run"]
-    assert "validate-version-transform" in branch_script
+    assert "validate-version-advance" in branch_script
+    assert 'base="$(git rev-parse origin/main)"' in branch_script
+    assert 'parent="$(git rev-parse "${candidate}^")"' in branch_script
+    assert 'git switch --detach "${base}"' in branch_script
     assert 'git push origin "HEAD:refs/heads/${BRANCH}"' in branch_script
     assert "HEAD:main" not in branch_script
     assert "gh pr create" in proposal_steps["Open or report the protected-main pull request"]["run"]
@@ -283,6 +299,29 @@ def test_freshness_workflow_syncs_engine_releases_into_the_native_lane() -> None
     assert "HEAD:main" not in "\n".join(
         step.get("run", "") for step in proposal["steps"] + publisher["steps"]
     )
+
+    transaction = publisher_steps[
+        "Require the exact protected-main transform and stable engine release"
+    ]["run"]
+    assert "validate-release-order" in transaction
+
+
+def test_native_version_pr_guard_rejects_a_stale_base() -> None:
+    guard = _workflow("native-version-guard.yml")
+    assert guard[True]["pull_request"]["types"] == [
+        "opened",
+        "reopened",
+        "synchronize",
+        "ready_for_review",
+    ]
+    job = guard["jobs"]["validate-advance"]
+    assert guard["permissions"] == {"contents": "read"}
+    assert job["if"] == "startsWith(github.head_ref, 'native-version/v')"
+    script = _job_steps(job)["Require an exact strict advance from the current PR base"]["run"]
+    assert "validate-version-advance" in script
+    assert "github.event.pull_request.base.sha" in json.dumps(job)
+    assert "git fetch origin main:refs/remotes/origin/main" in script
+    assert 'if [ "${BASE_SHA}" != "${current_base}" ]' in script
 
 
 def test_supersession_edits_notes_only_and_never_deletes() -> None:
@@ -486,6 +525,26 @@ def test_git_version_transform_requires_the_exact_reconstructed_tree(tmp_path: P
     unexpected = _git(tmp_path, "rev-parse", "HEAD")
     with pytest.raises(ValueError, match="outside the version transformation"):
         validate_git_version_transform(base, unexpected, "0.5.0", root=tmp_path)
+
+
+def test_git_version_advance_refuses_a_stale_or_equal_target(tmp_path: Path) -> None:
+    _write_native_version_fixture(tmp_path, "1.4.0")
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "user.name", "Test")
+    _git(tmp_path, "config", "user.email", "test@example.com")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-qm", "base")
+    base = _git(tmp_path, "rev-parse", "HEAD")
+
+    set_native_version("1.5.0", tmp_path)
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-qm", "advance")
+    candidate = _git(tmp_path, "rev-parse", "HEAD")
+    assert validate_git_version_advance(base, candidate, "1.5.0", root=tmp_path) == 5
+
+    for stale in ("1.4.0", "1.3.9"):
+        with pytest.raises(ValueError, match="does not advance protected base"):
+            validate_git_version_advance(base, candidate, stale, root=tmp_path)
 
 
 def test_native_tag_tuple_orders_versions_and_rejects_foreign_tags() -> None:
@@ -1232,6 +1291,99 @@ def test_engine_release_requires_exact_stable_identity(tmp_path: Path) -> None:
         )
 
 
+def test_engine_release_provenance_binds_main_workflow_and_exact_artifacts(
+    tmp_path: Path,
+) -> None:
+    version = native_version()
+    artifacts = tmp_path / "engine-assets"
+    artifacts.mkdir()
+    (artifacts / f"openadapt_desktop-{version}-py3-none-any.whl").write_bytes(b"wheel")
+    (artifacts / f"openadapt_desktop-{version}.tar.gz").write_bytes(b"sdist")
+    release = _engine_release_file(tmp_path)
+    receipt = write_engine_release_provenance(
+        tmp_path / ENGINE_RELEASE_PROVENANCE,
+        directory=artifacts,
+        release_path=release,
+        repository="OpenAdaptAI/openadapt-desktop",
+        engine_tag=f"v{version}",
+        engine_commit="b" * 40,
+        workflow_ref=(
+            "OpenAdaptAI/openadapt-desktop/.github/workflows/release.yml@refs/heads/main"
+        ),
+        workflow_commit="b" * 40,
+        run_id=123,
+        run_attempt=1,
+        runner_environment="github-hosted",
+    )
+    validated = validate_engine_release_provenance(
+        receipt,
+        repository="OpenAdaptAI/openadapt-desktop",
+        engine_tag=f"v{version}",
+        engine_commit="b" * 40,
+        release_path=release,
+        directory=artifacts,
+    )
+    assert validated["workflow_ref"].endswith("/.github/workflows/release.yml@refs/heads/main")
+    assert {asset["name"] for asset in validated["assets"]} == {
+        f"openadapt_desktop-{version}-py3-none-any.whl",
+        f"openadapt_desktop-{version}.tar.gz",
+    }
+
+    with pytest.raises(ValueError, match="must equal the released source commit"):
+        write_engine_release_provenance(
+            tmp_path / "wrong-source" / ENGINE_RELEASE_PROVENANCE,
+            directory=artifacts,
+            release_path=release,
+            repository="OpenAdaptAI/openadapt-desktop",
+            engine_tag=f"v{version}",
+            engine_commit="b" * 40,
+            workflow_ref=(
+                "OpenAdaptAI/openadapt-desktop/.github/workflows/release.yml@refs/heads/main"
+            ),
+            workflow_commit="a" * 40,
+            run_id=123,
+            run_attempt=1,
+            runner_environment="github-hosted",
+        )
+
+    (artifacts / f"openadapt_desktop-{version}.tar.gz").write_bytes(b"changed")
+    with pytest.raises(ValueError, match="differ from provenance"):
+        validate_engine_release_provenance(
+            receipt,
+            repository="OpenAdaptAI/openadapt-desktop",
+            engine_tag=f"v{version}",
+            engine_commit="b" * 40,
+            release_path=release,
+            directory=artifacts,
+        )
+
+
+def test_engine_release_provenance_refuses_tag_workflow_identity(
+    tmp_path: Path,
+) -> None:
+    version = native_version()
+    artifacts = tmp_path / "engine-assets"
+    artifacts.mkdir()
+    (artifacts / f"openadapt_desktop-{version}-py3-none-any.whl").write_bytes(b"wheel")
+    (artifacts / f"openadapt_desktop-{version}.tar.gz").write_bytes(b"sdist")
+    with pytest.raises(ValueError, match="workflow ref"):
+        write_engine_release_provenance(
+            tmp_path / ENGINE_RELEASE_PROVENANCE,
+            directory=artifacts,
+            release_path=_engine_release_file(tmp_path),
+            repository="OpenAdaptAI/openadapt-desktop",
+            engine_tag=f"v{version}",
+            engine_commit="b" * 40,
+            workflow_ref=(
+                f"OpenAdaptAI/openadapt-desktop/.github/workflows/release.yml@refs/tags/v{version}"
+            ),
+            workflow_commit="b" * 40,
+            run_id=123,
+            run_attempt=1,
+            runner_environment="github-hosted",
+        )
+
+
 def test_verified_release_index_is_closed_bound_and_monotonic(tmp_path: Path) -> None:
     release, _manifest, checksums = _stage_complete_release(tmp_path / "assets")
     engine_release = _engine_release_file(tmp_path)
@@ -1313,6 +1465,93 @@ def test_verified_release_index_is_closed_bound_and_monotonic(tmp_path: Path) ->
         )
 
 
+def test_stable_release_channel_is_hash_bound_and_strictly_monotonic(
+    tmp_path: Path,
+) -> None:
+    release, _manifest, checksums = _stage_complete_release(tmp_path / "assets")
+    index = write_verified_release_index(
+        tmp_path / VERIFIED_RELEASE_INDEX,
+        directory=release,
+        checksums=checksums,
+        provenance_path=release / NATIVE_RELEASE_PROVENANCE,
+        repository="OpenAdaptAI/openadapt-desktop",
+        tag=f"desktop-v{native_version()}",
+        source_commit="a" * 40,
+        engine_release_path=_engine_release_file(tmp_path),
+    )
+    channel = write_verified_release_channel(
+        tmp_path / VERIFIED_RELEASE_CHANNEL,
+        index_path=index,
+        repository="OpenAdaptAI/openadapt-desktop",
+        workflow_ref=(
+            "OpenAdaptAI/openadapt-desktop/.github/workflows/native-release.yml@refs/heads/main"
+        ),
+        workflow_commit="a" * 40,
+        run_id=123456,
+        run_attempt=2,
+    )
+    validated = validate_verified_release_channel(channel)
+    assert validated["verified_index"]["sha256"] == hashlib.sha256(index.read_bytes()).hexdigest()
+    assert validated["checksums"]["sha256"] == hashlib.sha256(checksums.read_bytes()).hexdigest()
+    assert validated["promotion"]["workflow_ref"].endswith(
+        "/.github/workflows/native-release.yml@refs/heads/main"
+    )
+
+    with pytest.raises(ValueError, match="must equal the native source commit"):
+        write_verified_release_channel(
+            tmp_path / "wrong-source" / VERIFIED_RELEASE_CHANNEL,
+            index_path=index,
+            repository="OpenAdaptAI/openadapt-desktop",
+            workflow_ref=(
+                "OpenAdaptAI/openadapt-desktop/.github/workflows/native-release.yml@refs/heads/main"
+            ),
+            workflow_commit="c" * 40,
+            run_id=123456,
+            run_attempt=2,
+        )
+
+    with pytest.raises(ValueError, match="strictly advance"):
+        write_verified_release_channel(
+            tmp_path / "retry" / VERIFIED_RELEASE_CHANNEL,
+            index_path=index,
+            repository="OpenAdaptAI/openadapt-desktop",
+            workflow_ref=(
+                "OpenAdaptAI/openadapt-desktop/.github/workflows/native-release.yml@refs/heads/main"
+            ),
+            workflow_commit="a" * 40,
+            run_id=123457,
+            run_attempt=1,
+            existing=channel,
+        )
+
+
+def test_release_channel_refuses_tag_origin_promotion(tmp_path: Path) -> None:
+    release, _manifest, checksums = _stage_complete_release(tmp_path / "assets")
+    index = write_verified_release_index(
+        tmp_path / VERIFIED_RELEASE_INDEX,
+        directory=release,
+        checksums=checksums,
+        provenance_path=release / NATIVE_RELEASE_PROVENANCE,
+        repository="OpenAdaptAI/openadapt-desktop",
+        tag=f"desktop-v{native_version()}",
+        source_commit="a" * 40,
+        engine_release_path=_engine_release_file(tmp_path),
+    )
+    with pytest.raises(ValueError, match="workflow ref"):
+        write_verified_release_channel(
+            tmp_path / VERIFIED_RELEASE_CHANNEL,
+            index_path=index,
+            repository="OpenAdaptAI/openadapt-desktop",
+            workflow_ref=(
+                "OpenAdaptAI/openadapt-desktop/.github/workflows/"
+                f"native-release.yml@refs/tags/desktop-v{native_version()}"
+            ),
+            workflow_commit="a" * 40,
+            run_id=123456,
+            run_attempt=1,
+        )
+
+
 def test_public_download_verifier_refuses_an_expanded_inventory(tmp_path: Path) -> None:
     asset = tmp_path / "installer.bin"
     asset.write_bytes(b"installer")
@@ -1326,6 +1565,238 @@ def test_public_download_verifier_refuses_an_expanded_inventory(tmp_path: Path) 
     (tmp_path / "extra.bin").write_bytes(b"not signed")
     with pytest.raises(ValueError, match="do not equal"):
         verify_download_inventory(tmp_path, checksums)
+
+
+def test_public_download_verifier_authenticates_complete_channel_chain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    release, _manifest, checksums = _stage_complete_release(tmp_path / "assets")
+    repository = "OpenAdaptAI/openadapt-desktop"
+    index = write_verified_release_index(
+        tmp_path / VERIFIED_RELEASE_INDEX,
+        directory=release,
+        checksums=checksums,
+        provenance_path=release / NATIVE_RELEASE_PROVENANCE,
+        repository=repository,
+        tag=f"desktop-v{native_version()}",
+        source_commit="a" * 40,
+        engine_release_path=_engine_release_file(tmp_path),
+    )
+    channel = write_verified_release_channel(
+        tmp_path / VERIFIED_RELEASE_CHANNEL,
+        index_path=index,
+        repository=repository,
+        workflow_ref=(
+            "OpenAdaptAI/openadapt-desktop/.github/workflows/native-release.yml@refs/heads/main"
+        ),
+        workflow_commit="a" * 40,
+        run_id=123456,
+        run_attempt=2,
+    )
+    commands: list[list[str]] = []
+
+    def _record(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "verified", "")
+
+    monkeypatch.setattr(download_verifier.subprocess, "run", _record)
+
+    assert verify_authenticated_channel(
+        channel_path=channel,
+        index_path=index,
+        directory=release,
+        checksums=checksums,
+        minimum_version=native_version(),
+        repository=repository,
+    ) == len(_read_checksum_lines(checksums))
+    assert len(commands) == 3
+    assert all(command[:3] == ["gh", "attestation", "verify"] for command in commands)
+    assert all("--deny-self-hosted-runners" in command for command in commands)
+    main_identity = (
+        "https://github.com/OpenAdaptAI/openadapt-desktop/"
+        ".github/workflows/native-release.yml@refs/heads/main"
+    )
+    tag_identity = (
+        "https://github.com/OpenAdaptAI/openadapt-desktop/"
+        f".github/workflows/native-release.yml@refs/tags/desktop-v{native_version()}"
+    )
+    assert commands[0][commands[0].index("--cert-identity") + 1] == main_identity
+    assert commands[1][commands[1].index("--cert-identity") + 1] == main_identity
+    assert commands[2][commands[2].index("--cert-identity") + 1] == tag_identity
+
+    with pytest.raises(ValueError, match="below the trusted minimum"):
+        verify_authenticated_channel(
+            channel_path=channel,
+            index_path=index,
+            directory=release,
+            checksums=checksums,
+            minimum_version="999.0.0",
+            repository=repository,
+        )
+
+
+def test_public_download_verifier_rejects_index_or_checksum_substitution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    release, _manifest, checksums = _stage_complete_release(tmp_path / "assets")
+    index = write_verified_release_index(
+        tmp_path / VERIFIED_RELEASE_INDEX,
+        directory=release,
+        checksums=checksums,
+        provenance_path=release / NATIVE_RELEASE_PROVENANCE,
+        repository="OpenAdaptAI/openadapt-desktop",
+        tag=f"desktop-v{native_version()}",
+        source_commit="a" * 40,
+        engine_release_path=_engine_release_file(tmp_path),
+    )
+    channel = write_verified_release_channel(
+        tmp_path / VERIFIED_RELEASE_CHANNEL,
+        index_path=index,
+        repository="OpenAdaptAI/openadapt-desktop",
+        workflow_ref=(
+            "OpenAdaptAI/openadapt-desktop/.github/workflows/native-release.yml@refs/heads/main"
+        ),
+        workflow_commit="a" * 40,
+        run_id=123456,
+        run_attempt=2,
+    )
+    monkeypatch.setattr(
+        download_verifier.subprocess,
+        "run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(command, 0, "verified", ""),
+    )
+
+    index.write_text(index.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="index digest differs"):
+        verify_authenticated_channel(
+            channel_path=channel,
+            index_path=index,
+            directory=release,
+            checksums=checksums,
+        )
+
+    index.write_text(index.read_text(encoding="utf-8").rstrip() + "\n", encoding="utf-8")
+    checksums.write_text(checksums.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="SHA256SUMS digest differs"):
+        verify_authenticated_channel(
+            channel_path=channel,
+            index_path=index,
+            directory=release,
+            checksums=checksums,
+        )
+
+
+def test_public_download_verifier_rejects_a_channel_changed_during_attestation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    release, _manifest, checksums = _stage_complete_release(tmp_path / "assets")
+    index = write_verified_release_index(
+        tmp_path / VERIFIED_RELEASE_INDEX,
+        directory=release,
+        checksums=checksums,
+        provenance_path=release / NATIVE_RELEASE_PROVENANCE,
+        repository="OpenAdaptAI/openadapt-desktop",
+        tag=f"desktop-v{native_version()}",
+        source_commit="a" * 40,
+        engine_release_path=_engine_release_file(tmp_path),
+    )
+    channel = write_verified_release_channel(
+        tmp_path / VERIFIED_RELEASE_CHANNEL,
+        index_path=index,
+        repository="OpenAdaptAI/openadapt-desktop",
+        workflow_ref=(
+            "OpenAdaptAI/openadapt-desktop/.github/workflows/native-release.yml@refs/heads/main"
+        ),
+        workflow_commit="a" * 40,
+        run_id=123456,
+        run_attempt=2,
+    )
+
+    def _mutate(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        subject = Path(command[3])
+        subject.write_text(subject.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, "verified", "")
+
+    monkeypatch.setattr(download_verifier.subprocess, "run", _mutate)
+    with pytest.raises(ValueError, match="changed during attestation"):
+        verify_authenticated_channel(
+            channel_path=channel,
+            index_path=index,
+            directory=release,
+            checksums=checksums,
+        )
+
+
+def test_public_download_verifier_checks_the_retained_prior_descriptor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    release, _manifest, checksums = _stage_complete_release(tmp_path / "assets")
+    index = write_verified_release_index(
+        tmp_path / VERIFIED_RELEASE_INDEX,
+        directory=release,
+        checksums=checksums,
+        provenance_path=release / NATIVE_RELEASE_PROVENANCE,
+        repository="OpenAdaptAI/openadapt-desktop",
+        tag=f"desktop-v{native_version()}",
+        source_commit="a" * 40,
+        engine_release_path=_engine_release_file(tmp_path),
+    )
+    channel = write_verified_release_channel(
+        tmp_path / VERIFIED_RELEASE_CHANNEL,
+        index_path=index,
+        repository="OpenAdaptAI/openadapt-desktop",
+        workflow_ref=(
+            "OpenAdaptAI/openadapt-desktop/.github/workflows/native-release.yml@refs/heads/main"
+        ),
+        workflow_commit="a" * 40,
+        run_id=123456,
+        run_attempt=2,
+    )
+    current = json.loads(channel.read_text(encoding="utf-8"))
+    prior = dict(current)
+    prior["native_version"] = "0.1.0"
+    prior["native_tag"] = "desktop-v0.1.0"
+    prior["engine_tag"] = "v0.1.0"
+    prior["native_release_url"] = (
+        "https://github.com/OpenAdaptAI/openadapt-desktop/releases/tag/desktop-v0.1.0"
+    )
+    prior["engine_release_url"] = (
+        "https://github.com/OpenAdaptAI/openadapt-desktop/releases/tag/v0.1.0"
+    )
+    for field in ("verified_index", "checksums"):
+        prior[field] = dict(prior[field])
+        prior[field]["url"] = prior[field]["url"].replace(f"/v{native_version()}/", "/v0.1.0/")
+    prior["previous"] = None
+    prior_path = tmp_path / "prior" / VERIFIED_RELEASE_CHANNEL
+    prior_path.parent.mkdir()
+    prior_path.write_text(json.dumps(prior, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    current["previous"] = {
+        "native_version": "0.1.0",
+        "sha256": hashlib.sha256(prior_path.read_bytes()).hexdigest(),
+    }
+    channel.write_text(json.dumps(current, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    monkeypatch.setattr(
+        download_verifier.subprocess,
+        "run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(command, 0, "verified", ""),
+    )
+
+    assert verify_authenticated_channel(
+        channel_path=channel,
+        index_path=index,
+        directory=release,
+        checksums=checksums,
+        previous_channel=prior_path,
+    )
+    prior_path.write_text(prior_path.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="does not extend"):
+        verify_authenticated_channel(
+            channel_path=channel,
+            index_path=index,
+            directory=release,
+            checksums=checksums,
+            previous_channel=prior_path,
+        )
 
 
 def test_website_release_manifest_is_an_honest_index_of_staged_bytes(tmp_path: Path) -> None:

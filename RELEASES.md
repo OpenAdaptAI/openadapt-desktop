@@ -129,7 +129,9 @@ a trusted release.
 Before the next native tag or release:
 
 1. Add a no-bypass pull-request ruleset for `main`, with the required exact-head
-   checks.
+   checks. Require branches to be up to date before merge. Require the
+   `Reject a stale native version pull request` check for `native-version/v*`
+   pull requests.
 2. Add an immutable release-tag ruleset for `v*`. Only the engine release
    identity can create a tag. Do not permit a tag update or deletion.
 3. Add an immutable release-tag ruleset for `desktop-v*`. Only the native

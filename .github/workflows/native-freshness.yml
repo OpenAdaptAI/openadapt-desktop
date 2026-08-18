@@ -1,10 +1,10 @@
 name: Native Installer Freshness
 
-# A published engine release creates a narrow version-sync pull request. The
-# protected main branch must review and merge that exact five-file transform.
-# A later main push verifies the merged tree against the immutable engine tag,
-# then creates the matching desktop-vX.Y.Z tag. This workflow never writes to
-# main and cannot bypass its required reviews or checks.
+# A published engine release creates a narrow version-sync pull request from
+# the current protected main. The pull request must strictly advance that base
+# and contain only the exact five-file transform. A later main push repeats the
+# monotonic check and creates the immutable desktop tag. The separate native
+# release workflow currently starts from that tag.
 #
 # ADMIN_TOKEN is required for two bounded operations. It creates a pull request
 # whose events run normal CI, and it pushes the protected desktop-v* tag whose
@@ -123,30 +123,26 @@ jobs:
         id: branch
         env:
           BRANCH: ${{ steps.version.outputs.branch }}
-          ENGINE_COMMIT: ${{ steps.version.outputs.engine_commit }}
           NATIVE_VERSION: ${{ steps.version.outputs.version }}
         shell: bash
         run: |
           set -euo pipefail
+          base="$(git rev-parse origin/main)"
           if git ls-remote --exit-code --heads origin "refs/heads/${BRANCH}" >/dev/null; then
             git fetch origin "refs/heads/${BRANCH}:refs/remotes/origin/${BRANCH}"
             candidate="$(git rev-parse "refs/remotes/origin/${BRANCH}")"
-            if ! git merge-base --is-ancestor "${ENGINE_COMMIT}" "${candidate}"; then
-              echo "error: existing ${BRANCH} is not based on ${ENGINE_COMMIT}" >&2
+            parent="$(git rev-parse "${candidate}^")"
+            if [ "${parent}" != "${base}" ]; then
+              echo "error: existing ${BRANCH} is stale; recreate it from ${base}" >&2
               exit 1
             fi
-            parent_count="$(git rev-list --count "${ENGINE_COMMIT}..${candidate}")"
-            if [ "${parent_count}" != "1" ]; then
-              echo "error: existing ${BRANCH} is not one commit above ${ENGINE_COMMIT}" >&2
-              exit 1
-            fi
-            python scripts/native_release.py validate-version-transform \
-              --base-ref "${ENGINE_COMMIT}" \
+            python scripts/native_release.py validate-version-advance \
+              --base-ref "${base}" \
               --candidate-ref "${candidate}" \
               --version "${NATIVE_VERSION}"
             echo "created=false" >> "${GITHUB_OUTPUT}"
           else
-            git switch --detach "${ENGINE_COMMIT}"
+            git switch --detach "${base}"
             git switch -c "${BRANCH}"
             python scripts/native_release.py set-version "${NATIVE_VERSION}"
             git config user.name "github-actions[bot]"
@@ -154,8 +150,8 @@ jobs:
             git add package.json package-lock.json \
               src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json
             git commit -m "chore(native): sync native installer version to ${NATIVE_VERSION}"
-            python scripts/native_release.py validate-version-transform \
-              --base-ref "${ENGINE_COMMIT}" \
+            python scripts/native_release.py validate-version-advance \
+              --base-ref "${base}" \
               --candidate-ref HEAD \
               --version "${NATIVE_VERSION}"
             git push origin "HEAD:refs/heads/${BRANCH}"
@@ -235,6 +231,11 @@ jobs:
             --repository "${GITHUB_REPOSITORY}" \
             --engine-tag "${engine_tag}" \
             --engine-commit "${engine_commit}"
+
+          gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate --slurp > releases.json
+          python scripts/native_release.py validate-release-order \
+            --candidate-tag "${native_tag}" \
+            --releases releases.json
 
           echo "native_tag=${native_tag}" >> "${GITHUB_OUTPUT}"
 
