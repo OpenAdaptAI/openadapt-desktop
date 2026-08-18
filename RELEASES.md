@@ -23,11 +23,11 @@ for the verification scope and signing states.
 
 - **Python package / CLI**: install from PyPI (`pip install openadapt-desktop`)
   or take the wheel from the newest `vX.Y.Z` release.
-- **Native installers (Beta)**: either the newest `vX.Y.Z` release (the one
-  `/releases/latest` resolves to) or, equivalently, the newest published
-  `desktop-vX.Y.Z` prerelease whose notes do not carry a "Superseded" notice.
-  The bytes are identical. Verify with `sha256sum -c SHA256SUMS` and
-  `gh attestation verify`.
+- **Native installers (Beta)**: use the `vX.Y.Z` engine release selected by the
+  attested `openadapt-desktop-verified-release.json` channel index. The index
+  binds the matching `desktop-vX.Y.Z` source release and the identical mirrored
+  bytes. Authenticate `SHA256SUMS`, then verify its exact inventory. Do not use
+  mutable release notes as a release-selection authority.
 
 ### The "Latest" installer path
 
@@ -98,15 +98,14 @@ were pushed by hand. Three workflows now keep it fresh:
    can rebuild and publish a pre-existing, main-contained ref after checking that
    ref's exact CI; ordinary merges never publish packages.
 2. **Native Installer Freshness** (`.github/workflows/native-freshness.yml`):
-   when that engine release is published (or on manual `workflow_dispatch` with
-   a current engine version), it first verifies that the matching engine tag is
-   an ancestor of `main` and that the application sources have not advanced.
-   It then synchronizes the native version sources (`package.json`,
-   `package-lock.json`, `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`,
-   `src-tauri/tauri.conf.json`) to the engine version, commits to `main`, and
-   pushes the matching `desktop-vX.Y.Z` tag. It never builds anything itself
-   and refuses a historical backfill that would label newer application code
-   with an older version.
+   when that engine release is published, it verifies the stable engine release
+   and opens a pull request with the exact deterministic transform of
+   `package.json`, `package-lock.json`, `src-tauri/Cargo.toml`,
+   `src-tauri/Cargo.lock`, and `src-tauri/tauri.conf.json`. It never writes to
+   `main`. After the protected branch merges that pull request, a main-push job
+   reconstructs the transform from the immutable `vX.Y.Z` tag. It also verifies
+   the current engine release and then creates `desktop-vX.Y.Z`. A manual
+   backfill uses the same pull-request path.
 3. **Native Installer Release** (`.github/workflows/native-release.yml`):
    the tag push triggers the fail-closed signing
    preflight, the platform build matrix, install/launch/uninstall smoke tests,
@@ -131,11 +130,13 @@ Before the next native tag or release:
 
 1. Add a no-bypass pull-request ruleset for `main`, with the required exact-head
    checks.
-2. Add a release-tag ruleset for `desktop-v*`. Limit creation and updates to the
-   authorized release identity. Do not permit tag deletion or force updates.
-3. Configure Apple Developer ID plus notarization and one Windows Authenticode
+2. Add an immutable release-tag ruleset for `v*`. Only the engine release
+   identity can create a tag. Do not permit a tag update or deletion.
+3. Add an immutable release-tag ruleset for `desktop-v*`. Only the native
+   freshness identity can create a tag. Do not permit a tag update or deletion.
+4. Configure Apple Developer ID plus notarization and one Windows Authenticode
    identity in the reviewed `native-release` environment.
-4. Publish only after the exact tag workflow passes. Then verify the public
+5. Publish only after the exact tag workflow passes. Then verify the public
    assets, attestation, pointer, mirror, and supersession result.
 
 The `native-release` environment reviewer is an additional publish boundary.
@@ -156,21 +157,27 @@ any deletion is a human decision.
 
 ## Machine-readable selection rule (download pages)
 
-Consumers that list releases via the GitHub API (for example the
-openadapt.ai download page) should select installers from release metadata
-alone:
+Consumers must not select a release from mutable release notes. The release
+workflow publishes `openadapt-desktop-verified-release.json` on the matching
+stable engine release after every byte and trust check passes. It attests the
+index with the release-event workflow identity from protected `main`.
 
-- A native installer release is identified by its tag prefix `desktop-v` and by
-  the `<!-- installer-release -->` marker at the top of its notes; its assets
-  include the platform installers and the exact public build-provenance file.
-- Recommended rule: offer downloads from the newest non-draft `desktop-v*`
-  prerelease whose body contains `<!-- installer-release -->` and does **not**
-  contain `<!-- openadapt-superseded-by:`.
-- Plain `v*` engine releases also carry a mirrored copy of the matching
-  installer set, but they deliberately do **not** carry the
-  `<!-- installer-release -->` marker. Selection logic must keep matching on
-  the marker plus the `desktop-v` prefix, so the mirror is invisible to it. The
-  mirror exists for humans who land on `/releases/latest`.
+- Fetch the index from the stable engine release channel.
+- Verify the index attestation against
+  `.github/workflows/native-release.yml@refs/heads/main`.
+- Require the closed index schema and the expected repository.
+- Require a version that does not decrease from the last accepted index.
+- Use only the engine release, native tag, checksum digest, and asset names in
+  the verified index.
+- Download all named files into an empty directory.
+- Authenticate `SHA256SUMS` against the exact `desktop-vX.Y.Z` workflow identity.
+- Run `sha256sum -c SHA256SUMS` and
+  `verify-openadapt-native-release.py`. The helper refuses an incomplete or
+  expanded directory.
+
+The release-note markers remain useful for human notices and historical
+supersession. They are not a machine trust boundary.
+
 - `openadapt-desktop-release-manifest.json` is the website-readable index. It
   lists each artifact name, platform, architecture, signing state, and SHA-256,
   plus the checked CycloneDX SBOM. The release workflow recomputes the named

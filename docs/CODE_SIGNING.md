@@ -176,9 +176,12 @@ run attempt, GitHub-hosted runner, and successful protected publish job.
 checks.
 
 This workflow control is not sufficient without repository controls. Configure
-a no-bypass pull-request ruleset for `main` and a creation/update ruleset for
-`desktop-v*` before a release. The historical `desktop-v0.15.0` prerelease is
-ad-hoc/unsigned and does not satisfy this trust contract.
+a no-bypass pull-request ruleset for `main`. Configure immutable creation rules
+for both `v*` and `desktop-v*` tags before a release. Only the engine release
+workflow can create `v*`. Only the native freshness workflow can create
+`desktop-v*`. Neither identity can update or delete a tag. The historical
+`desktop-v0.15.0` prerelease is ad-hoc/unsigned and does not satisfy this trust
+contract.
 
 ---
 
@@ -202,14 +205,27 @@ name — only the human-readable claim wording changes.
 ## Verify a signed release locally
 
 ```bash
-# Bytes match the attested manifest
+# Set this to the native release that supplied the downloaded files.
+native_tag=desktop-vX.Y.Z
+
+# First authenticate the checksum manifest and its exact release workflow.
+gh attestation verify SHA256SUMS \
+  --repo OpenAdaptAI/openadapt-desktop \
+  --signer-workflow OpenAdaptAI/openadapt-desktop/.github/workflows/native-release.yml \
+  --cert-identity "https://github.com/OpenAdaptAI/openadapt-desktop/.github/workflows/native-release.yml@refs/tags/${native_tag}" \
+  --deny-self-hosted-runners
+
+# Then check every digest and reject a missing, extra, linked, or non-regular file.
 sha256sum -c SHA256SUMS
-gh attestation verify OpenAdapt-Desktop-Beta-* --repo OpenAdaptAI/openadapt-desktop
+python verify-openadapt-native-release.py \
+  --directory . \
+  --manifest SHA256SUMS
 
 # macOS: notarization accepted + ticket stapled
 spctl --assess --type open --context context:primary-signature -v <asset>.dmg
 xcrun stapler validate <asset>.dmg
 
-# Windows (PowerShell): valid, publicly trusted Authenticode chain
-Get-AuthenticodeSignature <asset>.msi | Format-List Status, SignerCertificate
+# Windows (PowerShell): valid, timestamped, publicly trusted Authenticode chain
+Get-AuthenticodeSignature <asset>.msi |
+  Format-List Status, SignerCertificate, TimeStamperCertificate
 ```

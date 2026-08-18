@@ -3,12 +3,16 @@
 import hashlib
 import json
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 
 from scripts.native_release import (
     NATIVE_RELEASE_PROVENANCE,
+    NATIVE_RELEASE_VERIFIER,
+    VERIFIED_RELEASE_INDEX,
     installer_pointer_notes,
     native_tag_tuple,
     native_version,
@@ -17,6 +21,8 @@ from scripts.native_release import (
     stage_artifacts,
     superseded_notes,
     sync_native_version_from_engine,
+    validate_engine_release,
+    validate_git_version_transform,
     validate_new_native_tag,
     validate_release_attestation,
     validate_release_provenance,
@@ -24,14 +30,33 @@ from scripts.native_release import (
     validate_release_workflow_run,
     validate_sbom,
     validate_tag,
+    validate_verified_release_index,
     validate_website_release_manifest,
     verify_checksums,
     write_checksums,
     write_release_provenance,
+    write_verified_release_index,
     write_website_release_manifest,
 )
+from scripts.verify_native_release_download import verify as verify_download_inventory
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _workflow(name: str) -> dict:
+    payload = yaml.safe_load((ROOT / ".github" / "workflows" / name).read_text())
+    assert isinstance(payload, dict)
+    return payload
+
+
+def _job_steps(job: dict) -> dict[str, dict]:
+    return {str(step.get("name") or step.get("uses")): step for step in job["steps"]}
+
+
+def _workflow_uses(payload: dict) -> list[str]:
+    return [
+        step["uses"] for job in payload["jobs"].values() for step in job["steps"] if "uses" in step
+    ]
 
 
 def test_native_versions_are_synchronized() -> None:
@@ -49,75 +74,75 @@ def test_node_dependencies_are_locked_for_cross_platform_tauri_builds() -> None:
 
 
 def test_native_workflows_are_pinned_and_preserve_beta_boundary() -> None:
-    build = (ROOT / ".github/workflows/build.yml").read_text()
-    release = (ROOT / ".github/workflows/native-release.yml").read_text()
-    uses = re.findall(r"^\s*uses:\s+\S+@([^\s#]+)", build + release, flags=re.MULTILINE)
-
+    build = _workflow("build.yml")
+    release = _workflow("native-release.yml")
+    uses = _workflow_uses(build) + _workflow_uses(release)
     assert uses
-    assert all(re.fullmatch(r"[0-9a-f]{40}", revision) for revision in uses)
-    for runner in ("macos-15", "macos-15-intel", "windows-2022", "ubuntu-22.04"):
-        assert runner in build
-    for bundles in ("dmg", "msi,nsis", "deb,appimage"):
-        assert f"bundles: {bundles}" in build
-    assert "smoke_test_native_installer.py" in build
-    assert build.count("scripts/sync_frozen_dependencies.py") == 2
-    assert release.count("scripts/sync_frozen_dependencies.py") == 3
-    assert "native_release.py checksums" in build
-    assert 'tags:\n      - "desktop-v*"' in release
-    assert "environment: native-release" in release
-    assert "subject-checksums: release-assets/SHA256SUMS" in release
-    assert "anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610" in release
-    assert "format: cyclonedx-json" in release
-    assert "upload-artifact: false" in release
-    assert "upload-release-assets: false" in release
-    assert "native_release.py validate-sbom" in release
-    assert "native_release.py website-manifest" in release
-    assert "native_release.py validate-website-manifest" in release
+    assert all(re.fullmatch(r"[^@]+@[0-9a-f]{40}", use) for use in uses)
+
+    trigger = release[True]
+    assert trigger["push"]["tags"] == ["desktop-v*"]
+    assert trigger["release"]["types"] == ["published"]
+    assert release["permissions"] == {"contents": "read"}
+    assert release["concurrency"]["cancel-in-progress"] is False
+
+    jobs = release["jobs"]
+    assert jobs["publish-draft"]["environment"] == "native-release"
+    assert jobs["publish-draft"]["permissions"] == {
+        "contents": "write",
+        "attestations": "read",
+    }
+    assert jobs["attest"]["permissions"] == {
+        "contents": "read",
+        "id-token": "write",
+        "attestations": "write",
+    }
+    assert jobs["verify-published-release"]["permissions"] == {
+        "actions": "read",
+        "attestations": "read",
+        "contents": "read",
+    }
+    validate_steps = _job_steps(jobs["validate"])
     assert (
-        release.index("anchore/sbom-action@")
-        < release.index("native_release.py validate-sbom")
-        < release.index("- name: Generate and verify final checksums")
+        validate_steps["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"]["with"][
+            "fetch-depth"
+        ]
+        == 0
     )
-    assert "attestations: write" in release
-    assert "id-token: write" in release
-    assert "contents: write" in release
-    assert "--draft" in release and "--prerelease" in release
-    assert "ADMIN_TOKEN" not in release
-    assert "Beta" in release
-    publish_job = release.split("  publish-draft:", 1)[1]
-    assert "actions/setup-python@" in publish_job
-    assert 'python-version: "3.12"' in publish_job
-    for secret in (
-        "LINUX_GPG_PRIVATE_KEY",
-        "LINUX_GPG_KEY_ID",
-        "LINUX_GPG_PASSPHRASE",
-        "LINUX_GPG_FINGERPRINT",
+    assert (
+        "validate-version-transform"
+        in validate_steps["Require a fresh native tag from the matching reviewed engine source"][
+            "run"
+        ]
+    )
+
+    verifier_steps = _job_steps(jobs["verify-published-release"])
+    verifier_checkout = verifier_steps["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"]
+    assert verifier_checkout["with"] == {
+        "ref": "${{ github.workflow_sha }}",
+        "fetch-depth": 0,
+    }
+    assert jobs["verify-published-release"]["outputs"]["verifier_commit"]
+    for name in (
+        "point-engine-release",
+        "mirror-installers-to-engine-release",
+        "supersede-published-native",
     ):
-        assert f"{secret}: ${{{{ secrets.{secret} }}}}" not in release
-    assert "--signing github-attested" in release
-    assert "--signer-workflow" in release
-    assert "--cert-identity" in release
-    assert "--deny-self-hosted-runners" in release
-    assert "validate-attestation" in release
+        checkout = _job_steps(jobs[name])[
+            "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+        ]
+        assert checkout["with"]["ref"] == (
+            "${{ needs.verify-published-release.outputs.verifier_commit }}"
+        )
+        assert checkout["with"]["fetch-depth"] == 0
 
-    tag_gate = release.split(
-        "- name: Require a fresh native tag from the matching reviewed engine source", 1
-    )[1].split("  build-macos:", 1)[0]
-    assert "fetch-depth: 0" in release.split("  build-macos:", 1)[0]
-    assert 'git merge-base --is-ancestor "${tag_commit}" origin/main' in tag_gate
-    assert 'git merge-base --is-ancestor "${engine_commit}" "${tag_commit}"' in tag_gate
-    assert "allowed_version_files=" in tag_gate
-    assert 'git diff --quiet "${tag_commit}..origin/main"' in tag_gate
-    assert "validate-release-order" in tag_gate
-
-    publish_verifier = release.split("  verify-published-release:", 1)[1].split(
-        "  point-engine-release:", 1
-    )[0]
-    assert "ref: main" in publish_verifier
-    assert "select-published-native" in publish_verifier
-    assert "validate-workflow-run" in publish_verifier
-    assert "databaseId" in publish_verifier
-    assert "published-selection" in release
+    attest_steps = _job_steps(jobs["attest"])
+    assert attest_steps["Attest the exact files named by SHA256SUMS"]["with"] == {
+        "subject-checksums": "release-assets/SHA256SUMS"
+    }
+    assert attest_steps["Attest SHA256SUMS as the consumer trust root"]["with"] == {
+        "subject-path": "release-assets/SHA256SUMS"
+    }
 
 
 def test_windows_installer_lifecycle_has_an_overall_fail_closed_timeout() -> None:
@@ -208,56 +233,56 @@ def test_security_workflows_cover_all_languages_and_pin_every_dependency() -> No
 
 
 def test_freshness_workflow_syncs_engine_releases_into_the_native_lane() -> None:
-    freshness = (ROOT / ".github/workflows/native-freshness.yml").read_text()
-    uses = re.findall(r"^\s*(?:-\s+)?uses:\s+\S+@([^\s#]+)", freshness, flags=re.MULTILINE)
-
+    freshness = _workflow("native-freshness.yml")
+    uses = _workflow_uses(freshness)
     assert uses
-    assert all(re.fullmatch(r"[0-9a-f]{40}", revision) for revision in uses)
-    # Fires on published engine releases and manual backfill only.
-    assert "types: [published]" in freshness
-    assert "workflow_dispatch:" in freshness
-    # Never re-triggers itself from desktop-v* prereleases or drafts.
-    assert "startsWith(github.event.release.tag_name, 'v')" in freshness
-    assert "!github.event.release.prerelease" in freshness
-    assert "!github.event.release.draft" in freshness
-    # The PAT makes the tag push trigger native-release.yml. Repository rules
-    # separately restrict who can write main and desktop-v* tags.
-    assert "token: ${{ secrets.ADMIN_TOKEN }}" in freshness
-    # Reuses the guarded version sync and stays idempotent per tag.
-    assert "native_release.py set-version" in freshness
-    assert "git ls-remote --exit-code --tags origin" in freshness
-    # An absent historical tag may not label newer application code with an
-    # older engine version.
-    provenance_gate = freshness.split(
-        "- name: Require exact engine-release application sources", 1
-    )[1].split("- name: Sync native version sources and lockfiles", 1)[0]
-    assert "refs/tags/v${NATIVE_VERSION}^{commit}" in provenance_gate
-    assert "git merge-base --is-ancestor" in provenance_gate
-    assert "release_versions" in provenance_gate
-    assert 'git diff --quiet "${engine_commit}..HEAD"' in provenance_gate
-    for protected_path in (
-        "engine",
-        "src",
-        "src-tauri/src",
-        "pyproject.toml",
-        "uv.lock",
+    assert all(re.fullmatch(r"[^@]+@[0-9a-f]{40}", use) for use in uses)
+
+    trigger = freshness[True]
+    assert trigger["release"] == {"types": ["published"]}
+    assert "workflow_dispatch" in trigger
+    assert trigger["push"]["branches"] == ["main"]
+    assert set(trigger["push"]["paths"]) == {
         "package.json",
         "package-lock.json",
         "src-tauri/Cargo.toml",
         "src-tauri/Cargo.lock",
         "src-tauri/tauri.conf.json",
-    ):
-        assert protected_path in provenance_gate
-    publish_step = freshness.split("- name: Commit the sync, tag desktop-v*, and push", 1)[1].split(
-        "  supersede-published-native:", 1
-    )[0]
-    assert 'git push --atomic origin HEAD:main "refs/tags/${NATIVE_TAG}"' in publish_step
-    assert publish_step.count("git push origin") == 1
-    # No builds here: the existing native release workflow owns the matrix,
-    # signing preflight, checksums, and attestation.
-    assert "tauri build" not in freshness
-    assert "git add -A" not in freshness
-    assert "git add ." not in freshness
+    }
+    assert freshness["permissions"] == {"contents": "read"}
+    assert set(freshness["jobs"]) == {"propose-native-version", "publish-native-tag"}
+
+    proposal = freshness["jobs"]["propose-native-version"]
+    proposal_steps = _job_steps(proposal)
+    proposal_checkout = proposal_steps["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"]
+    assert proposal_checkout["with"] == {
+        "ref": "main",
+        "fetch-depth": 0,
+        "token": "${{ secrets.ADMIN_TOKEN }}",
+    }
+    branch_script = proposal_steps["Create or validate the exact version branch"]["run"]
+    assert "validate-version-transform" in branch_script
+    assert 'git push origin "HEAD:refs/heads/${BRANCH}"' in branch_script
+    assert "HEAD:main" not in branch_script
+    assert "gh pr create" in proposal_steps["Open or report the protected-main pull request"]["run"]
+
+    publisher = freshness["jobs"]["publish-native-tag"]
+    assert publisher["if"] == "github.event_name == 'push' && github.ref == 'refs/heads/main'"
+    publisher_steps = _job_steps(publisher)
+    publisher_checkout = publisher_steps[
+        "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+    ]
+    assert publisher_checkout["with"]["ref"] == "${{ github.sha }}"
+    gate = publisher_steps["Require the exact protected-main transform and stable engine release"][
+        "run"
+    ]
+    assert "validate-version-transform" in gate
+    assert "validate-engine-release" in gate
+    tag_script = publisher_steps["Create or confirm the immutable native tag"]["run"]
+    assert 'git push origin "refs/tags/${NATIVE_TAG}"' in tag_script
+    assert "HEAD:main" not in "\n".join(
+        step.get("run", "") for step in proposal["steps"] + publisher["steps"]
+    )
 
 
 def test_supersession_edits_notes_only_and_never_deletes() -> None:
@@ -420,6 +445,49 @@ def test_set_native_version_rejects_non_semver_input(tmp_path: Path) -> None:
     assert native_version(tmp_path) == "0.1.1"
 
 
+def _git(tmp_path: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
+def test_git_version_transform_requires_the_exact_reconstructed_tree(tmp_path: Path) -> None:
+    _write_native_version_fixture(tmp_path, "0.1.1")
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "user.name", "Test")
+    _git(tmp_path, "config", "user.email", "test@example.com")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-qm", "base")
+    base = _git(tmp_path, "rev-parse", "HEAD")
+
+    set_native_version("0.5.0", tmp_path)
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-qm", "exact version transform")
+    exact = _git(tmp_path, "rev-parse", "HEAD")
+    assert validate_git_version_transform(base, exact, "0.5.0", root=tmp_path) == 5
+
+    package = json.loads((tmp_path / "package.json").read_text())
+    package["scripts"] = {"postinstall": "run-unreviewed-code"}
+    (tmp_path / "package.json").write_text(json.dumps(package, indent=2) + "\n")
+    _git(tmp_path, "add", "package.json")
+    _git(tmp_path, "commit", "-qm", "tamper inside allowed file")
+    tampered = _git(tmp_path, "rev-parse", "HEAD")
+    with pytest.raises(ValueError, match="deterministic set-version output"):
+        validate_git_version_transform(base, tampered, "0.5.0", root=tmp_path)
+
+    (tmp_path / "unexpected.py").write_text("print('not a version change')\n")
+    _git(tmp_path, "add", "unexpected.py")
+    _git(tmp_path, "commit", "-qm", "tamper outside allowed files")
+    unexpected = _git(tmp_path, "rev-parse", "HEAD")
+    with pytest.raises(ValueError, match="outside the version transformation"):
+        validate_git_version_transform(base, unexpected, "0.5.0", root=tmp_path)
+
+
 def test_native_tag_tuple_orders_versions_and_rejects_foreign_tags() -> None:
     assert native_tag_tuple("desktop-v0.10.2") == (0, 10, 2)
     assert native_tag_tuple("desktop-v0.9.9") < native_tag_tuple("desktop-v0.10.0")
@@ -507,16 +575,22 @@ def test_installer_pointer_refuses_a_malformed_or_truncated_block() -> None:
 
 
 def test_native_release_workflow_points_latest_at_the_published_installers() -> None:
-    workflow = (ROOT / ".github/workflows/native-release.yml").read_text(encoding="utf-8")
-
-    # The build/publish lane stays on the tag push; the pointer job runs only
-    # once the native prerelease is publicly visible, so it never advertises a
-    # draft tag URL that 404s.
-    assert "point-engine-release:" in workflow
-    assert "installer-pointer-notes" in workflow
-    assert "types: [published]" in workflow
-    assert "github.event.release.draft" in workflow
-    assert re.search(r"gh release edit \"\$\{engine_tag\}\" --notes-file", workflow)
+    workflow = _workflow("native-release.yml")
+    job = workflow["jobs"]["point-engine-release"]
+    assert set(job["needs"]) == {
+        "verify-published-release",
+        "mirror-installers-to-engine-release",
+    }
+    assert job["permissions"] == {"contents": "write"}
+    steps = _job_steps(job)
+    assert steps["actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"]["with"] == {
+        "name": "${{ needs.verify-published-release.outputs.verified_artifact }}",
+        "path": "mirror",
+    }
+    script = steps["Prepend an idempotent installer pointer to the engine release"]["run"]
+    assert "validate-engine-release" in script
+    assert "installer-pointer-notes" in script
+    assert "gh release edit" in script
 
 
 def test_native_release_workflow_mirrors_installers_onto_the_engine_release() -> None:
@@ -527,33 +601,31 @@ def test_native_release_workflow_mirrors_installers_onto_the_engine_release() ->
     all three are asserted here because losing any one of them silently turns a
     convenience copy into a maturity overstatement.
     """
-    workflow = (ROOT / ".github/workflows/native-release.yml").read_text(encoding="utf-8")
-
-    assert "mirror-installers-to-engine-release:" in workflow
-    assert 'gh release download "${NATIVE_TAG}"' in workflow
-    assert 'gh release upload "${engine_tag}" mirror/* --clobber' in workflow
-
-    # 1. Never mirror unattested bytes: the downloaded set is re-verified
-    #    against the manifest that was attested at build time.
-    # Comments explain these invariants; assert against executable lines only,
-    # so a comment mentioning a marker cannot satisfy or break the check.
-    mirror_job = "\n".join(
-        line
-        for line in workflow.split("mirror-installers-to-engine-release:", 1)[1]
-        .split("  supersede-published-native:", 1)[0]
-        .splitlines()
-        if not line.lstrip().startswith("#")
-    )
-    assert "verify-checksums" in mirror_job
-    assert "--manifest mirror/SHA256SUMS" in mirror_job
-
-    # 2. The engine release must never receive the installer-release marker, or
-    #    download pages would start resolving v* instead of desktop-v*.
-    assert "<!-- installer-release -->" not in mirror_job
-
-    # 3. The native lane stays a prerelease; nothing here promotes it.
-    assert "--prerelease" not in mirror_job
-    assert "gh release edit" not in mirror_job
+    workflow = _workflow("native-release.yml")
+    job = workflow["jobs"]["mirror-installers-to-engine-release"]
+    assert job["needs"] == "verify-published-release"
+    assert job["permissions"] == {
+        "actions": "read",
+        "attestations": "write",
+        "contents": "write",
+        "id-token": "write",
+    }
+    steps = _job_steps(job)
+    assert steps["actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"]["with"] == {
+        "name": "${{ needs.verify-published-release.outputs.verified_artifact }}",
+        "path": "mirror",
+    }
+    mirror = steps["Mirror and re-download the exact verified asset set"]["run"]
+    assert "validate-engine-release" in mirror
+    assert "verify-checksums" in mirror
+    assert "OpenAdapt-Desktop-desktop-v*.cyclonedx.json" in mirror
+    assert "cmp mirror/SHA256SUMS remote-mirror/SHA256SUMS" in mirror
+    assert 'gh release upload "${engine_tag}" mirror/* --clobber' in mirror
+    assert "gh release edit" not in mirror
+    assert "--prerelease" not in mirror
+    assert steps["Attest the verified release index"]["with"] == {
+        "subject-path": VERIFIED_RELEASE_INDEX
+    }
 
 
 @pytest.mark.parametrize(
@@ -723,6 +795,12 @@ def test_release_provenance_rejects_modified_workflow_or_source(tmp_path: Path) 
         "run_id": 123456,
         "run_attempt": 1,
         "runner_environment": "github-hosted",
+        "engine_tag": f"v{native_version()}",
+        "engine_commit": "b" * 40,
+        "engine_release_id": 654321,
+        "engine_release_url": (
+            f"https://github.com/OpenAdaptAI/openadapt-desktop/releases/tag/v{native_version()}"
+        ),
     }
     with pytest.raises(ValueError, match="workflow ref"):
         write_release_provenance(
@@ -1081,6 +1159,10 @@ def _stage_complete_release(tmp_path: Path) -> tuple[Path, Path, Path]:
         encoding="utf-8",
     )
     output = write_website_release_manifest(release, tag=tag, sbom=sbom)
+    (release / NATIVE_RELEASE_VERIFIER).write_text(
+        "#!/usr/bin/env python3\nprint('fixture verifier')\n",
+        encoding="utf-8",
+    )
     source_commit = "a" * 40
     write_release_provenance(
         release / NATIVE_RELEASE_PROVENANCE,
@@ -1094,10 +1176,156 @@ def _stage_complete_release(tmp_path: Path) -> tuple[Path, Path, Path]:
         run_id=123456,
         run_attempt=1,
         runner_environment="github-hosted",
+        engine_tag=f"v{native_version()}",
+        engine_commit="b" * 40,
+        engine_release_id=654321,
+        engine_release_url=(
+            f"https://github.com/OpenAdaptAI/openadapt-desktop/releases/tag/v{native_version()}"
+        ),
     )
     checksums = release / "SHA256SUMS"
     write_checksums(release, checksums)
     return release, output, checksums
+
+
+def _engine_release_file(tmp_path: Path, *, version: str | None = None) -> Path:
+    version = version or native_version()
+    path = tmp_path / "engine-release.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "databaseId": 654321,
+                "isDraft": False,
+                "isPrerelease": False,
+                "publishedAt": "2026-08-18T12:00:00Z",
+                "tagName": f"v{version}",
+                "url": (
+                    f"https://github.com/OpenAdaptAI/openadapt-desktop/releases/tag/v{version}"
+                ),
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_engine_release_requires_exact_stable_identity(tmp_path: Path) -> None:
+    release = _engine_release_file(tmp_path)
+    validated = validate_engine_release(
+        release,
+        repository="OpenAdaptAI/openadapt-desktop",
+        engine_tag=f"v{native_version()}",
+        engine_commit="b" * 40,
+    )
+    assert validated["databaseId"] == 654321
+
+    payload = json.loads(release.read_text(encoding="utf-8"))
+    payload["isPrerelease"] = True
+    release.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="exact published stable release"):
+        validate_engine_release(
+            release,
+            repository="OpenAdaptAI/openadapt-desktop",
+            engine_tag=f"v{native_version()}",
+            engine_commit="b" * 40,
+        )
+
+
+def test_verified_release_index_is_closed_bound_and_monotonic(tmp_path: Path) -> None:
+    release, _manifest, checksums = _stage_complete_release(tmp_path / "assets")
+    engine_release = _engine_release_file(tmp_path)
+    index = write_verified_release_index(
+        tmp_path / VERIFIED_RELEASE_INDEX,
+        directory=release,
+        checksums=checksums,
+        provenance_path=release / NATIVE_RELEASE_PROVENANCE,
+        repository="OpenAdaptAI/openadapt-desktop",
+        tag=f"desktop-v{native_version()}",
+        source_commit="a" * 40,
+        engine_release_path=engine_release,
+    )
+    validated = validate_verified_release_index(index)
+    assert validated["checksums"]["sha256"] == hashlib.sha256(checksums.read_bytes()).hexdigest()
+    assert {asset["name"] for asset in validated["assets"]} == {
+        name for name, _digest in _read_checksum_lines(checksums)
+    }
+
+    incomplete = json.loads(index.read_text(encoding="utf-8"))
+    incomplete["assets"].pop()
+    incomplete_path = tmp_path / "incomplete" / VERIFIED_RELEASE_INDEX
+    incomplete_path.parent.mkdir()
+    incomplete_path.write_text(json.dumps(incomplete), encoding="utf-8")
+    with pytest.raises(ValueError, match="complete native asset set"):
+        validate_verified_release_index(incomplete_path)
+
+    expanded = json.loads(index.read_text(encoding="utf-8"))
+    expanded["assets"].append({"name": "unexpected.txt", "sha256": "0" * 64})
+    expanded["assets"].sort(key=lambda asset: asset["name"])
+    expanded_path = tmp_path / "expanded" / VERIFIED_RELEASE_INDEX
+    expanded_path.parent.mkdir()
+    expanded_path.write_text(json.dumps(expanded), encoding="utf-8")
+    with pytest.raises(ValueError, match="complete native asset set"):
+        validate_verified_release_index(expanded_path)
+
+    changed = json.loads(index.read_text(encoding="utf-8"))
+    changed["assets"][0]["sha256"] = "0" * 64
+    changed_path = tmp_path / "changed" / VERIFIED_RELEASE_INDEX
+    changed_path.parent.mkdir()
+    changed_path.write_text(json.dumps(changed), encoding="utf-8")
+    with pytest.raises(ValueError, match="cannot rewrite an existing native version"):
+        write_verified_release_index(
+            tmp_path / "retry" / VERIFIED_RELEASE_INDEX,
+            directory=release,
+            checksums=checksums,
+            provenance_path=release / NATIVE_RELEASE_PROVENANCE,
+            repository="OpenAdaptAI/openadapt-desktop",
+            tag=f"desktop-v{native_version()}",
+            source_commit="a" * 40,
+            engine_release_path=engine_release,
+            existing=changed_path,
+        )
+
+    rollback = json.loads(index.read_text(encoding="utf-8"))
+    rollback["native_tag"] = "desktop-v99.0.0"
+    rollback["native_version"] = "99.0.0"
+    rollback["engine_tag"] = "v99.0.0"
+    rollback["engine_release_url"] = (
+        "https://github.com/OpenAdaptAI/openadapt-desktop/releases/tag/v99.0.0"
+    )
+    for asset in rollback["assets"]:
+        asset["name"] = asset["name"].replace(native_version(), "99.0.0")
+    rollback["assets"].sort(key=lambda asset: asset["name"])
+    rollback_path = tmp_path / "rollback" / VERIFIED_RELEASE_INDEX
+    rollback_path.parent.mkdir()
+    rollback_path.write_text(json.dumps(rollback), encoding="utf-8")
+    with pytest.raises(ValueError, match="cannot move backwards"):
+        write_verified_release_index(
+            tmp_path / "retry-rollback" / VERIFIED_RELEASE_INDEX,
+            directory=release,
+            checksums=checksums,
+            provenance_path=release / NATIVE_RELEASE_PROVENANCE,
+            repository="OpenAdaptAI/openadapt-desktop",
+            tag=f"desktop-v{native_version()}",
+            source_commit="a" * 40,
+            engine_release_path=engine_release,
+            existing=rollback_path,
+        )
+
+
+def test_public_download_verifier_refuses_an_expanded_inventory(tmp_path: Path) -> None:
+    asset = tmp_path / "installer.bin"
+    asset.write_bytes(b"installer")
+    checksums = tmp_path / "SHA256SUMS"
+    checksums.write_text(
+        f"{hashlib.sha256(asset.read_bytes()).hexdigest()}  {asset.name}\n",
+        encoding="utf-8",
+    )
+    assert verify_download_inventory(tmp_path, checksums) == 1
+
+    (tmp_path / "extra.bin").write_bytes(b"not signed")
+    with pytest.raises(ValueError, match="do not equal"):
+        verify_download_inventory(tmp_path, checksums)
 
 
 def test_website_release_manifest_is_an_honest_index_of_staged_bytes(tmp_path: Path) -> None:

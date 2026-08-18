@@ -69,16 +69,10 @@ jobs:
             exit 1
           fi
 
-          allowed_version_files='^(package.json|package-lock.json|src-tauri/Cargo.toml|src-tauri/Cargo.lock|src-tauri/tauri.conf.json)$'
-          unexpected="$({
-            git diff --name-only "${engine_commit}..${tag_commit}" |
-              grep -Ev "${allowed_version_files}" || true
-          })"
-          if [ -n "${unexpected}" ]; then
-            echo "error: native tag contains changes other than the version sync:" >&2
-            printf '%s\n' "${unexpected}" >&2
-            exit 1
-          fi
+          python scripts/native_release.py validate-version-transform \
+            --base-ref "${engine_commit}" \
+            --candidate-ref "${tag_commit}" \
+            --version "${version}"
 
           protected_paths=(
             engine
@@ -124,6 +118,8 @@ jobs:
             target: x86_64-apple-darwin
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -218,6 +214,9 @@ jobs:
           --config src-tauri/tauri.adhoc.conf.json
 
       - name: Smoke-test DMG install, signature policy, launch, and uninstall
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         shell: bash
         run: |
           set -euo pipefail
@@ -228,6 +227,8 @@ jobs:
             --app-path "${RUNNER_TEMP}/OpenAdapt Desktop.app" \
             --expected-architecture "${{ matrix.architecture }}" \
             --signing-mode "${{ steps.signing.outputs.mode }}" \
+            --signing-identity "${APPLE_SIGNING_IDENTITY}" \
+            --signing-team-id "${APPLE_TEAM_ID}" \
             --launch-seconds 20
 
       - name: Stage exact native DMG
@@ -553,6 +554,8 @@ jobs:
       attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -589,21 +592,53 @@ jobs:
           --tag "${{ github.ref_name }}"
           --sbom release-assets/OpenAdapt-Desktop-${{ github.ref_name }}.cyclonedx.json
 
-      - name: Bind the exact source and workflow invocation into the release set
+      - name: Resolve the exact stable engine release identity
+        id: engine_release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          engine_tag="v${GITHUB_REF_NAME#desktop-v}"
+          engine_commit="$(git rev-parse --verify "${engine_tag}^{commit}")"
+          gh release view "${engine_tag}" \
+            --json databaseId,isDraft,isPrerelease,publishedAt,tagName,url \
+            > engine-release.json
+          python scripts/native_release.py validate-engine-release \
+            --file engine-release.json \
+            --repository "${GITHUB_REPOSITORY}" \
+            --engine-tag "${engine_tag}" \
+            --engine-commit "${engine_commit}" \
+            --github-output "${GITHUB_OUTPUT}"
+
+      - name: Bind the exact source, engine release, and workflow invocation
         env:
           WORKFLOW_REF: ${{ github.workflow_ref }}
           WORKFLOW_COMMIT: ${{ github.workflow_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          engine_tag="v${GITHUB_REF_NAME#desktop-v}"
+          engine_commit="$(git rev-parse --verify "${engine_tag}^{commit}")"
+          python scripts/native_release.py write-provenance \
+            --output release-assets/openadapt-desktop-native-release-provenance.json \
+            --repository "${GITHUB_REPOSITORY}" \
+            --tag "${GITHUB_REF_NAME}" \
+            --source-commit "${GITHUB_SHA}" \
+            --workflow-ref "${WORKFLOW_REF}" \
+            --workflow-commit "${WORKFLOW_COMMIT}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --runner-environment "${RUNNER_ENVIRONMENT}" \
+            --engine-tag "${engine_tag}" \
+            --engine-commit "${engine_commit}" \
+            --engine-release-id "${{ steps.engine_release.outputs.engine_release_id }}" \
+            --engine-release-url "https://github.com/${GITHUB_REPOSITORY}/releases/tag/${engine_tag}"
+
+      - name: Add the standalone exact-inventory verifier
         run: >-
-          python scripts/native_release.py write-provenance
-          --output release-assets/openadapt-desktop-native-release-provenance.json
-          --repository "${GITHUB_REPOSITORY}"
-          --tag "${GITHUB_REF_NAME}"
-          --source-commit "${GITHUB_SHA}"
-          --workflow-ref "${WORKFLOW_REF}"
-          --workflow-commit "${WORKFLOW_COMMIT}"
-          --run-id "${GITHUB_RUN_ID}"
-          --run-attempt "${GITHUB_RUN_ATTEMPT}"
-          --runner-environment "${RUNNER_ENVIRONMENT}"
+          cp scripts/verify_native_release_download.py
+          release-assets/verify-openadapt-native-release.py
 
       - name: Generate and verify final checksums
         run: |
@@ -625,6 +660,11 @@ jobs:
         with:
           subject-checksums: release-assets/SHA256SUMS
 
+      - name: Attest SHA256SUMS as the consumer trust root
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: release-assets/SHA256SUMS
+
       - name: Verify the signed workflow and exact subject inventory before upload
         env:
           GH_TOKEN: ${{ github.token }}
@@ -639,6 +679,11 @@ jobs:
             --cert-identity "${identity}" \
             --deny-self-hosted-runners \
             --format json > attestation.json
+          gh attestation verify release-assets/SHA256SUMS \
+            --repo "${GITHUB_REPOSITORY}" \
+            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/native-release.yml" \
+            --cert-identity "${identity}" \
+            --deny-self-hosted-runners
           python scripts/native_release.py validate-attestation \
             --file attestation.json \
             --directory release-assets \
@@ -699,6 +744,11 @@ jobs:
             --cert-identity "${identity}" \
             --deny-self-hosted-runners \
             --format json > attestation.json
+          gh attestation verify release-assets/SHA256SUMS \
+            --repo "${GITHUB_REPOSITORY}" \
+            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/native-release.yml" \
+            --cert-identity "${identity}" \
+            --deny-self-hosted-runners
           python scripts/native_release.py validate-attestation \
             --file attestation.json \
             --directory release-assets \
@@ -748,13 +798,24 @@ jobs:
     outputs:
       native_tag: ${{ steps.select.outputs.native_tag }}
       source_commit: ${{ steps.source.outputs.source_commit }}
+      verifier_commit: ${{ steps.verifier.outputs.verifier_commit }}
+      verified_artifact: ${{ steps.artifact.outputs.verified_artifact }}
+      engine_tag: ${{ steps.proof.outputs.engine_tag }}
+      engine_commit: ${{ steps.proof.outputs.engine_commit }}
     steps:
-      # The verifier must come from current main. Never execute verification
-      # code supplied by the release tag that is under review.
+      # The verifier must be the exact protected-main workflow commit that
+      # GitHub binds into this run's attestation. Never execute verification
+      # code supplied by the release tag that is under review, or a later main
+      # commit that is outside this workflow invocation.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: main
+          ref: ${{ github.workflow_sha }}
           fetch-depth: 0
+
+      - name: Bind all later write jobs to this reviewed verifier commit
+        id: verifier
+        shell: bash
+        run: echo "verifier_commit=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -780,6 +841,7 @@ jobs:
           set -euo pipefail
           mkdir release-assets
           gh release download "${NATIVE_TAG}" --dir release-assets --pattern '*'
+          git fetch --force origin "refs/tags/${NATIVE_TAG}:refs/tags/${NATIVE_TAG}"
           source_commit="$(git rev-parse --verify "${NATIVE_TAG}^{commit}")"
           echo "source_commit=${source_commit}" >> "${GITHUB_OUTPUT}"
 
@@ -802,6 +864,11 @@ jobs:
             --cert-identity "${identity}" \
             --deny-self-hosted-runners \
             --format json > attestation.json
+          gh attestation verify release-assets/SHA256SUMS \
+            --repo "${GITHUB_REPOSITORY}" \
+            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/native-release.yml" \
+            --cert-identity "${identity}" \
+            --deny-self-hosted-runners
           python scripts/native_release.py validate-attestation \
             --file attestation.json \
             --directory release-assets \
@@ -831,6 +898,40 @@ jobs:
             --tag "${NATIVE_TAG}" \
             --source-commit "${SOURCE_COMMIT}"
 
+      - name: Revalidate the exact signed engine release lineage
+        env:
+          ENGINE_TAG: ${{ steps.proof.outputs.engine_tag }}
+          ENGINE_COMMIT: ${{ steps.proof.outputs.engine_commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --force origin "refs/tags/${ENGINE_TAG}:refs/tags/${ENGINE_TAG}"
+          observed="$(git rev-parse --verify "${ENGINE_TAG}^{commit}")"
+          if [ "${observed}" != "${ENGINE_COMMIT}" ]; then
+            echo "error: engine tag moved after the signed native build" >&2
+            exit 1
+          fi
+          gh release view "${ENGINE_TAG}" \
+            --json databaseId,isDraft,isPrerelease,publishedAt,tagName,url \
+            > engine-release.json
+          python scripts/native_release.py validate-engine-release \
+            --file engine-release.json \
+            --repository "${GITHUB_REPOSITORY}" \
+            --engine-tag "${ENGINE_TAG}" \
+            --engine-commit "${ENGINE_COMMIT}" \
+            --provenance release-assets/openadapt-desktop-native-release-provenance.json
+
+      - name: Retain the exact verified bytes for the write jobs
+        id: artifact
+        shell: bash
+        run: echo "verified_artifact=verified-published-native-${GITHUB_RUN_ID}" >> "${GITHUB_OUTPUT}"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: verified-published-native-${{ github.run_id }}
+          path: release-assets/*
+          if-no-files-found: error
+
   point-engine-release:
     name: Point the engine release at these installers
     # GitHub's /releases/latest excludes prereleases by definition, so the engine
@@ -849,7 +950,7 @@ jobs:
     # copies the actual bytes. The pointer still names desktop-vX.Y.Z because
     # that tag stays the canonical provenance home and the one download pages
     # select from.
-    needs: verify-published-release
+    needs: [verify-published-release, mirror-installers-to-engine-release]
     if: >-
       github.event_name == 'release' &&
       startsWith(github.event.release.tag_name, 'desktop-v') &&
@@ -861,19 +962,54 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       NATIVE_TAG: ${{ needs.verify-published-release.outputs.native_tag }}
+      SOURCE_COMMIT: ${{ needs.verify-published-release.outputs.source_commit }}
+      ENGINE_TAG: ${{ needs.verify-published-release.outputs.engine_tag }}
+      ENGINE_COMMIT: ${{ needs.verify-published-release.outputs.engine_commit }}
       REPO: ${{ github.repository }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.verify-published-release.outputs.verifier_commit }}
+          fetch-depth: 0
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
 
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.verify-published-release.outputs.verified_artifact }}
+          path: mirror
+
       - name: Prepend an idempotent installer pointer to the engine release
         shell: bash
         run: |
           set -euo pipefail
-          engine_tag="v${NATIVE_TAG#desktop-v}"
+          engine_tag="${ENGINE_TAG}"
+
+          python scripts/native_release.py verify-checksums \
+            --directory mirror \
+            --manifest mirror/SHA256SUMS
+          python scripts/native_release.py validate-provenance \
+            --file mirror/openadapt-desktop-native-release-provenance.json \
+            --repository "${GITHUB_REPOSITORY}" \
+            --tag "${NATIVE_TAG}" \
+            --source-commit "${SOURCE_COMMIT}"
+          git fetch --force origin "refs/tags/${engine_tag}:refs/tags/${engine_tag}"
+          observed="$(git rev-parse --verify "${engine_tag}^{commit}")"
+          if [ "${observed}" != "${ENGINE_COMMIT}" ]; then
+            echo "error: engine tag differs from signed native provenance" >&2
+            exit 1
+          fi
+          gh release view "${engine_tag}" \
+            --json databaseId,isDraft,isPrerelease,publishedAt,tagName,url \
+            > engine-release.json
+          python scripts/native_release.py validate-engine-release \
+            --file engine-release.json \
+            --repository "${GITHUB_REPOSITORY}" \
+            --engine-tag "${engine_tag}" \
+            --engine-commit "${ENGINE_COMMIT}" \
+            --provenance mirror/openadapt-desktop-native-release-provenance.json
 
           # native-freshness.yml only pushes desktop-vX.Y.Z after verifying that
           # refs/tags/vX.Y.Z exists and is an ancestor of main, so a missing
@@ -913,17 +1049,15 @@ jobs:
     # Authenticode. Linux requires an OIDC attestation over the exact bytes.
     # The pointer names these contracts and `desktop-vX.Y.Z` stays a prerelease.
     #
-    # Why this does not break the machine-readable selection rule in RELEASES.md:
-    # that rule selects releases carrying the `<!-- installer-release -->` marker
-    # under a `desktop-v` tag prefix. This job copies ASSETS only and never
-    # writes that marker to the engine release, so consumers (the openadapt.ai
-    # download page via utils/desktopRelease.js) keep resolving desktop-v*
-    # unchanged.
+    # Machine consumers do not trust release-note markers. This job publishes a
+    # separately attested closed index after it verifies the exact mirrored set.
+    # The index binds the native and engine release identities and cannot move
+    # to a lower version.
     #
     # Cost: ~757 MB duplicated per release. GitHub release storage and bandwidth
     # are not billed for public repositories, so the recurring cost is the
     # download+upload minutes in this one job, not storage spend.
-    needs: [verify-published-release, point-engine-release]
+    needs: verify-published-release
     if: >-
       github.event_name == 'release' &&
       startsWith(github.event.release.tag_name, 'desktop-v') &&
@@ -931,45 +1065,142 @@ jobs:
       !github.event.release.draft
     runs-on: ubuntu-22.04
     permissions:
+      actions: read
+      attestations: write
       contents: write
+      id-token: write
     env:
       GH_TOKEN: ${{ github.token }}
       NATIVE_TAG: ${{ needs.verify-published-release.outputs.native_tag }}
+      SOURCE_COMMIT: ${{ needs.verify-published-release.outputs.source_commit }}
+      ENGINE_TAG: ${{ needs.verify-published-release.outputs.engine_tag }}
+      ENGINE_COMMIT: ${{ needs.verify-published-release.outputs.engine_commit }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.verify-published-release.outputs.verifier_commit }}
+          fetch-depth: 0
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
 
-      - name: Mirror the exact attested asset set onto the engine release
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.verify-published-release.outputs.verified_artifact }}
+          path: mirror
+
+      - name: Mirror and re-download the exact verified asset set
         shell: bash
         run: |
           set -euo pipefail
-          engine_tag="v${NATIVE_TAG#desktop-v}"
+          engine_tag="${ENGINE_TAG}"
 
-          # point-engine-release already failed loudly if this is missing, but
-          # this job must not upload into a tag that does not exist either.
-          if ! gh release view "${engine_tag}" >/dev/null 2>&1; then
-            echo "error: engine release ${engine_tag} does not exist." >&2
-            exit 1
-          fi
-
-          mkdir -p mirror
-          gh release download "${NATIVE_TAG}" --dir mirror --pattern '*' --clobber
-
-          # Re-verify the downloaded bytes against the manifest that was
-          # attested at build time. Mirroring unverified bytes onto the release
-          # GitHub labels "Latest" is exactly the failure this guards.
           python scripts/native_release.py verify-checksums \
             --directory mirror \
             --manifest mirror/SHA256SUMS
-
-          # Assets only. The `<!-- installer-release -->` marker deliberately
-          # stays off the engine release so the documented selection rule keeps
-          # resolving desktop-v* (see RELEASES.md).
+          python scripts/native_release.py validate-provenance \
+            --file mirror/openadapt-desktop-native-release-provenance.json \
+            --repository "${GITHUB_REPOSITORY}" \
+            --tag "${NATIVE_TAG}" \
+            --source-commit "${SOURCE_COMMIT}"
+          git fetch --force origin "refs/tags/${engine_tag}:refs/tags/${engine_tag}"
+          observed="$(git rev-parse --verify "${engine_tag}^{commit}")"
+          if [ "${observed}" != "${ENGINE_COMMIT}" ]; then
+            echo "error: engine tag differs from signed native provenance" >&2
+            exit 1
+          fi
+          gh release view "${engine_tag}" \
+            --json databaseId,isDraft,isPrerelease,publishedAt,tagName,url \
+            > engine-release.json
+          python scripts/native_release.py validate-engine-release \
+            --file engine-release.json \
+            --repository "${GITHUB_REPOSITORY}" \
+            --engine-tag "${engine_tag}" \
+            --engine-commit "${ENGINE_COMMIT}" \
+            --provenance mirror/openadapt-desktop-native-release-provenance.json
           gh release upload "${engine_tag}" mirror/* --clobber
-          echo "${engine_tag} now carries the ${NATIVE_TAG} installer set."
+
+          mkdir remote-mirror
+          gh release download "${engine_tag}" --dir remote-mirror \
+            --pattern 'OpenAdapt-Desktop-Beta-*' \
+            --pattern 'OpenAdapt-Desktop-desktop-v*.cyclonedx.json' \
+            --pattern 'openadapt-desktop-release-manifest.json' \
+            --pattern 'openadapt-desktop-native-release-provenance.json' \
+            --pattern 'verify-openadapt-native-release.py' \
+            --pattern 'SHA256SUMS'
+          cmp mirror/SHA256SUMS remote-mirror/SHA256SUMS
+          python scripts/native_release.py verify-checksums \
+            --directory remote-mirror \
+            --manifest remote-mirror/SHA256SUMS
+          echo "${engine_tag} carries the exact verified ${NATIVE_TAG} asset set."
+
+      - name: Write the monotonic verified release index
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir existing-index
+          gh release download "${ENGINE_TAG}" \
+            --dir existing-index \
+            --pattern 'openadapt-desktop-verified-release.json' || true
+          existing=()
+          if [ -f existing-index/openadapt-desktop-verified-release.json ]; then
+            existing=(--existing existing-index/openadapt-desktop-verified-release.json)
+          fi
+          python scripts/native_release.py write-verified-index \
+            --output openadapt-desktop-verified-release.json \
+            --directory mirror \
+            --checksums mirror/SHA256SUMS \
+            --provenance mirror/openadapt-desktop-native-release-provenance.json \
+            --repository "${GITHUB_REPOSITORY}" \
+            --tag "${NATIVE_TAG}" \
+            --source-commit "${{ needs.verify-published-release.outputs.source_commit }}" \
+            --engine-release engine-release.json \
+            "${existing[@]}"
+
+      - name: Attest the verified release index
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: openadapt-desktop-verified-release.json
+
+      - name: Publish and verify the public channel authority
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --force origin "refs/tags/${ENGINE_TAG}:refs/tags/${ENGINE_TAG}"
+          observed="$(git rev-parse --verify "${ENGINE_TAG}^{commit}")"
+          if [ "${observed}" != "${ENGINE_COMMIT}" ]; then
+            echo "error: engine tag differs before the verified-index write" >&2
+            exit 1
+          fi
+          gh release view "${ENGINE_TAG}" \
+            --json databaseId,isDraft,isPrerelease,publishedAt,tagName,url \
+            > engine-release-current.json
+          python scripts/native_release.py validate-engine-release \
+            --file engine-release-current.json \
+            --repository "${GITHUB_REPOSITORY}" \
+            --engine-tag "${ENGINE_TAG}" \
+            --engine-commit "${ENGINE_COMMIT}" \
+            --provenance mirror/openadapt-desktop-native-release-provenance.json
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/native-release.yml@refs/heads/main"
+          gh attestation verify openadapt-desktop-verified-release.json \
+            --repo "${GITHUB_REPOSITORY}" \
+            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/native-release.yml" \
+            --cert-identity "${identity}" \
+            --deny-self-hosted-runners
+          gh release upload "${ENGINE_TAG}" openadapt-desktop-verified-release.json --clobber
+          mkdir remote-index
+          gh release download "${ENGINE_TAG}" --dir remote-index \
+            --pattern 'openadapt-desktop-verified-release.json'
+          cmp openadapt-desktop-verified-release.json \
+            remote-index/openadapt-desktop-verified-release.json
+          python scripts/native_release.py validate-verified-index \
+            --file remote-index/openadapt-desktop-verified-release.json
+          gh attestation verify remote-index/openadapt-desktop-verified-release.json \
+            --repo "${GITHUB_REPOSITORY}" \
+            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/native-release.yml" \
+            --cert-identity "${identity}" \
+            --deny-self-hosted-runners
 
   supersede-published-native:
     name: Mark every lower native prerelease superseded
@@ -989,7 +1220,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: main
+          ref: ${{ needs.verify-published-release.outputs.verifier_commit }}
+          fetch-depth: 0
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:

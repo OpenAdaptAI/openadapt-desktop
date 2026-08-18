@@ -41,15 +41,16 @@ remain the admission boundary.
 
 Native releases use a distinct `desktop-vX.Y.Z` tag and prerelease channel. The
 native version comes from `package.json`, `src-tauri/Cargo.toml`, and
-`src-tauri/tauri.conf.json`; the Native Installer Freshness workflow
-synchronizes those sources to each published engine release and pushes the
-matching `desktop-vX.Y.Z` tag, so the native prerelease number mirrors the
-engine release it was built from. When a native prerelease is published, the
-release workflow selects the highest published semantic version. All lower
-native prereleases receive a prominent "Superseded — do not use" notice;
-their assets are retained for provenance, and any deletion is a maintainer
-decision made outside CI. The full two-lane release policy and its planned
-convergence into a single release after code signing lands are documented in
+`src-tauri/tauri.conf.json`. The Native Installer Freshness workflow opens a
+pull request with the exact deterministic five-file version transform for each
+published engine release. The protected `main` branch must review and merge
+that pull request. A separate main-push job then verifies the complete tree
+against the immutable engine tag and creates the matching `desktop-vX.Y.Z` tag.
+The workflow never writes directly to `main`. When a native prerelease is
+published, the release workflow selects the highest published semantic version.
+All lower native prereleases receive a prominent "Superseded — do not use"
+notice. Their assets remain for provenance. The full two-lane release policy
+and its planned convergence into a single release are documented in
 [RELEASES.md](https://github.com/OpenAdaptAI/openadapt-desktop/blob/main/RELEASES.md).
 
 ## Artifact labels
@@ -64,8 +65,11 @@ architecture, and signing state. The initial matrix is:
 | Linux | `x86_64` | DEB and AppImage | `github-attested` exact bytes required |
 
 The release workflow refuses ad-hoc or unsigned platform metadata. The build
-workflow installs and uninstalls every package on clean hosted
-runners, verifies executable architecture and the declared signing policy,
+workflow installs and uninstalls every package on clean hosted runners. It
+verifies the executable architecture and the declared signing policy. macOS
+verification requires the exact configured Developer ID authority and Team ID.
+Windows verification requires a valid signer and a timestamp certificate on
+each installer, the installed executable, and the NSIS uninstaller. The workflow
 launches every installed application and requires the process to survive a
 20-second startup window (catching launch panics before they ship), and
 stages the exact tested bytes. The repository test matrix also checks that only
@@ -80,18 +84,29 @@ assembled installer set with Syft to publish a machine-readable CycloneDX JSON
 software bill of materials (SBOM). The workflow refuses an empty or malformed
 SBOM, includes it and the public build-provenance identity in the sorted
 `SHA256SUMS` manifest, verifies the exact inventory, and creates a GitHub
-artifact attestation over every named file. The release verifier requires the
-signed subjects to equal that inventory. It also binds the exact workflow, tag
-commit, run ID, run attempt, GitHub-hosted runner, and successful protected
-publish job. Consumers can verify downloaded assets with:
+artifact attestation over every named file. It also attests `SHA256SUMS` itself.
+The release verifier requires the signed subjects to equal that inventory. It
+binds the exact workflow, native tag commit, stable engine tag and release,
+run ID, run attempt, GitHub-hosted runner, and successful protected publish
+job. Consumers must authenticate `SHA256SUMS` before they trust its digests:
 
 ```bash
-sha256sum -c SHA256SUMS
-gh attestation verify openadapt-desktop-native-release-provenance.json \
+native_tag=desktop-vX.Y.Z
+gh attestation verify SHA256SUMS \
   --repo OpenAdaptAI/openadapt-desktop \
   --signer-workflow OpenAdaptAI/openadapt-desktop/.github/workflows/native-release.yml \
+  --cert-identity "https://github.com/OpenAdaptAI/openadapt-desktop/.github/workflows/native-release.yml@refs/tags/${native_tag}" \
   --deny-self-hosted-runners
+sha256sum -c SHA256SUMS
+python verify-openadapt-native-release.py --directory . --manifest SHA256SUMS
 ```
+
+The final helper refuses missing, extra, linked, non-regular, duplicate, or
+digest-mismatched files. The canonical engine release also publishes an
+attested `openadapt-desktop-verified-release.json`. This closed, monotonic index
+identifies the exact native tag, engine release, source commits, workflow run,
+checksum digest, and complete asset set. A download service must verify this
+index attestation. It must not select a release from mutable release-note text.
 
 An attestation binds bytes to a build identity; it does not establish that the
 software is secure or functionally complete.
@@ -121,9 +136,11 @@ its independent public/private signing-key lifecycle and recovery procedure are
 established.
 
 Before a release, the repository must also have a no-bypass pull-request
-ruleset for `main` and a release-tag ruleset for `desktop-v*`. At this document
-update, those repository rules and the signing identities are not active. The
-historical `desktop-v0.15.0` prerelease does not satisfy the new trust contract.
+ruleset for `main` and immutable release-tag rules for both `v*` and
+`desktop-v*`. The engine workflow can create `v*`. The native freshness
+workflow can create `desktop-v*`. Neither release identity can update or delete
+a tag. The historical `desktop-v0.15.0` prerelease does not satisfy the new
+trust contract.
 
 The founder activation runbook — exactly which certificates to buy, their costs,
 how to add each secret, and what each public surface may then truthfully claim —

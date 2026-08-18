@@ -9,7 +9,9 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
+import tempfile
 import tomllib
 from pathlib import Path
 
@@ -54,9 +56,13 @@ EXPECTED_PLATFORMS = {
 }
 WEBSITE_RELEASE_MANIFEST = "openadapt-desktop-release-manifest.json"
 NATIVE_RELEASE_PROVENANCE = "openadapt-desktop-native-release-provenance.json"
-NATIVE_RELEASE_PROVENANCE_SCHEMA = "openadapt.native-release-provenance/v1"
+NATIVE_RELEASE_PROVENANCE_SCHEMA = "openadapt.native-release-provenance/v2"
 NATIVE_RELEASE_WORKFLOW = ".github/workflows/native-release.yml"
 NATIVE_RELEASE_WORKFLOW_NAME = "Native Installer Release"
+ENGINE_RELEASE_WORKFLOW = ".github/workflows/release.yml"
+VERIFIED_RELEASE_INDEX = "openadapt-desktop-verified-release.json"
+VERIFIED_RELEASE_INDEX_SCHEMA = "openadapt.desktop-verified-release/v1"
+NATIVE_RELEASE_VERIFIER = "verify-openadapt-native-release.py"
 GITHUB_WORKFLOW_BUILD_TYPE = "https://actions.github.io/buildtypes/workflow/v1"
 GITHUB_REPOSITORY_PATTERN = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 GIT_COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
@@ -70,6 +76,25 @@ WEBSITE_RELEASE_VERIFICATION = {
     "installer_smoke": "install, launch, and uninstall",
 }
 WEBSITE_RELEASE_SBOM_FORMAT = "CycloneDX"
+
+
+def expected_release_asset_names(version: str) -> set[str]:
+    """Return the complete checksummed asset contract for one native version."""
+
+    if not VERSION_PATTERN.fullmatch(version):
+        raise ValueError(f"invalid native release version: {version!r}")
+    names = {
+        WEBSITE_RELEASE_MANIFEST,
+        NATIVE_RELEASE_PROVENANCE,
+        NATIVE_RELEASE_VERIFIER,
+        f"OpenAdapt-Desktop-desktop-v{version}.cyclonedx.json",
+    }
+    for platform, architecture in EXPECTED_PLATFORMS:
+        signing = PRODUCTION_TRUST_MODES[platform]
+        prefix = f"OpenAdapt-Desktop-Beta-v{version}-{platform}-{architecture}-{signing}"
+        names.add(f"{prefix}-metadata.json")
+        names.update(f"{prefix}{suffix}" for _kind, _pattern, suffix in ARTIFACT_RULES[platform])
+    return names
 
 
 def native_versions(root: Path = ROOT) -> dict[str, str]:
@@ -213,6 +238,81 @@ def set_native_version(version: str, root: Path = ROOT) -> dict[str, str]:
     if synchronized != version:
         raise ValueError(f"native version sources disagree after sync: {native_versions(root)}")
     return native_versions(root)
+
+
+VERSION_TRANSFORM_PATHS = (
+    "package.json",
+    "package-lock.json",
+    "src-tauri/Cargo.toml",
+    "src-tauri/Cargo.lock",
+    "src-tauri/tauri.conf.json",
+)
+
+
+def _git_bytes(root: Path, ref: str, relative_path: str) -> bytes:
+    result = subprocess.run(
+        ["git", "show", f"{ref}:{relative_path}"],
+        cwd=root,
+        check=False,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        raise ValueError(f"Git ref {ref!r} does not contain {relative_path!r}")
+    return result.stdout
+
+
+def validate_git_version_transform(
+    base_ref: str,
+    candidate_ref: str,
+    version: str,
+    *,
+    root: Path = ROOT,
+) -> int:
+    """Require ``candidate_ref`` to equal the exact set-version result.
+
+    A filename allowlist is not sufficient here. The five version files also
+    contain executable package scripts, Rust dependencies, and Tauri build
+    configuration. This function reconstructs the deterministic transformation
+    from ``base_ref`` and compares every resulting byte with ``candidate_ref``.
+    """
+
+    if not VERSION_PATTERN.fullmatch(version):
+        raise ValueError(f"native version must be X.Y.Z, got {version!r}")
+    changed = subprocess.run(
+        ["git", "diff", "--name-only", f"{base_ref}..{candidate_ref}"],
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if changed.returncode != 0:
+        raise ValueError("could not compare engine and native tag trees")
+    changed_paths = {line for line in changed.stdout.splitlines() if line}
+    unexpected = changed_paths.difference(VERSION_TRANSFORM_PATHS)
+    if unexpected:
+        raise ValueError(
+            "native tag contains changes outside the version transformation: "
+            + ", ".join(sorted(unexpected))
+        )
+
+    with tempfile.TemporaryDirectory(prefix="openadapt-native-version-") as temporary:
+        reconstructed = Path(temporary)
+        for relative in VERSION_TRANSFORM_PATHS:
+            destination = reconstructed / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(_git_bytes(root, base_ref, relative))
+        set_native_version(version, reconstructed)
+        mismatches = [
+            relative
+            for relative in VERSION_TRANSFORM_PATHS
+            if (reconstructed / relative).read_bytes() != _git_bytes(root, candidate_ref, relative)
+        ]
+    if mismatches:
+        raise ValueError(
+            "native tag differs from the exact deterministic set-version output: "
+            + ", ".join(mismatches)
+        )
+    return len(VERSION_TRANSFORM_PATHS)
 
 
 def sync_native_version_from_engine(root: Path = ROOT) -> dict[str, str]:
@@ -483,6 +583,10 @@ def write_release_provenance(
     run_id: int,
     run_attempt: int,
     runner_environment: str,
+    engine_tag: str,
+    engine_commit: str,
+    engine_release_id: int,
+    engine_release_url: str,
     root: Path = ROOT,
 ) -> Path:
     """Write the build identity that the signed subject inventory must bind."""
@@ -491,6 +595,15 @@ def write_release_provenance(
     validate_tag(tag, root)
     _validate_commit(source_commit)
     _validate_commit(workflow_commit)
+    _validate_commit(engine_commit)
+    expected_engine_tag = f"v{tag.removeprefix(NATIVE_TAG_PREFIX)}"
+    if engine_tag != expected_engine_tag:
+        raise ValueError(f"engine tag must be exactly {expected_engine_tag!r}, got {engine_tag!r}")
+    if not isinstance(engine_release_id, int) or engine_release_id <= 0:
+        raise ValueError("engine release id must be a positive integer")
+    expected_engine_url = f"https://github.com/{repository}/releases/tag/{engine_tag}"
+    if engine_release_url != expected_engine_url:
+        raise ValueError("engine release URL does not match its repository and tag")
     expected_ref = f"{repository}/{NATIVE_RELEASE_WORKFLOW}@refs/tags/{tag}"
     if workflow_ref != expected_ref:
         raise ValueError(f"workflow ref must be exactly {expected_ref!r}, got {workflow_ref!r}")
@@ -519,6 +632,11 @@ def write_release_provenance(
         "run_id": run_id,
         "run_attempt": run_attempt,
         "runner_environment": runner_environment,
+        "engine_tag": engine_tag,
+        "engine_commit": engine_commit,
+        "engine_release_id": engine_release_id,
+        "engine_release_url": engine_release_url,
+        "engine_release_workflow": ENGINE_RELEASE_WORKFLOW,
     }
     output.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return output
@@ -547,9 +665,14 @@ def validate_release_provenance(
         "run_id",
         "run_attempt",
         "runner_environment",
+        "engine_tag",
+        "engine_commit",
+        "engine_release_id",
+        "engine_release_url",
+        "engine_release_workflow",
     }
     if not isinstance(data, dict) or set(data) != expected_keys:
-        raise ValueError("native release provenance does not use the closed v1 schema")
+        raise ValueError("native release provenance does not use the closed v2 schema")
     expected_ref = f"{repository}/{NATIVE_RELEASE_WORKFLOW}@refs/tags/{tag}"
     expected = {
         "schema": NATIVE_RELEASE_PROVENANCE_SCHEMA,
@@ -561,6 +684,11 @@ def validate_release_provenance(
         "workflow_commit": source_commit,
         "event": "push",
         "runner_environment": "github-hosted",
+        "engine_tag": f"v{tag.removeprefix(NATIVE_TAG_PREFIX)}",
+        "engine_release_url": (
+            f"https://github.com/{repository}/releases/tag/v{tag.removeprefix(NATIVE_TAG_PREFIX)}"
+        ),
+        "engine_release_workflow": ENGINE_RELEASE_WORKFLOW,
     }
     for field, value in expected.items():
         if data.get(field) != value:
@@ -568,9 +696,207 @@ def validate_release_provenance(
                 f"native release provenance {field} differs: expected {value!r}, "
                 f"got {data.get(field)!r}"
             )
-    for field in ("run_id", "run_attempt"):
+    for field in ("run_id", "run_attempt", "engine_release_id"):
         if not isinstance(data[field], int) or data[field] <= 0:
             raise ValueError(f"native release provenance {field} must be a positive integer")
+    _validate_commit(str(data.get("engine_commit") or ""))
+    return data
+
+
+def validate_engine_release(
+    release_path: Path,
+    *,
+    repository: str,
+    engine_tag: str,
+    engine_commit: str,
+    provenance: dict | None = None,
+) -> dict:
+    """Require one exact, public engine release and immutable tag binding."""
+
+    _validate_repository(repository)
+    if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", engine_tag):
+        raise ValueError(f"invalid engine release tag: {engine_tag!r}")
+    _validate_commit(engine_commit)
+    release = json.loads(release_path.read_text(encoding="utf-8"))
+    expected_keys = {
+        "databaseId",
+        "isDraft",
+        "isPrerelease",
+        "publishedAt",
+        "tagName",
+        "url",
+    }
+    if not isinstance(release, dict) or set(release) != expected_keys:
+        raise ValueError("engine release does not use the closed identity schema")
+    expected_url = f"https://github.com/{repository}/releases/tag/{engine_tag}"
+    if (
+        not isinstance(release.get("databaseId"), int)
+        or release["databaseId"] <= 0
+        or release.get("isDraft") is not False
+        or release.get("isPrerelease") is not False
+        or not isinstance(release.get("publishedAt"), str)
+        or not release["publishedAt"]
+        or release.get("tagName") != engine_tag
+        or release.get("url") != expected_url
+    ):
+        raise ValueError("engine release is not the exact published stable release")
+    if provenance is not None:
+        expected = {
+            "engine_tag": engine_tag,
+            "engine_commit": engine_commit,
+            "engine_release_id": release["databaseId"],
+            "engine_release_url": expected_url,
+            "engine_release_workflow": ENGINE_RELEASE_WORKFLOW,
+        }
+        for key, value in expected.items():
+            if provenance.get(key) != value:
+                raise ValueError(f"engine release {key} differs from signed provenance")
+    return release
+
+
+def write_verified_release_index(
+    output: Path,
+    *,
+    directory: Path,
+    checksums: Path,
+    provenance_path: Path,
+    repository: str,
+    tag: str,
+    source_commit: str,
+    engine_release_path: Path,
+    existing: Path | None = None,
+) -> Path:
+    """Write the monotonic public authority for the verified installer channel."""
+
+    verify_checksums(directory, checksums)
+    provenance = validate_release_provenance(
+        provenance_path,
+        repository=repository,
+        tag=tag,
+        source_commit=source_commit,
+    )
+    release = validate_engine_release(
+        engine_release_path,
+        repository=repository,
+        engine_tag=provenance["engine_tag"],
+        engine_commit=provenance["engine_commit"],
+        provenance=provenance,
+    )
+    entries = read_checksums(checksums)
+    expected_assets = expected_release_asset_names(tag.removeprefix(NATIVE_TAG_PREFIX))
+    if set(entries) != expected_assets:
+        raise ValueError(
+            "verified release index source does not contain the complete native asset set: "
+            f"actual={sorted(entries)}, expected={sorted(expected_assets)}"
+        )
+    payload = {
+        "schema": VERIFIED_RELEASE_INDEX_SCHEMA,
+        "repository": repository,
+        "native_tag": tag,
+        "native_version": tag.removeprefix(NATIVE_TAG_PREFIX),
+        "native_source_commit": source_commit,
+        "native_release_provenance": NATIVE_RELEASE_PROVENANCE,
+        "native_release_run_id": provenance["run_id"],
+        "native_release_run_attempt": provenance["run_attempt"],
+        "engine_tag": provenance["engine_tag"],
+        "engine_commit": provenance["engine_commit"],
+        "engine_release_id": release["databaseId"],
+        "engine_release_url": release["url"],
+        "engine_release_workflow": ENGINE_RELEASE_WORKFLOW,
+        "checksums": {
+            "name": "SHA256SUMS",
+            "sha256": hashlib.sha256(checksums.read_bytes()).hexdigest(),
+        },
+        "assets": [{"name": name, "sha256": digest} for name, digest in sorted(entries.items())],
+    }
+    if existing is not None and existing.is_file():
+        prior = validate_verified_release_index(existing)
+        prior_tag = prior["native_tag"]
+        if native_tag_tuple(tag) < native_tag_tuple(prior_tag):
+            raise ValueError(
+                f"verified release index cannot move backwards from {prior_tag} to {tag}"
+            )
+        if native_tag_tuple(tag) == native_tag_tuple(prior_tag) and prior != payload:
+            raise ValueError("verified release index cannot rewrite an existing native version")
+    if output.exists() or output.name != VERIFIED_RELEASE_INDEX:
+        raise ValueError(f"verified release index must be a new {VERIFIED_RELEASE_INDEX}")
+    output.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return output
+
+
+def validate_verified_release_index(path: Path) -> dict:
+    """Validate the closed public index shape without trusting release notes."""
+
+    if path.name != VERIFIED_RELEASE_INDEX or not path.is_file() or path.is_symlink():
+        raise ValueError(f"verified release index must be a regular {VERIFIED_RELEASE_INDEX}")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    expected_keys = {
+        "schema",
+        "repository",
+        "native_tag",
+        "native_version",
+        "native_source_commit",
+        "native_release_provenance",
+        "native_release_run_id",
+        "native_release_run_attempt",
+        "engine_tag",
+        "engine_commit",
+        "engine_release_id",
+        "engine_release_url",
+        "engine_release_workflow",
+        "checksums",
+        "assets",
+    }
+    if not isinstance(data, dict) or set(data) != expected_keys:
+        raise ValueError("verified release index does not use the closed v1 schema")
+    if data.get("schema") != VERIFIED_RELEASE_INDEX_SCHEMA:
+        raise ValueError("verified release index has the wrong schema")
+    repository = _validate_repository(str(data.get("repository") or ""))
+    native_tag_tuple(str(data.get("native_tag") or ""))
+    _validate_commit(str(data.get("native_source_commit") or ""))
+    _validate_commit(str(data.get("engine_commit") or ""))
+    if data.get("native_version") != str(data["native_tag"]).removeprefix(NATIVE_TAG_PREFIX):
+        raise ValueError("verified release index version differs from its native tag")
+    if data.get("engine_tag") != f"v{data['native_version']}":
+        raise ValueError("verified release index engine tag differs")
+    if data.get("engine_release_url") != (
+        f"https://github.com/{repository}/releases/tag/{data['engine_tag']}"
+    ):
+        raise ValueError("verified release index engine URL differs")
+    if data.get("native_release_provenance") != NATIVE_RELEASE_PROVENANCE:
+        raise ValueError("verified release index names the wrong provenance file")
+    if data.get("engine_release_workflow") != ENGINE_RELEASE_WORKFLOW:
+        raise ValueError("verified release index names the wrong engine workflow")
+    for field in ("native_release_run_id", "native_release_run_attempt", "engine_release_id"):
+        if not isinstance(data.get(field), int) or data[field] <= 0:
+            raise ValueError(f"verified release index {field} is invalid")
+    checksums = data.get("checksums")
+    if (
+        not isinstance(checksums, dict)
+        or set(checksums) != {"name", "sha256"}
+        or checksums.get("name") != "SHA256SUMS"
+        or not re.fullmatch(r"[0-9a-f]{64}", str(checksums.get("sha256") or ""))
+    ):
+        raise ValueError("verified release index checksum binding is invalid")
+    assets = data.get("assets")
+    if not isinstance(assets, list) or not assets:
+        raise ValueError("verified release index has no assets")
+    names: list[str] = []
+    for asset in assets:
+        if (
+            not isinstance(asset, dict)
+            or set(asset) != {"name", "sha256"}
+            or not isinstance(asset.get("name"), str)
+            or Path(asset["name"]).name != asset["name"]
+            or not re.fullmatch(r"[0-9a-f]{64}", str(asset.get("sha256") or ""))
+        ):
+            raise ValueError("verified release index contains an invalid asset")
+        names.append(asset["name"])
+    if names != sorted(set(names)):
+        raise ValueError("verified release index assets are not unique and sorted")
+    expected_assets = expected_release_asset_names(data["native_version"])
+    if set(names) != expected_assets:
+        raise ValueError("verified release index does not contain the complete native asset set")
     return data
 
 
@@ -846,6 +1172,7 @@ def validate_release_set(directory: Path) -> int:
         and not path.name.endswith(".cyclonedx.json")
         and path.name != WEBSITE_RELEASE_MANIFEST
         and path.name != NATIVE_RELEASE_PROVENANCE
+        and path.name != NATIVE_RELEASE_VERIFIER
     }
     if actual_assets != referenced_assets:
         raise ValueError(
@@ -1028,6 +1355,7 @@ def validate_website_release_manifest(path: Path, *, checksums: Path, root: Path
             expected_sbom_name,
             WEBSITE_RELEASE_MANIFEST,
             NATIVE_RELEASE_PROVENANCE,
+            NATIVE_RELEASE_VERIFIER,
         }
     )
     if set(checksum_entries) != expected_checksum_names:
@@ -1039,6 +1367,7 @@ def validate_website_release_manifest(path: Path, *, checksums: Path, root: Path
             expected_sbom_name,
             WEBSITE_RELEASE_MANIFEST,
             NATIVE_RELEASE_PROVENANCE,
+            NATIVE_RELEASE_VERIFIER,
         }
     ):
         actual_digest = hashlib.sha256((directory / name).read_bytes()).hexdigest()
@@ -1060,6 +1389,10 @@ def _parser() -> argparse.ArgumentParser:
 
     set_version_parser = subparsers.add_parser("set-version")
     set_version_parser.add_argument("version")
+    transform_parser = subparsers.add_parser("validate-version-transform")
+    transform_parser.add_argument("--base-ref", required=True)
+    transform_parser.add_argument("--candidate-ref", required=True)
+    transform_parser.add_argument("--version", required=True)
     subparsers.add_parser("sync-from-engine")
 
     supersede_parser = subparsers.add_parser("supersede-notes")
@@ -1112,6 +1445,10 @@ def _parser() -> argparse.ArgumentParser:
     provenance_parser.add_argument("--run-id", type=int, required=True)
     provenance_parser.add_argument("--run-attempt", type=int, required=True)
     provenance_parser.add_argument("--runner-environment", required=True)
+    provenance_parser.add_argument("--engine-tag", required=True)
+    provenance_parser.add_argument("--engine-commit", required=True)
+    provenance_parser.add_argument("--engine-release-id", type=int, required=True)
+    provenance_parser.add_argument("--engine-release-url", required=True)
 
     validate_provenance_parser = subparsers.add_parser("validate-provenance")
     validate_provenance_parser.add_argument("--file", type=Path, required=True)
@@ -1144,6 +1481,27 @@ def _parser() -> argparse.ArgumentParser:
     order_parser = subparsers.add_parser("validate-release-order")
     order_parser.add_argument("--releases", type=Path, required=True)
     order_parser.add_argument("--candidate-tag", required=True)
+
+    engine_release_parser = subparsers.add_parser("validate-engine-release")
+    engine_release_parser.add_argument("--file", type=Path, required=True)
+    engine_release_parser.add_argument("--repository", required=True)
+    engine_release_parser.add_argument("--engine-tag", required=True)
+    engine_release_parser.add_argument("--engine-commit", required=True)
+    engine_release_parser.add_argument("--provenance", type=Path)
+    engine_release_parser.add_argument("--github-output", type=Path)
+
+    index_parser = subparsers.add_parser("write-verified-index")
+    index_parser.add_argument("--output", type=Path, required=True)
+    index_parser.add_argument("--directory", type=Path, required=True)
+    index_parser.add_argument("--checksums", type=Path, required=True)
+    index_parser.add_argument("--provenance", type=Path, required=True)
+    index_parser.add_argument("--repository", required=True)
+    index_parser.add_argument("--tag", required=True)
+    index_parser.add_argument("--source-commit", required=True)
+    index_parser.add_argument("--engine-release", type=Path, required=True)
+    index_parser.add_argument("--existing", type=Path)
+    validate_index_parser = subparsers.add_parser("validate-verified-index")
+    validate_index_parser.add_argument("--file", type=Path, required=True)
     return parser
 
 
@@ -1169,6 +1527,13 @@ def main() -> int:
             versions = set_native_version(args.version)
             for source, value in sorted(versions.items()):
                 print(f"{source}: {value}")
+        elif args.command == "validate-version-transform":
+            count = validate_git_version_transform(
+                args.base_ref,
+                args.candidate_ref,
+                args.version,
+            )
+            print(f"Validated {count} deterministic native version files")
         elif args.command == "sync-from-engine":
             versions = sync_native_version_from_engine()
             for source, value in sorted(versions.items()):
@@ -1236,6 +1601,10 @@ def main() -> int:
                 run_id=args.run_id,
                 run_attempt=args.run_attempt,
                 runner_environment=args.runner_environment,
+                engine_tag=args.engine_tag,
+                engine_commit=args.engine_commit,
+                engine_release_id=args.engine_release_id,
+                engine_release_url=args.engine_release_url,
             )
             print(path)
         elif args.command == "validate-provenance":
@@ -1264,6 +1633,9 @@ def main() -> int:
                 {
                     "run_id": provenance["run_id"],
                     "run_attempt": provenance["run_attempt"],
+                    "engine_tag": provenance["engine_tag"],
+                    "engine_commit": provenance["engine_commit"],
+                    "engine_release_id": provenance["engine_release_id"],
                 },
             )
             print(
@@ -1292,6 +1664,44 @@ def main() -> int:
         elif args.command == "validate-release-order":
             releases = json.loads(args.releases.read_text(encoding="utf-8"))
             print(validate_new_native_tag(args.candidate_tag, releases))
+        elif args.command == "validate-engine-release":
+            provenance = None
+            if args.provenance is not None:
+                raw = json.loads(args.provenance.read_text(encoding="utf-8"))
+                if not isinstance(raw, dict):
+                    raise ValueError("native release provenance is not an object")
+                provenance = raw
+            release = validate_engine_release(
+                args.file,
+                repository=args.repository,
+                engine_tag=args.engine_tag,
+                engine_commit=args.engine_commit,
+                provenance=provenance,
+            )
+            _write_github_output(
+                args.github_output,
+                {
+                    "engine_release_id": release["databaseId"],
+                },
+            )
+            print(f"Validated engine release {args.engine_tag} ({release['databaseId']})")
+        elif args.command == "write-verified-index":
+            print(
+                write_verified_release_index(
+                    args.output,
+                    directory=args.directory,
+                    checksums=args.checksums,
+                    provenance_path=args.provenance,
+                    repository=args.repository,
+                    tag=args.tag,
+                    source_commit=args.source_commit,
+                    engine_release_path=args.engine_release,
+                    existing=args.existing,
+                )
+            )
+        elif args.command == "validate-verified-index":
+            index = validate_verified_release_index(args.file)
+            print(f"Validated verified release index for {index['native_tag']}")
     except (OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
