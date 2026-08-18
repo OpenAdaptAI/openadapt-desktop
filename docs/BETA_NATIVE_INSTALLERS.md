@@ -10,7 +10,7 @@ only the fixed `openadapt://connect` action and forwards it to the sidecar's
 strict, transactional pairing flow.
 
 The canonical compiler and governed runtime remain in `openadapt-flow`. Each
-native installer freezes the exact `openadapt-flow[browser,console]==1.27.1`
+native installer freezes the exact `openadapt-flow[browser,console]==1.31.0`
 runtime and its `playwright==1.61.0` browser automation dependency into the
 Desktop sidecar. The `console` extra is what lets an installed application
 serve the attended decision console the mobile decision portal relays; the
@@ -58,11 +58,12 @@ architecture, and signing state. The initial matrix is:
 
 | Platform | Architectures | Packages | Signing labels |
 | --- | --- | --- | --- |
-| macOS | Apple Silicon (`arm64`), Intel (`x86_64`) | DMG | `adhoc` or `developer-id-notarized` |
-| Windows | `x86_64` | MSI and NSIS setup executable | `unsigned` or `authenticode` |
-| Linux | `x86_64` | DEB and AppImage | `unsigned` plus GitHub provenance |
+| macOS | Apple Silicon (`arm64`), Intel (`x86_64`) | DMG | `developer-id-notarized` required |
+| Windows | `x86_64` | MSI and NSIS setup executable | `authenticode` required |
+| Linux | `x86_64` | DEB and AppImage | `github-attested` exact bytes required |
 
-The build workflow installs and uninstalls every package on clean hosted
+The release workflow refuses ad-hoc or unsigned platform metadata. The build
+workflow installs and uninstalls every package on clean hosted
 runners, verifies executable architecture and the declared signing policy,
 launches every installed application and requires the process to survive a
 20-second startup window (catching launch panics before they ship), and
@@ -92,8 +93,8 @@ software is secure or functionally complete.
 
 ## External signing requirements
 
-The protected `native-release` GitHub environment may provide complete signing
-credential sets. Partial sets fail the build instead of falling back silently.
+The protected `native-release` GitHub environment must provide complete macOS
+and Windows signing credential sets. A missing or partial set fails the build.
 
 - macOS Developer ID and notarization: `APPLE_CERTIFICATE`,
   `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`,
@@ -106,14 +107,13 @@ credential sets. Partial sets fail the build instead of falling back silently.
   `TRUSTED_SIGNING_CERTIFICATE_PROFILE`) — the cheaper, token-free option for a
   startup. Configure one set, not both. Both produce a publicly trusted,
   timestamped `authenticode` artifact.
-- Linux AppImage GPG is intentionally disabled until the workflow pins an
-  external AppImage signature validator and publishes the corresponding public
-  key fingerprint through an authenticated channel. AppImage does not
-  self-verify; DEB/RPM repository metadata signing is also a separate boundary.
+- Linux uses the required GitHub OIDC exact-byte attestation above. It has no
+  founder-managed secret and is not described as native-signed.
 
-When no complete credential set is configured, the prerelease remains explicit
-about ad-hoc or unsigned status. The updater stays disabled until its independent
-public/private signing-key lifecycle and recovery procedure are established.
+When either native credential set is absent, the release stops. Historical
+prereleases keep their original trust labels. The updater stays disabled until
+its independent public/private signing-key lifecycle and recovery procedure are
+established.
 
 The founder activation runbook — exactly which certificates to buy, their costs,
 how to add each secret, and what each public surface may then truthfully claim —
