@@ -59,6 +59,7 @@ Two invariants govern the projection:
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import tempfile
@@ -93,7 +94,7 @@ DEFAULT_TIMEOUT = 10.0
 # A cached org policy is an offline continuity aid, not permanent authority.
 # After one day the Desktop must reconnect before it can govern another run.
 DEFAULT_CACHE_MAX_AGE_S = 24 * 60 * 60
-CACHE_SCHEMA = "openadapt.policy-cache/v2"
+CACHE_SCHEMA = "openadapt.policy-cache/v3"
 
 # The SAFEST value for every safety key the contract defines. A missing or
 # unreachable value MUST resolve to the entry here (fail-closed): more checking,
@@ -171,16 +172,22 @@ def _policy_cache_path() -> Path:
     return Path(override) if override else DEFAULT_POLICY_CACHE
 
 
-def _credential_sha256(host: str) -> str | None:
-    """Return a non-secret, destination-bound identity for the active bearer."""
+def _credential_binding_hmac(host: str) -> str | None:
+    """Return a keyed, destination-bound identity for the active bearer.
+
+    The bearer is the HMAC key. It is never stored and it is not passed through
+    an unkeyed password-hash operation. The public message binds the result to
+    this cache contract and exact hosted origin.
+    """
 
     token = token_for_host(host)
     if not token:
         return None
-    digest = hashlib.sha256()
-    digest.update(b"openadapt.policy-cache-credential/v1\0")
-    digest.update(token.encode("utf-8"))
-    return digest.hexdigest()
+    origin = canonical_host_origin(host)
+    if not origin:
+        return None
+    message = f"openadapt.policy-cache-credential/v2\0{origin}".encode()
+    return hmac.new(token.encode("utf-8"), message, hashlib.sha256).hexdigest()
 
 
 def _credential_org_id(host: str) -> str | None:
@@ -344,12 +351,12 @@ def _write_cache(policy: dict[str, Any], host: str) -> None:
     """
     path = _policy_cache_path()
     host_origin = canonical_host_origin(host)
-    credential_sha256 = _credential_sha256(host)
+    credential_binding_hmac = _credential_binding_hmac(host)
     org_id = policy.get("org_id")
     policy_version = _policy_version(policy)
     if (
         not host_origin
-        or not credential_sha256
+        or not credential_binding_hmac
         or not isinstance(org_id, str)
         or not org_id
         or policy_version is None
@@ -360,7 +367,7 @@ def _write_cache(policy: dict[str, Any], host: str) -> None:
         "schema": CACHE_SCHEMA,
         "binding": {
             "host_origin": host_origin,
-            "credential_sha256": credential_sha256,
+            "credential_binding_hmac": credential_binding_hmac,
             "org_id": org_id,
             "policy_version": policy_version,
             "policy_sha256": _policy_sha256(policy),
@@ -425,7 +432,7 @@ def load_cached_policy(
         return None
     if set(binding) != {
         "host_origin",
-        "credential_sha256",
+        "credential_binding_hmac",
         "org_id",
         "policy_version",
         "policy_sha256",
@@ -434,12 +441,14 @@ def load_cached_policy(
     if not isinstance(policy, dict):
         return None
     expected_origin = canonical_host_origin(host)
-    expected_credential = _credential_sha256(host)
+    expected_credential = _credential_binding_hmac(host)
     if not expected_origin or not expected_credential:
         return None
     if binding.get("host_origin") != expected_origin:
         return None
-    if binding.get("credential_sha256") != expected_credential:
+    if not hmac.compare_digest(
+        str(binding.get("credential_binding_hmac") or ""), expected_credential
+    ):
         return None
     policy_org_id = policy.get("org_id")
     if not isinstance(policy_org_id, str) or not policy_org_id:

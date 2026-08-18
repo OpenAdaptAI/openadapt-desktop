@@ -77,6 +77,10 @@ class TestFetchAndCache:
         assert cached["binding"]["host_origin"] == "https://app.openadapt.ai"
         assert cached["binding"]["org_id"] == "org_42"
         assert cached["binding"]["policy_version"] == 7
+        assert cached["binding"]["credential_binding_hmac"] == (
+            policy_mod._credential_binding_hmac("https://app.openadapt.ai")
+        )
+        assert "credential_sha256" not in cached["binding"]
         assert cached["binding"]["policy_sha256"] == policy_mod._policy_sha256(
             cached["policy"]
         )
@@ -307,7 +311,7 @@ class TestFetchAndCache:
                     "schema": policy_mod.CACHE_SCHEMA,
                     "binding": {
                         "host_origin": "https://app.openadapt.ai",
-                        "credential_sha256": policy_mod._credential_sha256(
+                        "credential_binding_hmac": policy_mod._credential_binding_hmac(
                             "https://app.openadapt.ai"
                         ),
                         "org_id": "org_42",

@@ -467,6 +467,7 @@ class FlowBridge:
         self._runner = runner
         self._popen = popen
         self._run_auth_support: bool | None = None
+        self._push_json_support: bool | None = None
 
     # --- low-level ---
 
@@ -776,8 +777,15 @@ class FlowBridge:
         """Best-effort probe for an optional Flow subcommand."""
 
         try:
-            return self._run([command, "--help"], timeout=15).ok
+            result = self._run([command, "--help"], timeout=15)
+            if command == "push":
+                self._push_json_support = result.ok and "--json" in (
+                    result.stdout or ""
+                )
+            return result.ok
         except Exception:
+            if command == "push":
+                self._push_json_support = False
             return False
 
     def push(
@@ -794,6 +802,11 @@ class FlowBridge:
     ) -> FlowResult:
         """Upload through the same pinned Flow runtime as every other verb."""
 
+        if json_output and not self.push_supports_json():
+            raise FlowNotAvailableError(
+                "The pinned openadapt-flow runtime does not support the structured "
+                "push-result contract. Update the exact Flow pin before hosted upload."
+            )
         args = ["push", str(path), "--kind", kind, "--host", host]
         if json_output:
             args.append("--json")
@@ -805,6 +818,17 @@ class FlowBridge:
         if token:
             child_env[_INGEST_TOKEN_ENV] = token
         return self._run(args, timeout=timeout, env_overrides=child_env or None)
+
+    def push_supports_json(self) -> bool:
+        """Require Flow's machine-readable push contract before any upload."""
+
+        if self._push_json_support is None:
+            try:
+                result = self._run(["push", "--help"], timeout=15)
+                self._push_json_support = result.ok and "--json" in (result.stdout or "")
+            except Exception:
+                self._push_json_support = False
+        return self._push_json_support
 
     def report_break(
         self,

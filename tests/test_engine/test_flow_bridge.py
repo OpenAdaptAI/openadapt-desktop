@@ -14,6 +14,7 @@ from engine.flow_bridge import (
     EMBEDDED_FLOW_MODE,
     BrowserRuntimeError,
     FlowBridge,
+    FlowNotAvailableError,
     _safe_command_for_log,
     flow_available,
 )
@@ -90,7 +91,7 @@ class TestFlowBridgeInvocation:
     ) -> None:
         monkeypatch.setattr("engine.flow_bridge.shutil.which", lambda _: "/usr/bin/openadapt-flow")
         calls: list = []
-        bridge = FlowBridge(runner=_runner(calls, stdout="ok"))
+        bridge = FlowBridge(runner=_runner(calls, stdout="--json\nok"))
 
         bridge.push(
             tmp_path / "bundle",
@@ -100,7 +101,7 @@ class TestFlowBridgeInvocation:
             token="secret-value",
         )
 
-        command, env = calls[0]
+        command, env = calls[1]
         assert "secret-value" not in command
         assert "Jane Doe patient transfer" not in command
         assert "--token" not in command
@@ -527,7 +528,7 @@ class TestFlowBridgeInvocation:
         monkeypatch.setattr("engine.flow_bridge._is_frozen", lambda: True)
         monkeypatch.setattr("engine.flow_bridge.sys.executable", "/signed/openadapt-engine")
         calls: list = []
-        bridge = FlowBridge(runner=_runner(calls, stdout="wf_123"))
+        bridge = FlowBridge(runner=_runner(calls, stdout="--json\nwf_123"))
 
         assert bridge.supports_command("push")
         result = bridge.push(
@@ -549,6 +550,22 @@ class TestFlowBridgeInvocation:
             EMBEDDED_FLOW_MODE,
             "push",
         ]
+
+    def test_push_refuses_before_upload_when_structured_result_is_missing(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        monkeypatch.setattr("engine.flow_bridge.shutil.which", lambda _: "/usr/bin/openadapt-flow")
+        calls: list = []
+        bridge = FlowBridge(runner=_runner(calls, stdout="legacy push help"))
+
+        with pytest.raises(FlowNotAvailableError, match="structured push-result"):
+            bridge.push(
+                tmp_path / "bundle",
+                kind="bundle",
+                host="https://app.openadapt.ai",
+            )
+
+        assert [command[1:] for command, _env in calls] == [["push", "--help"]]
 
 
 class TestReportParsing:
