@@ -34,6 +34,13 @@ Non-negotiables enforced here:
   authoritatively, carries an unknown value, or cannot be bound REFUSES the
   dispatch (ack outcome ``refused``) -- the run never falls back to whatever the
   local deployment config happened to say.
+* **Exit code zero is not proof.** A Flow process that returns ``0`` proves only
+  that the local process returned. It does not prove the governed effect. This
+  lane does not yet consume Flow's shared qualification-v2 verifier, so it
+  cannot bind an exact signed ``VERIFIED`` result to the run, authorization,
+  policy, identity, effect, and event sequence. Until it can, a run that
+  completes without a halt is acked ``halted-needs-attention`` with
+  :data:`COMPLETION_PROOF_REQUIRED_REASON`; it is NEVER acked ``confirmed``.
 
 The whole lane is experimental and OFF by default (``runner_enabled=false``);
 the cloud half is built in parallel -- this module codes to the spec's wire
@@ -103,6 +110,16 @@ _SHA256_RE = re.compile(r"[a-f0-9]{64}")
 _CONTRACT_HASH_RE = re.compile(r"sha256:[a-f0-9]{64}")
 _SAFE_ID_RE = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
 _RUNGS = frozenset({"structural", "template", "ocr", "geometry"})
+
+# Terminal outcome for a run whose Flow process returned but which carries no
+# signed qualification-v2 VERIFIED proof. Constant text: it crosses the ack
+# boundary as ``reason`` and lands in the local halt mirror, so it must stay
+# free of any run-derived value.
+COMPLETION_PROOF_REQUIRED_REASON = (
+    "run completed without the required signed qualification-v2 "
+    "VERIFIED proof; operator reconciliation is required"
+)
+COMPLETION_PROOF_HALT_KIND = "completion_proof_missing"
 
 # --- PHI boundary (spec section 3) ----------------------------------------------------
 
@@ -1143,6 +1160,8 @@ class RunnerService:
             await self._evidence(
                 client, run_id, authorization_id, seq, "step", _step_event(step, index)
             )
+        completion_proof_error: str | None = None
+        local_halt = halt
         if lease_error:
             status = "uncertain"
         elif halt:
@@ -1161,7 +1180,19 @@ class RunnerService:
                 ),
             )
         elif exec_ok:
-            status = "confirmed"
+            # Exit code zero proves only that the local process returned. It
+            # does not prove the governed effect. Keep this legacy lane
+            # fail-closed until it consumes Flow's shared qualification-v2
+            # verifier and can bind an exact signed VERIFIED result to this
+            # run, authorization, policy, identity, effect, and event sequence.
+            # The operator sees the run in the local needs-attention mirror;
+            # the ack carries the constant reason, never a run-derived value.
+            status = "halted-needs-attention"
+            completion_proof_error = COMPLETION_PROOF_REQUIRED_REASON
+            local_halt = {
+                "kind": COMPLETION_PROOF_HALT_KIND,
+                "reason": COMPLETION_PROOF_REQUIRED_REASON,
+            }
         else:
             status = "failed"
         if status != "uncertain":
@@ -1169,17 +1200,18 @@ class RunnerService:
                 client, run_id, authorization_id, seq, "run_summary",
                 _run_summary(job, report, status),
             )
-        self._record_local_run(run_id, run_dir, job, halt, status)
+        self._record_local_run(run_id, run_dir, job, local_halt, status)
         self.journal.record(
             run_id, "finished", outcome=status,
-            reason=(lease_error or exec_error or "")[:200] or None,
+            reason=(lease_error or exec_error or completion_proof_error or "")[:200] or None,
         )
-        await client.ack(
-            job_id,
-            status,
-            run_id=run_id,
-            reason=lease_error if status == "uncertain" else None,
-        )
+        if status == "uncertain":
+            ack_reason = lease_error
+        elif status == "halted-needs-attention":
+            ack_reason = completion_proof_error
+        else:
+            ack_reason = None
+        await client.ack(job_id, status, run_id=run_id, reason=ack_reason)
         self._set_state("polling")
 
     async def _extend_loop(

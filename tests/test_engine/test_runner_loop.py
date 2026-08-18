@@ -36,6 +36,8 @@ from engine.dispatch import EngineDispatcher, EngineServices
 from engine.runner_loop import (
     ACK_PATH,
     BACKOFF_CAP_S,
+    COMPLETION_PROOF_HALT_KIND,
+    COMPLETION_PROOF_REQUIRED_REASON,
     EVIDENCE_SCHEMA,
     EXTEND_PATH,
     FORBIDDEN_EVIDENCE_KEYS,
@@ -374,21 +376,25 @@ class TestHappyPath:
         seqs = [e["seq"] for e in cloud.evidence]
         assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
 
+        # A clean exit (exit code 0, no halt) carries NO signed qualification-v2
+        # VERIFIED proof, so the terminal outcome is fail-closed: it is
+        # halted-needs-attention, never confirmed (see TestCompletionProof).
         summary = cloud.evidence[-1]["run_summary"]
-        assert summary["status"] == "confirmed"
+        assert summary["status"] == "halted-needs-attention"
         assert summary["bundle_digest"] == digest
         assert summary["screenshots_may_leave_box"] is False
         assert summary["effects_confirmed"] == 1
 
         # terminal ack with the runner token
         assert cloud.acks[-1]["job_id"] == "job_1"
-        assert cloud.acks[-1]["outcome"] == "confirmed"
+        assert cloud.acks[-1]["outcome"] == "halted-needs-attention"
+        assert cloud.acks[-1]["reason"] == COMPLETION_PROOF_REQUIRED_REASON
         assert cloud.acks[-1]["auth"] == "Bearer oar_test"
 
         # journal reached terminal phase
         entry = svc.journal.get("run_1")
         assert entry["phase"] == "finished"
-        assert entry["outcome"] == "confirmed"
+        assert entry["outcome"] == "halted-needs-attention"
 
     @pytest.mark.asyncio
     async def test_halt_reports_reconciliation_task_fields(self, rig) -> None:
@@ -434,7 +440,9 @@ class TestHappyPath:
         await run_loop(svc, ticks=1)
 
         assert len(flow.calls) == 1
-        assert cloud.acks[-1]["outcome"] == "confirmed"
+        # staged + executed; exit 0 alone is not proof, so fail-closed outcome
+        assert cloud.acks[-1]["outcome"] == "halted-needs-attention"
+        assert cloud.acks[-1]["reason"] == COMPLETION_PROOF_REQUIRED_REASON
         staged = config.data_dir / "runner" / "bundles" / digest / "manifest.json"
         assert staged.is_file()
 
@@ -456,6 +464,133 @@ class TestHappyPath:
             archive.writestr(info, "/private/target")
         with pytest.raises(Refusal, match="unsupported member type"):
             safe_extract_zip(symlink, tmp_path / "bundle-b")
+
+
+# ------------------------------------------------------------------ completion proof
+
+
+class TestCompletionProof:
+    """Exit code zero is not proof of the governed effect.
+
+    This legacy lane does not consume Flow's shared qualification-v2 verifier,
+    so it cannot bind a signed VERIFIED result to the run. A clean process exit
+    therefore terminates fail-closed: ``halted-needs-attention`` with the
+    constant completion-proof reason, mirrored into the operator's local
+    needs-attention list. ``confirmed`` must never reach the wire or the
+    journal from this path.
+    """
+
+    @pytest.mark.asyncio
+    async def test_exit_zero_without_signed_proof_halts_needs_attention(
+        self, rig
+    ) -> None:
+        svc, cloud, flow, config, db, _events = rig
+        login()
+        _bundle, digest = make_bundle(config)
+        flow.ok = True  # exit code 0, no halt.json -- the exact false-success path
+        cloud.jobs.append(make_job(digest))
+
+        await run_loop(svc, ticks=1)
+
+        assert len(flow.calls) == 1
+        # wire: run_summary + ack say halted-needs-attention with the constant reason
+        assert cloud.evidence[-1]["kind"] == "run_summary"
+        assert cloud.evidence[-1]["run_summary"]["status"] == "halted-needs-attention"
+        assert cloud.acks[-1]["outcome"] == "halted-needs-attention"
+        assert cloud.acks[-1]["reason"] == COMPLETION_PROOF_REQUIRED_REASON
+        # no Flow halt existed, so no halt evidence event was fabricated
+        assert not any(e["kind"] == "halt" for e in cloud.evidence)
+        # journal: terminal, with the same reason
+        entry = svc.journal.get("run_1")
+        assert entry["phase"] == "finished"
+        assert entry["outcome"] == "halted-needs-attention"
+        assert entry["reason"] == COMPLETION_PROOF_REQUIRED_REASON
+        # local mirror: run status + one open needs-attention halt for the operator
+        assert db.get_run("run_1")["status"] == "halted-needs-attention"
+        assert db.count_open_halts() == 1
+        local_halt = db.get_halt("halt-run_1")
+        assert local_halt is not None
+        assert local_halt["reason"] == COMPLETION_PROOF_REQUIRED_REASON
+        assert local_halt["workflow_id"] == "wf_1"
+
+    @pytest.mark.asyncio
+    async def test_confirmed_never_leaves_this_lane_on_exit_zero(self, rig) -> None:
+        svc, cloud, flow, config, _db, _events = rig
+        login()
+        _bundle, digest = make_bundle(config)
+        # a report that LOOKS fully verified is still not a signed proof
+        flow.report = {
+            **TRAPPED_REPORT,
+            "steps": [
+                {**TRAPPED_REPORT["steps"][0], "effect_verified": True},
+                {**TRAPPED_REPORT["steps"][1], "effect_verified": True},
+            ],
+        }
+        cloud.jobs.append(make_job(digest))
+
+        await run_loop(svc, ticks=1)
+
+        assert all(a["outcome"] != "confirmed" for a in cloud.acks)
+        assert all(
+            e["run_summary"]["status"] != "confirmed"
+            for e in cloud.evidence
+            if e["kind"] == "run_summary"
+        )
+        assert svc.journal.get("run_1")["outcome"] != "confirmed"
+
+    @pytest.mark.asyncio
+    async def test_completion_proof_reason_is_constant_and_phi_free(
+        self, rig
+    ) -> None:
+        # The reason crosses the ack boundary verbatim: it must be the module
+        # constant (no run-derived value) and pass the PHI guard.
+        svc, cloud, flow, config, _db, _events = rig
+        login()
+        _bundle, digest = make_bundle(config)
+        cloud.jobs.append(make_job(digest))
+
+        await run_loop(svc, ticks=1)
+
+        assert_phi_free({"reason": cloud.acks[-1]["reason"]})
+        assert cloud.acks[-1]["reason"] == COMPLETION_PROOF_REQUIRED_REASON
+        assert COMPLETION_PROOF_HALT_KIND == "completion_proof_missing"
+        assert "SENSITIVE" not in all_wire_payloads(cloud)
+        assert "run_1" not in cloud.acks[-1]["reason"]
+
+    @pytest.mark.asyncio
+    async def test_flow_halt_still_wins_over_completion_proof(self, rig) -> None:
+        # A real Flow halt keeps its own structural halt event and reason
+        # path; the completion-proof reason is not attached to it.
+        svc, cloud, flow, config, db, _events = rig
+        login()
+        _bundle, digest = make_bundle(config)
+        flow.report = {**TRAPPED_REPORT, "halt": TRAPPED_HALT}
+        cloud.jobs.append(make_job(digest))
+
+        await run_loop(svc, ticks=1)
+
+        assert sum(1 for e in cloud.evidence if e["kind"] == "halt") == 1
+        assert cloud.acks[-1]["outcome"] == "halted-needs-attention"
+        assert "reason" not in cloud.acks[-1]
+        assert db.count_open_halts() == 1
+        assert db.get_halt("halt-run_1")["reason"] != COMPLETION_PROOF_REQUIRED_REASON
+
+    @pytest.mark.asyncio
+    async def test_nonzero_exit_stays_failed(self, rig) -> None:
+        # The fail-closed boundary narrows success only; a failed process is
+        # still ``failed`` and carries no completion-proof reason.
+        svc, cloud, flow, config, db, _events = rig
+        login()
+        _bundle, digest = make_bundle(config)
+        flow.ok = False
+        cloud.jobs.append(make_job(digest))
+
+        await run_loop(svc, ticks=1)
+
+        assert cloud.acks[-1]["outcome"] == "failed"
+        assert "reason" not in cloud.acks[-1]
+        assert svc.journal.get("run_1")["outcome"] == "failed"
+        assert db.count_open_halts() == 0
 
 
 # ------------------------------------------------------------------ refusal
@@ -603,7 +738,10 @@ class TestSafetyPolicyBinding:
 
         assert len(flow.calls) == 2
         assert flow.runtimes[1]["pixel_verify_enabled"] is True
-        assert cloud.acks[-1]["outcome"] == "confirmed"
+        # the run executed under the new policy; without a signed VERIFIED
+        # proof its terminal outcome is still fail-closed
+        assert cloud.acks[-1]["outcome"] == "halted-needs-attention"
+        assert cloud.acks[-1]["reason"] == COMPLETION_PROOF_REQUIRED_REASON
 
     @pytest.mark.asyncio
     async def test_model_call_prohibition_overrides_a_permissive_config(
