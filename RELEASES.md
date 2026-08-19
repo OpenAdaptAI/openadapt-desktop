@@ -4,6 +4,30 @@ This repository publishes from two lanes while the native channel remains
 Beta. This document is the source of truth for what each lane produces, which
 release to download, and how the lanes converge.
 
+## Active release hold: the current Flow pin is not releasable
+
+`main` pins `openadapt-flow[browser,console]==1.31.0`. That pin is an interim
+source pin so the tree builds and tests against the newest published Flow. It
+is **not** a releasable pin: the immutable 1.31.0 wheel on PyPI predates the
+`openadapt.push-result/v1` contract that Desktop's governed `push` requires, so
+a release built on it can only fail closed on every hosted handoff.
+
+Do not tag `desktop-v*`, dispatch the engine release workflow, or publish any
+installer while this pin is in force. The hold clears only when all of the
+following are true, in order:
+
+1. The next `openadapt-flow` semantic release ships the reviewed push-result
+   contract and is published to PyPI.
+2. The exact managed Cloud runtime candidate is reviewed, deployed, and
+   acknowledged.
+3. Desktop updates `pyproject.toml`, `uv.lock`, the frozen-sidecar inventory,
+   and its qualification evidence from that accepted release.
+4. This section is deleted in the same pull request that lands the new pin.
+
+This is a distribution hold, not a claim of production acceptance. Neither lane
+carries a signed qualification-admission record today, so no release note,
+manifest, or installer may state or imply production acceptance.
+
 ## The two lanes
 
 | Lane | Tag | Trigger | Marked as | Assets |
