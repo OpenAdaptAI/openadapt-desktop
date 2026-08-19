@@ -24,6 +24,7 @@ from pathlib import Path
 DEFAULT_REPOSITORY = "OpenAdaptAI/openadapt-desktop"
 NATIVE_TAG_PREFIX = "desktop-v"
 NATIVE_RELEASE_WORKFLOW = ".github/workflows/native-release.yml"
+GITHUB_OIDC_ISSUER = "https://token.actions.githubusercontent.com"
 CHANNEL_NAME = "openadapt-desktop-channel.json"
 CHANNEL_SCHEMA = "openadapt.desktop-release-channel/v1"
 INDEX_NAME = "openadapt-desktop-verified-release.json"
@@ -36,19 +37,34 @@ SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 REPOSITORY_PATTERN = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 
 
-def _sha256(path: Path, *, label: str) -> str:
+def _read_regular_bytes(path: Path, *, label: str) -> bytes:
+    """Read one regular file exactly once.
+
+    Every authenticated check parses the same bytes it hashed. Re-reading a
+    file between the hash and the parse would let a local writer swap the
+    content after it passed verification.
+    """
+
     if not path.is_file() or path.is_symlink():
         raise ValueError(f"{label} must be a regular file")
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    return path.read_bytes()
 
 
-def _load_closed_json(path: Path, *, name: str, keys: set[str], label: str) -> dict:
+def _sha256(path: Path, *, label: str) -> str:
+    return hashlib.sha256(_read_regular_bytes(path, label=label)).hexdigest()
+
+
+def _load_closed_json(
+    path: Path, *, name: str, keys: set[str], label: str, data: bytes | None = None
+) -> dict:
     if path.name != name or not path.is_file() or path.is_symlink():
         raise ValueError(f"{label} must be a regular {name}")
-    data = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(data, dict) or set(data) != keys:
+    if data is None:
+        data = _read_regular_bytes(path, label=label)
+    document = json.loads(data.decode("utf-8"))
+    if not isinstance(document, dict) or set(document) != keys:
         raise ValueError(f"{label} does not use its closed schema")
-    return data
+    return document
 
 
 def _version_tuple(version: str) -> tuple[int, int, int]:
@@ -90,13 +106,19 @@ def _validate_hash_binding(value: object, *, name: str, url: str, label: str) ->
     return value
 
 
-def validate_channel(path: Path, *, repository: str = DEFAULT_REPOSITORY) -> dict:
-    """Validate the closed stable-channel descriptor."""
+def validate_channel(
+    path: Path, *, repository: str = DEFAULT_REPOSITORY, raw: bytes | None = None
+) -> dict:
+    """Validate the closed stable-channel descriptor.
+
+    Pass ``raw`` to parse exactly the bytes an earlier check already hashed.
+    """
 
     if REPOSITORY_PATTERN.fullmatch(repository) is None:
         raise ValueError(f"invalid repository: {repository!r}")
     data = _load_closed_json(
         path,
+        data=raw,
         name=CHANNEL_NAME,
         label="release channel",
         keys={
@@ -185,11 +207,17 @@ def validate_channel(path: Path, *, repository: str = DEFAULT_REPOSITORY) -> dic
     return data
 
 
-def validate_index(path: Path, *, repository: str = DEFAULT_REPOSITORY) -> dict:
-    """Validate the closed selected-release index."""
+def validate_index(
+    path: Path, *, repository: str = DEFAULT_REPOSITORY, raw: bytes | None = None
+) -> dict:
+    """Validate the closed selected-release index.
+
+    Pass ``raw`` to parse exactly the bytes an earlier check already hashed.
+    """
 
     data = _load_closed_json(
         path,
+        data=raw,
         name=INDEX_NAME,
         label="verified release index",
         keys={
@@ -259,9 +287,23 @@ def validate_index(path: Path, *, repository: str = DEFAULT_REPOSITORY) -> dict:
     return data
 
 
-def _verify_github_attestation(path: Path, *, repository: str, identity_ref: str) -> str:
+def _verify_github_attestation(
+    path: Path, *, repository: str, identity_ref: str
+) -> tuple[str, bytes]:
+    """Authenticate one file and return its digest with the exact bytes read.
+
+    The caller parses the returned bytes. Reading the file again after this
+    check would reopen the window this function closes.
+    """
+
     before = _sha256(path, label=path.name)
     identity = f"https://github.com/{repository}/{NATIVE_RELEASE_WORKFLOW}@{identity_ref}"
+    # `gh attestation verify` treats --cert-identity, --cert-identity-regex,
+    # --signer-repo, and --signer-workflow as one mutually exclusive group: it
+    # refuses the command outright when two of them are set. Keep only
+    # --cert-identity. It is the strictest of the four, because it pins the
+    # complete subject alternative name -- repository, workflow path, and ref --
+    # rather than the repository and workflow path alone.
     command = [
         "gh",
         "attestation",
@@ -269,10 +311,10 @@ def _verify_github_attestation(path: Path, *, repository: str, identity_ref: str
         str(path.resolve()),
         "--repo",
         repository,
-        "--signer-workflow",
-        f"{repository}/{NATIVE_RELEASE_WORKFLOW}",
         "--cert-identity",
         identity,
+        "--cert-oidc-issuer",
+        GITHUB_OIDC_ISSUER,
         "--deny-self-hosted-runners",
     ]
     try:
@@ -282,10 +324,11 @@ def _verify_github_attestation(path: Path, *, repository: str, identity_ref: str
     except subprocess.CalledProcessError as exc:
         detail = (exc.stderr or exc.stdout or "verification failed").strip()
         raise ValueError(f"GitHub attestation verification failed: {detail}") from exc
-    after = _sha256(path, label=path.name)
+    data = _read_regular_bytes(path, label=path.name)
+    after = hashlib.sha256(data).hexdigest()
     if after != before:
         raise ValueError(f"{path.name} changed during attestation verification")
-    return after
+    return after, data
 
 
 def verify_authenticated_channel(
@@ -300,16 +343,23 @@ def verify_authenticated_channel(
 ) -> int:
     """Authenticate one channel selection and verify its complete asset set."""
 
-    _verify_github_attestation(channel_path, repository=repository, identity_ref="refs/heads/main")
-    channel = validate_channel(channel_path, repository=repository)
+    _, channel_bytes = _verify_github_attestation(
+        channel_path, repository=repository, identity_ref="refs/heads/main"
+    )
+    channel = validate_channel(channel_path, repository=repository, raw=channel_bytes)
     if minimum_version is not None and _version_tuple(channel["native_version"]) < _version_tuple(
         minimum_version
     ):
         raise ValueError(f"release channel version is below the trusted minimum {minimum_version}")
 
     if previous_channel is not None:
-        previous = validate_channel(previous_channel, repository=repository)
-        previous_digest = _sha256(previous_channel, label="previous release channel")
+        previous_bytes = _read_regular_bytes(
+            previous_channel, label="previous release channel"
+        )
+        previous = validate_channel(
+            previous_channel, repository=repository, raw=previous_bytes
+        )
+        previous_digest = hashlib.sha256(previous_bytes).hexdigest()
         expected_previous = {
             "native_version": previous["native_version"],
             "sha256": previous_digest,
@@ -319,12 +369,17 @@ def verify_authenticated_channel(
         if _version_tuple(channel["native_version"]) <= _version_tuple(previous["native_version"]):
             raise ValueError("release channel does not advance the accepted version")
 
-    index_digest = _verify_github_attestation(
-        index_path, repository=repository, identity_ref="refs/heads/main"
+    # The verified index is attested by `mirror-installers-to-engine-release`,
+    # which runs on the `release: published` event for the native tag, so its
+    # certificate carries that tag as the workflow ref -- never a branch ref.
+    index_digest, index_bytes = _verify_github_attestation(
+        index_path,
+        repository=repository,
+        identity_ref=f"refs/tags/{channel['native_tag']}",
     )
     if index_digest != channel["verified_index"]["sha256"]:
         raise ValueError("verified release index digest differs from the authenticated channel")
-    index = validate_index(index_path, repository=repository)
+    index = validate_index(index_path, repository=repository, raw=index_bytes)
 
     identity_fields = {
         "native_tag",
@@ -339,7 +394,7 @@ def verify_authenticated_channel(
         raise ValueError("verified release index identity differs from the authenticated channel")
     if channel["checksums"]["sha256"] != index["checksums"]["sha256"]:
         raise ValueError("checksum digest differs between the channel and index")
-    checksum_digest = _verify_github_attestation(
+    checksum_digest, checksum_bytes = _verify_github_attestation(
         checksums,
         repository=repository,
         identity_ref=f"refs/tags/{channel['native_tag']}",
@@ -347,16 +402,25 @@ def verify_authenticated_channel(
     if checksum_digest != channel["checksums"]["sha256"]:
         raise ValueError("SHA256SUMS digest differs from the authenticated channel")
 
-    checksum_entries = read_manifest(checksums)
+    checksum_entries = read_manifest(checksums, raw=checksum_bytes)
     index_entries = {asset["name"]: asset["sha256"] for asset in index["assets"]}
     if checksum_entries != index_entries:
         raise ValueError("SHA256SUMS entries differ from the authenticated release index")
-    return verify(directory, checksums)
+    # Verify the installers against the entries parsed from the authenticated
+    # bytes, never against a fresh read of SHA256SUMS.
+    return verify(directory, checksums, entries=checksum_entries)
 
 
-def read_manifest(path: Path) -> dict[str, str]:
+def read_manifest(path: Path, *, raw: bytes | None = None) -> dict[str, str]:
+    """Parse ``SHA256SUMS``.
+
+    Pass ``raw`` to parse exactly the bytes an earlier check already hashed.
+    """
+
+    if raw is None:
+        raw = _read_regular_bytes(path, label="SHA256SUMS")
     entries: dict[str, str] = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in raw.decode("utf-8").splitlines():
         if not line.strip():
             continue
         digest, separator, name = line.partition("  ")
@@ -374,14 +438,22 @@ def read_manifest(path: Path) -> dict[str, str]:
     return entries
 
 
-def verify(directory: Path, manifest: Path) -> int:
+def verify(directory: Path, manifest: Path, *, entries: dict[str, str] | None = None) -> int:
+    """Verify a download directory against ``SHA256SUMS``.
+
+    Pass ``entries`` when the caller already parsed an authenticated copy of
+    the manifest, so the installer hashes are checked against those exact
+    entries rather than a fresh read of the file.
+    """
+
     directory = directory.resolve()
     manifest = manifest.resolve()
     if manifest.parent != directory or manifest.name != "SHA256SUMS":
         raise ValueError("SHA256SUMS must be inside the download directory")
     if not manifest.is_file() or manifest.is_symlink():
         raise ValueError("SHA256SUMS must be a regular file")
-    entries = read_manifest(manifest)
+    if entries is None:
+        entries = read_manifest(manifest)
     members = list(directory.iterdir())
     unsafe = [
         path.name

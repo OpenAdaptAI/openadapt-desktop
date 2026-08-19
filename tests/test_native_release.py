@@ -1621,8 +1621,17 @@ def test_public_download_verifier_authenticates_complete_channel_chain(
         f".github/workflows/native-release.yml@refs/tags/desktop-v{native_version()}"
     )
     assert commands[0][commands[0].index("--cert-identity") + 1] == main_identity
-    assert commands[1][commands[1].index("--cert-identity") + 1] == main_identity
+    # The verified index is attested on the `release: published` event for the
+    # native tag, so its certificate carries the tag ref, not a branch ref.
+    assert commands[1][commands[1].index("--cert-identity") + 1] == tag_identity
     assert commands[2][commands[2].index("--cert-identity") + 1] == tag_identity
+    # `gh attestation verify` refuses the command outright when two flags from
+    # this group are set, so a second one would make every call fail.
+    exclusive = {"--cert-identity", "--cert-identity-regex", "--signer-repo", "--signer-workflow"}
+    for command in commands:
+        assert exclusive.intersection(command) == {"--cert-identity"}
+        issuer = command[command.index("--cert-oidc-issuer") + 1]
+        assert issuer == "https://token.actions.githubusercontent.com"
 
     with pytest.raises(ValueError, match="below the trusted minimum"):
         verify_authenticated_channel(
@@ -1633,6 +1642,84 @@ def test_public_download_verifier_authenticates_complete_channel_chain(
             minimum_version="999.0.0",
             repository=repository,
         )
+
+
+def test_public_download_verifier_uses_the_authenticated_checksum_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A local writer cannot swap SHA256SUMS after it is authenticated.
+
+    The installer digests must come from the exact bytes the attestation check
+    hashed, not from a later read of the file on disk.
+    """
+
+    release, _manifest, checksums = _stage_complete_release(tmp_path / "assets")
+    repository = "OpenAdaptAI/openadapt-desktop"
+    index = write_verified_release_index(
+        tmp_path / VERIFIED_RELEASE_INDEX,
+        directory=release,
+        checksums=checksums,
+        provenance_path=release / NATIVE_RELEASE_PROVENANCE,
+        repository=repository,
+        tag=f"desktop-v{native_version()}",
+        source_commit="a" * 40,
+        engine_release_path=_engine_release_file(tmp_path),
+    )
+    channel = write_verified_release_channel(
+        tmp_path / VERIFIED_RELEASE_CHANNEL,
+        index_path=index,
+        repository=repository,
+        workflow_ref=(
+            "OpenAdaptAI/openadapt-desktop/.github/workflows/native-release.yml@refs/heads/main"
+        ),
+        workflow_commit="a" * 40,
+        run_id=123456,
+        run_attempt=2,
+    )
+    monkeypatch.setattr(
+        download_verifier.subprocess,
+        "run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(command, 0, "verified", ""),
+    )
+    expected = _read_checksum_lines(checksums)
+    real_verify = download_verifier.verify
+
+    def _swap_then_verify(directory: Path, manifest: Path, **kwargs: object) -> int:
+        # Replace SHA256SUMS in the window between authentication and use.
+        manifest.write_text(f"{'0' * 64}  OpenAdapt-Desktop-attacker.dmg\n", encoding="utf-8")
+        return real_verify(directory, manifest, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(download_verifier, "verify", _swap_then_verify)
+
+    assert download_verifier.verify_authenticated_channel(
+        channel_path=channel,
+        index_path=index,
+        directory=release,
+        checksums=checksums,
+        repository=repository,
+    ) == len(expected)
+
+
+def test_release_workflow_attestation_checks_use_one_exact_identity_flag() -> None:
+    """Every workflow attestation check must be a command `gh` can run.
+
+    `gh attestation verify` treats --cert-identity, --cert-identity-regex,
+    --signer-repo, and --signer-workflow as one mutually exclusive group and
+    refuses the command when two are set. A release that cannot run its own
+    verification step cannot publish, so this contract is checked as text.
+    """
+
+    workflow = (ROOT / ".github" / "workflows" / "native-release.yml").read_text(encoding="utf-8")
+    invocations = workflow.count("gh attestation verify")
+    assert invocations >= 1
+    for excluded in ("--signer-workflow", "--signer-repo", "--cert-identity-regex"):
+        assert excluded not in workflow
+    assert workflow.count("--cert-identity ") == invocations
+    assert (
+        workflow.count('--cert-oidc-issuer "https://token.actions.githubusercontent.com"')
+        == invocations
+    )
+    assert workflow.count("--deny-self-hosted-runners") == invocations
 
 
 def test_public_download_verifier_rejects_index_or_checksum_substitution(

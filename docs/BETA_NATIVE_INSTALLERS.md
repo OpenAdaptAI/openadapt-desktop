@@ -94,8 +94,8 @@ job. Consumers must authenticate `SHA256SUMS` before they trust its digests:
 native_tag=desktop-vX.Y.Z
 gh attestation verify SHA256SUMS \
   --repo OpenAdaptAI/openadapt-desktop \
-  --signer-workflow OpenAdaptAI/openadapt-desktop/.github/workflows/native-release.yml \
   --cert-identity "https://github.com/OpenAdaptAI/openadapt-desktop/.github/workflows/native-release.yml@refs/tags/${native_tag}" \
+  --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
   --deny-self-hosted-runners
 sha256sum -c SHA256SUMS
 python verify-openadapt-native-release.py --directory . --manifest SHA256SUMS

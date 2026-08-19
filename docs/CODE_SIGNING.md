@@ -211,8 +211,8 @@ native_tag=desktop-vX.Y.Z
 # First authenticate the checksum manifest and its exact release workflow.
 gh attestation verify SHA256SUMS \
   --repo OpenAdaptAI/openadapt-desktop \
-  --signer-workflow OpenAdaptAI/openadapt-desktop/.github/workflows/native-release.yml \
   --cert-identity "https://github.com/OpenAdaptAI/openadapt-desktop/.github/workflows/native-release.yml@refs/tags/${native_tag}" \
+  --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
   --deny-self-hosted-runners
 
 # Then check every digest and reject a missing, extra, linked, or non-regular file.

@@ -90,8 +90,11 @@ def test_native_release_workflow_requires_protected_signing_environment() -> Non
     assert "--require-mode authenticode" in workflow
     assert "--signing github-attested" in workflow
     assert "openadapt-desktop-native-release-provenance.json" in workflow
-    assert "--signer-workflow" in workflow
+    # `gh attestation verify` refuses --cert-identity together with
+    # --signer-workflow, so the exact-identity flag must stand alone.
+    assert "--signer-workflow" not in workflow
     assert "--cert-identity" in workflow
+    assert '--cert-oidc-issuer "https://token.actions.githubusercontent.com"' in workflow
     assert "--deny-self-hosted-runners" in workflow
     assert "validate-attestation" in workflow
     for secret in WINDOWS_TRUSTED_SIGNING_CREDENTIALS:

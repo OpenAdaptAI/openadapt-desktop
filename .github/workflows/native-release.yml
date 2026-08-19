@@ -698,14 +698,14 @@ jobs:
           identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/native-release.yml@refs/tags/${GITHUB_REF_NAME}"
           gh attestation verify "${provenance}" \
             --repo "${GITHUB_REPOSITORY}" \
-            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/native-release.yml" \
             --cert-identity "${identity}" \
+            --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
             --deny-self-hosted-runners \
             --format json > attestation.json
           gh attestation verify release-assets/SHA256SUMS \
             --repo "${GITHUB_REPOSITORY}" \
-            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/native-release.yml" \
             --cert-identity "${identity}" \
+            --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
             --deny-self-hosted-runners
           python scripts/native_release.py validate-attestation \
             --file attestation.json \
@@ -763,14 +763,14 @@ jobs:
             --manifest release-assets/SHA256SUMS
           gh attestation verify "${provenance}" \
             --repo "${GITHUB_REPOSITORY}" \
-            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/native-release.yml" \
             --cert-identity "${identity}" \
+            --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
             --deny-self-hosted-runners \
             --format json > attestation.json
           gh attestation verify release-assets/SHA256SUMS \
             --repo "${GITHUB_REPOSITORY}" \
-            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/native-release.yml" \
             --cert-identity "${identity}" \
+            --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
             --deny-self-hosted-runners
           python scripts/native_release.py validate-attestation \
             --file attestation.json \
@@ -883,14 +883,14 @@ jobs:
             --manifest release-assets/SHA256SUMS
           gh attestation verify "${provenance}" \
             --repo "${GITHUB_REPOSITORY}" \
-            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/native-release.yml" \
             --cert-identity "${identity}" \
+            --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
             --deny-self-hosted-runners \
             --format json > attestation.json
           gh attestation verify release-assets/SHA256SUMS \
             --repo "${GITHUB_REPOSITORY}" \
-            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/native-release.yml" \
             --cert-identity "${identity}" \
+            --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
             --deny-self-hosted-runners
           python scripts/native_release.py validate-attestation \
             --file attestation.json \
@@ -1205,11 +1205,14 @@ jobs:
             --engine-tag "${ENGINE_TAG}" \
             --engine-commit "${ENGINE_COMMIT}" \
             --provenance mirror/openadapt-desktop-native-release-provenance.json
-          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/native-release.yml@refs/heads/main"
+          # This job runs on the `release: published` event for the native
+          # tag, so GitHub issues the signing certificate with that tag as
+          # the workflow ref. Pin the exact tag SAN, not a branch SAN.
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/native-release.yml@refs/tags/${NATIVE_TAG}"
           gh attestation verify openadapt-desktop-verified-release.json \
             --repo "${GITHUB_REPOSITORY}" \
-            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/native-release.yml" \
             --cert-identity "${identity}" \
+            --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
             --deny-self-hosted-runners
           gh release upload "${ENGINE_TAG}" openadapt-desktop-verified-release.json --clobber
           mkdir remote-index
@@ -1221,8 +1224,8 @@ jobs:
             --file remote-index/openadapt-desktop-verified-release.json
           gh attestation verify remote-index/openadapt-desktop-verified-release.json \
             --repo "${GITHUB_REPOSITORY}" \
-            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/native-release.yml" \
             --cert-identity "${identity}" \
+            --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
             --deny-self-hosted-runners
 
   supersede-published-native:
