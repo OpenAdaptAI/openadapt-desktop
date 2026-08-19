@@ -303,7 +303,8 @@ the runtime-attestation binding, and the exact trusted dashboard path. An
 unknown child or delivery outcome requires reconciliation and never becomes an
 automatic retry. The command never falls back to a direct Desktop upload when
 Flow is missing or returns an error. The former direct hosted-ingest backend
-now refuses every upload. The
+now refuses every upload.
+
 This path does not enter a native release until the exact pinned Flow artifact
 and the managed Cloud runtime pass the same live acceptance contract. The legacy
 customer-owned adapter queue remains paused for this release; its exit
