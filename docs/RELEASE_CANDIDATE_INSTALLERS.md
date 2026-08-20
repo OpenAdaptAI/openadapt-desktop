@@ -1,9 +1,9 @@
 <!-- installer-release -->
 
-# Beta Native Installers
+# Native Release Candidates
 
-OpenAdapt Desktop native packages are the **Beta installed authoring,
-teaching, and local-pairing companion** for OpenAdapt. They bundle and start the
+OpenAdapt Desktop native packages are **unadmitted candidates** for the
+installed authoring, teaching, and local-pairing companion. They bundle and start the
 Python sidecar, connect the Tauri/React cockpit to it over local JSON-lines IPC,
 and register the `openadapt://` operating-system handler. The handler accepts
 only the fixed `openadapt://connect` action and forwards it to the sidecar's
@@ -48,7 +48,8 @@ that pull request. The freshness workflow never creates a tag or release. A
 maintainer then dispatches the Native Installer Release workflow from reviewed
 `main`. That one transaction verifies the engine receipt, creates the matching
 `desktop-vX.Y.Z` tag, publishes and verifies the installers, mirrors them to the
-engine release, and promotes the signed stable channel.
+engine release, and updates the signed candidate channel. This transaction does
+not change the admission-driven Production channel.
 All lower native prereleases receive a prominent "Superseded — do not use"
 notice. Their assets remain for provenance. The full two-lane release policy
 and its planned convergence into a single release are documented in
@@ -56,7 +57,7 @@ and its planned convergence into a single release are documented in
 
 ## Artifact labels
 
-Every filename includes `Beta`, the native version, operating system,
+Every new filename includes `Candidate`, the native version, operating system,
 architecture, and signing state. The initial matrix is:
 
 | Platform | Architectures | Packages | Signing labels |
@@ -87,7 +88,7 @@ SBOM, includes it and the public build-provenance identity in the sorted
 `SHA256SUMS` manifest, verifies the exact inventory, and creates a GitHub
 artifact attestation over every named file. It also attests `SHA256SUMS` itself.
 The release verifier requires the signed subjects to equal that inventory. It
-binds the exact reviewed-main workflow, source commit, stable engine tag and
+binds the exact reviewed-main workflow, source commit, published engine tag and
 release, run ID, run attempt, and GitHub-hosted runner. Consumers must
 authenticate `SHA256SUMS` before they trust its digests:
 
@@ -105,7 +106,7 @@ The final helper refuses missing, extra, linked, non-regular, duplicate, or
 digest-mismatched files. The canonical engine release also publishes an
 attested `openadapt-desktop-verified-release.json`. The `desktop-channel`
 release carries the attested, strictly monotonic
-`openadapt-desktop-channel.json` authority. This closed chain
+`openadapt-desktop-channel.json` candidate index. This closed chain
 identifies the exact native tag, engine release, source commits, workflow run,
 checksum digest, and complete asset set. A download service must verify this
 index attestation. It must not select a release from mutable release-note text.
