@@ -507,6 +507,8 @@ class FlowBridge:
             "PollRequest",
             "RegisterRequest",
             "RegisterResponse",
+            "RUNNER_RENEWAL_HEADER",
+            "registration_renewal_headers",
         }
         missing = sorted(name for name in required if not hasattr(module, name))
         if missing:

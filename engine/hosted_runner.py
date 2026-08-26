@@ -465,6 +465,24 @@ class HttpHostedRunnerTransport:
         self._enrollment_token = enrollment_token
         self._runner_token = runner_token
         self._audit = audit
+        if client is not None:
+            try:
+                client_origin = canonical_https_origin(
+                    str(client.base_url).removesuffix("/")
+                )
+            except RunnerTransportError as exc:
+                raise RunnerTransportError(
+                    "The hosted runner HTTP client has no exact protected origin."
+                ) from exc
+            if client_origin != self.host:
+                raise RunnerTransportError(
+                    "The hosted runner HTTP client differs from its protected origin."
+                )
+            renewal_header = self.contract.RUNNER_RENEWAL_HEADER
+            if renewal_header in client.headers:
+                raise RunnerTransportError(
+                    "The hosted runner HTTP client retains a renewal credential."
+                )
         self._client = client or httpx.Client(
             base_url=self.host,
             timeout=DEFAULT_WAIT_S + 35,
@@ -520,17 +538,25 @@ class HttpHostedRunnerTransport:
         *,
         response_type: Any,
         expected_status: int | tuple[int, ...],
-        enrollment: bool = False,
+        headers: dict[str, str],
         allow_empty: bool = False,
         response_status_by_http: dict[int, str] | None = None,
     ) -> Any:
+        renewal_header = self.contract.RUNNER_RENEWAL_HEADER
+        effective_headers = httpx.Headers(self._client.headers)
+        effective_headers.update(headers)
+        if renewal_header in effective_headers and path != REGISTER_PATH:
+            raise RunnerTransportError(
+                "The runner renewal credential is restricted to registration."
+            )
         operation = path.rsplit("/", 1)[-1]
         self._audit_start(operation, path)
         try:
             response = self._client.post(
                 path,
                 json=_model_dump(request),
-                headers=self._headers(enrollment=enrollment),
+                headers=headers,
+                follow_redirects=False,
             )
         except (httpx.HTTPError, OSError) as exc:
             self._audit.log(
@@ -577,12 +603,19 @@ class HttpHostedRunnerTransport:
         return parsed
 
     def register(self, request: Any) -> Any:
+        headers = self._headers(enrollment=True)
+        try:
+            headers.update(self.contract.registration_renewal_headers(self._runner_token))
+        except ValueError:
+            # An invalid retained credential cannot identify an existing runner.
+            # Register a new identity without sending the malformed value.
+            pass
         return self._post(
             REGISTER_PATH,
             request,
             response_type=self.contract.RegisterResponse,
             expected_status=201,
-            enrollment=True,
+            headers=headers,
         )
 
     def poll(self, request: Any) -> Any | None:
@@ -591,6 +624,7 @@ class HttpHostedRunnerTransport:
             request,
             response_type=self.contract.HostedDispatch,
             expected_status=200,
+            headers=self._headers(enrollment=False),
             allow_empty=True,
         )
 
@@ -606,6 +640,7 @@ class HttpHostedRunnerTransport:
             request,
             response_type=self.contract.CallbackResponse,
             expected_status=(200, 202),
+            headers=self._headers(enrollment=False),
             response_status_by_http={200: "duplicate", 202: "accepted"},
         )
 

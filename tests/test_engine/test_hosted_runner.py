@@ -48,6 +48,14 @@ class DeliveryAuthority:
         self.token = token
 
 
+def registration_renewal_headers(current_runner_token: str | None) -> dict[str, str]:
+    if current_runner_token is None or current_runner_token == "":
+        return {}
+    if hosted_runner._RUNNER_TOKEN.fullmatch(current_runner_token) is None:
+        raise ValueError("current runner renewal credential is invalid")
+    return {"x-openadapt-runner-renewal-token": current_runner_token}
+
+
 CONTRACT = SimpleNamespace(
     CallbackRequest=WireModel,
     CallbackResponse=WireModel,
@@ -61,6 +69,8 @@ CONTRACT = SimpleNamespace(
     PollRequest=WireModel,
     RegisterRequest=WireModel,
     RegisterResponse=WireModel,
+    RUNNER_RENEWAL_HEADER="x-openadapt-runner-renewal-token",
+    registration_renewal_headers=registration_renewal_headers,
 )
 
 
@@ -569,13 +579,147 @@ def test_http_transport_uses_exact_routes_credentials_and_bodies() -> None:
         f"/api/runners/runs/{callback_run_id}/callback",
     ]
     assert seen[0].headers["Authorization"] == "Bearer oai_ingest_enrollment"
+    assert seen[0].headers["x-openadapt-runner-renewal-token"] == "oar_" + "f" * 64
     assert all(
         request.headers["Authorization"] == "Bearer " + "oar_" + "f" * 64 for request in seen[1:]
     )
+    assert all("x-openadapt-runner-renewal-token" not in request.headers for request in seen[1:])
     assert all(request.headers["Content-Type"] == "application/json" for request in seen)
     assert json.loads(seen[2].content) == callback.model_dump(mode="json")
     assert "run_id" not in json.loads(seen[2].content)
-    assert all("secret" not in json.dumps(values) for _event, values in audit.entries)
+    audit_json = json.dumps(audit.entries)
+    assert "secret" not in audit_json
+    assert "oar_" + "f" * 64 not in audit_json
+
+
+def test_http_registration_omits_malformed_retained_renewal_credential() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(
+            201,
+            headers={"Cache-Control": "no-store"},
+            json=_registration_response().model_dump(mode="json"),
+        )
+
+    transport = HttpHostedRunnerTransport(
+        host="https://app.openadapt.ai",
+        contract=CONTRACT,
+        enrollment_token="oai_ingest_enrollment",
+        runner_token="oar_" + "g" * 64,
+        audit=FakeAudit(),
+        client=httpx.Client(
+            base_url="https://app.openadapt.ai",
+            transport=httpx.MockTransport(handler),
+        ),
+    )
+
+    transport.register(_registration_request())
+
+    assert seen[0].headers["Authorization"] == "Bearer oai_ingest_enrollment"
+    assert "x-openadapt-runner-renewal-token" not in seen[0].headers
+    assert "oar_" + "g" * 64 not in json.dumps(json.loads(seen[0].content))
+
+
+def test_http_transport_refuses_an_injected_client_on_another_origin() -> None:
+    with pytest.raises(RunnerTransportError, match="protected origin"):
+        HttpHostedRunnerTransport(
+            host="https://app.openadapt.ai",
+            contract=CONTRACT,
+            enrollment_token="oai_ingest_enrollment",
+            runner_token="oar_" + "f" * 64,
+            audit=FakeAudit(),
+            client=httpx.Client(
+                base_url="https://other.example",
+                transport=httpx.MockTransport(
+                    lambda _request: pytest.fail("an origin mismatch must not reach HTTP")
+                ),
+            ),
+        )
+
+
+def test_http_transport_refuses_renewal_header_outside_registration() -> None:
+    transport = HttpHostedRunnerTransport(
+        host="https://app.openadapt.ai",
+        contract=CONTRACT,
+        enrollment_token="oai_ingest_enrollment",
+        runner_token="oar_" + "f" * 64,
+        audit=FakeAudit(),
+        client=httpx.Client(
+            base_url="https://app.openadapt.ai",
+            transport=httpx.MockTransport(
+                lambda _request: pytest.fail("a renewal header must not reach poll HTTP")
+            ),
+        ),
+    )
+
+    with pytest.raises(RunnerTransportError, match="restricted to registration"):
+        transport._post(
+            "/api/runners/poll",
+            WireModel(schema_version="openadapt.hosted-runner-poll/v1"),
+            response_type=WireModel,
+            expected_status=200,
+            headers={
+                "Authorization": "Bearer " + "oar_" + "f" * 64,
+                "Content-Type": "application/json",
+                "X-OpenAdapt-Runner-Renewal-Token": "oar_" + "f" * 64,
+            },
+        )
+
+
+def test_http_transport_refuses_case_insensitive_default_renewal_header() -> None:
+    with pytest.raises(RunnerTransportError, match="retains a renewal credential"):
+        HttpHostedRunnerTransport(
+            host="https://app.openadapt.ai",
+            contract=CONTRACT,
+            enrollment_token="oai_ingest_enrollment",
+            runner_token="oar_" + "f" * 64,
+            audit=FakeAudit(),
+            client=httpx.Client(
+                base_url="https://app.openadapt.ai",
+                headers={"X-OpenAdapt-Runner-Renewal-Token": "oar_" + "e" * 64},
+                transport=httpx.MockTransport(
+                    lambda _request: pytest.fail("a retained header must not reach HTTP")
+                ),
+            ),
+        )
+
+
+def test_http_registration_never_follows_a_cross_origin_redirect() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.url.host == "app.openadapt.ai":
+            return httpx.Response(
+                307,
+                headers={
+                    "Location": "https://other.example/steal",
+                    "Cache-Control": "no-store",
+                },
+            )
+        pytest.fail("the renewal credential must not follow a redirect")
+
+    transport = HttpHostedRunnerTransport(
+        host="https://app.openadapt.ai",
+        contract=CONTRACT,
+        enrollment_token="oai_ingest_enrollment",
+        runner_token="oar_" + "f" * 64,
+        audit=FakeAudit(),
+        client=httpx.Client(
+            base_url="https://app.openadapt.ai",
+            follow_redirects=True,
+            transport=httpx.MockTransport(handler),
+        ),
+    )
+
+    with pytest.raises(RunnerTransportError, match="HTTP 307"):
+        transport.register(_registration_request())
+
+    assert [str(request.url) for request in seen] == [
+        "https://app.openadapt.ai/api/runners/register"
+    ]
 
 
 def test_http_transport_refuses_noncanonical_callback_run_uuid() -> None:
