@@ -6,6 +6,8 @@ import type {
   BrowserRuntimeStatus,
   ExecutionResponse,
   ExecutionTarget,
+  QualificationProject,
+  QualificationResponse,
   ReplayProgress,
   RunReport,
   RunPersistenceRetryResponse,
@@ -72,16 +74,40 @@ const CONTRACT_LABELS = {
   effect: "Business effect",
 } as const;
 
+function reviewRisk(
+  project: QualificationProject,
+  actionId: string,
+): string {
+  return (
+    project.controls.actions[actionId]?.classification?.classification ||
+    "not reviewed"
+  ).replaceAll("_", " ");
+}
+
+function riskTone(risk: string): "neutral" | "warn" | "crit" {
+  if (risk === "irreversible") return "crit";
+  if (risk === "consequential" || risk === "state changing") return "warn";
+  return "neutral";
+}
+
 export function WatchRun({
   workflowId,
   initialTarget,
+  firstWorkflow = false,
+  onQualify,
   onTeach,
 }: {
   workflowId: string;
   initialTarget?: ExecutionTarget;
+  firstWorkflow?: boolean;
+  onQualify: (id: string) => void;
   onTeach: (id: string) => void;
 }) {
   const [report, setReport] = useState<RunReport | null>(null);
+  const [review, setReview] = useState<QualificationProject | null>(null);
+  const [reviewLoaded, setReviewLoaded] = useState(false);
+  const [reviewed, setReviewed] = useState(false);
+  const [completedFirstRun, setCompletedFirstRun] = useState(false);
   const [running, setRunning] = useState(false);
   const [runtime, setRuntime] = useState<BrowserRuntimeStatus | null>(null);
   const [runIssue, setRunIssue] = useState<RunIssue | null>(null);
@@ -109,9 +135,23 @@ export function WatchRun({
     }
   }
 
+  async function loadReview() {
+    setReviewLoaded(false);
+    const next = await engineTry<QualificationResponse | null>(
+      CMD.GET_QUALIFICATION,
+      { workflow_id: workflowId },
+      null,
+    );
+    if (next && next.ok && "graph" in next) {
+      setReview(next);
+    }
+    setReviewLoaded(true);
+  }
+
   useEffect(() => {
     const generation = ++reportGenerationRef.current;
     void load(generation);
+    void loadReview();
     const unsubs = [
       onEngineEvent(EVT.LOG_LINE, (step: RunStep | { line: string }) => {
         if (!("index" in step)) return;
@@ -181,6 +221,7 @@ export function WatchRun({
         setReport(response);
         stepsRef.current = response.steps ?? [];
         setRunIssue(issueForReport(response));
+        if (firstWorkflow) setCompletedFirstRun(true);
       }
     } catch (error) {
       setRunIssue({
@@ -222,27 +263,130 @@ export function WatchRun({
 
   const total = report?.total_steps ?? 0;
   const steps = report?.steps ?? [];
+  const reviewActions =
+    review?.graph.nodes.filter((node) => node.kind === "action") || [];
+  const reviewParameters = review?.controls.parameters || [];
+  const reviewReady = Boolean(review && reviewActions.length > 0);
+  const firstRunFinished =
+    completedFirstRun &&
+    report &&
+    (report.outcome === "VERIFIED" ||
+      report.outcome === "COMPLETED_UNVERIFIED" ||
+      report.outcome === "success");
 
   return (
     <div className="content">
       <div className="page-head">
         <div className="titles">
-          <p className="eyebrow">Execute</p>
-          <h1>{report?.workflow_name ?? "Watch it run"}</h1>
+          <p className="eyebrow">
+            {firstWorkflow ? "First supervised run" : "Execute"}
+          </p>
+          <h1>
+            {firstWorkflow
+              ? "Review the workflow, then watch it run"
+              : report?.workflow_name ?? "Watch it run"}
+          </h1>
         </div>
-        <div className="row">
-          <Button disabled={running} onClick={() => execute("replay")}>
-            {running ? "Running…" : "Replay"}
-          </Button>
-          <Button
-            variant="primary"
-            disabled={running}
-            onClick={() => execute("run")}
-          >
-            Run with safety gates
-          </Button>
-        </div>
+        {!firstWorkflow && (
+          <div className="row">
+            <Button disabled={running} onClick={() => execute("replay")}>
+              {running ? "Running…" : "Replay"}
+            </Button>
+            <Button
+              variant="primary"
+              disabled={running}
+              onClick={() => execute("run")}
+            >
+              Run with safety gates
+            </Button>
+          </div>
+        )}
       </div>
+
+      {firstWorkflow && (
+        <Card>
+          <CardHead
+            eyebrow="Compiled review"
+            title="Check what OpenAdapt learned"
+            sub="Read the steps and inputs before OpenAdapt touches the app."
+          />
+          {reviewReady && review ? (
+            <>
+              <div className="metrics">
+                <div className="metric">
+                  <span className="label">Actions</span>
+                  <span className="metric-value tnum">
+                    {reviewActions.length}
+                  </span>
+                </div>
+                <div className="metric">
+                  <span className="label">Detected inputs</span>
+                  <span className="metric-value tnum">
+                    {reviewParameters.length}
+                  </span>
+                </div>
+              </div>
+
+              <h3 style={{ marginTop: "var(--space-5)" }}>Compiled steps</h3>
+              <ol className="first-workflow-steps">
+                {reviewActions.map((action) => {
+                  const risk = reviewRisk(review, action.id);
+                  return (
+                    <li key={action.id}>
+                      <span>{action.title}</span>
+                      <Pill tone={riskTone(risk)}>{risk}</Pill>
+                    </li>
+                  );
+                })}
+              </ol>
+
+              <h3>Detected inputs</h3>
+              {reviewParameters.length ? (
+                <ul className="first-workflow-inputs">
+                  {reviewParameters.map((parameter) => (
+                    <li key={parameter.name}>
+                      <span className="mono">{parameter.name}</span>
+                      <span className="page-sub">
+                        {parameter.secret ? "protected input" : parameter.type}
+                        {parameter.required ? ", required" : ", optional"}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="page-sub">
+                  OpenAdapt didn't detect a reusable input in this recording.
+                </p>
+              )}
+
+              <label className="check-row first-workflow-confirmation">
+                <input
+                  type="checkbox"
+                  checked={reviewed}
+                  onChange={(event) => setReviewed(event.target.checked)}
+                />
+                <span>
+                  I reviewed these steps and will keep the target app in view.
+                </span>
+              </label>
+            </>
+          ) : !reviewLoaded ? (
+            <Callout tone="info" title="Loading the compiled review">
+              OpenAdapt is reading the retained workflow graph and input schema.
+            </Callout>
+          ) : (
+            <Callout tone="warn" title="Open the compiled review">
+              Desktop couldn't read the workflow steps. Retry the local review
+              before the first run.
+              <div style={{ marginTop: "var(--space-3)" }}>
+                <Button size="sm" onClick={() => void loadReview()}>
+                  Retry review
+                </Button>
+              </div>
+            </Callout>
+          )}
+        </Card>
+      )}
 
       <Card>
         <CardHead
@@ -290,6 +434,20 @@ export function WatchRun({
             </p>
           </div>
         </details>
+        {firstWorkflow && (
+          <div style={{ marginTop: "var(--space-5)" }}>
+            <p className="page-sub">
+              Keep the target app visible and watch each step.
+            </p>
+            <Button
+              variant="primary"
+              disabled={running || !reviewReady || !reviewed}
+              onClick={() => execute("replay")}
+            >
+              {running ? "Running…" : "Run once while I watch"}
+            </Button>
+          </div>
+        )}
       </Card>
 
       <Card>
@@ -461,6 +619,23 @@ export function WatchRun({
               </div>
             )}
           </div>
+        </Card>
+      )}
+
+      {firstRunFinished && (
+        <Card>
+          <CardHead
+            eyebrow="Next"
+            title="Qualify this workflow for repeated use"
+            sub="Your supervised run is saved. Now define which record may change and what result proves success."
+          />
+          <p className="page-sub">
+            The qualification review also applies the policy for each
+            consequential action.
+          </p>
+          <Button variant="primary" onClick={() => onQualify(workflowId)}>
+            Review identity, effects, and policy
+          </Button>
         </Card>
       )}
     </div>

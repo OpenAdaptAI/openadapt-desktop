@@ -135,3 +135,46 @@ it("opens one workflow when the event and command return report the same compile
     expect(onCompiled).toHaveBeenCalledWith("workflow-1", { backend: "web" });
   });
 });
+
+it("requires a real target and a named task for the first workflow", async () => {
+  vi.mocked(engineTry).mockResolvedValue({
+    recording: false,
+    paused: false,
+    duration_secs: 0,
+    capture_id: null,
+    controls: { pause: false, resume: false, stop: false },
+  });
+  vi.mocked(engineInvoke).mockResolvedValue({
+    capture_id: "cap-1",
+    recording: true,
+  });
+
+  render(<RecordReview firstWorkflow onCompiled={() => {}} />);
+
+  const recordButton = screen.getByRole("button", {
+    name: "Record this task",
+  }) as HTMLButtonElement;
+  expect(recordButton.disabled).toBe(true);
+  expect(screen.getByText("Describe the task you want to record.")).toBeTruthy();
+
+  fireEvent.change(screen.getByLabelText("Task to record"), {
+    target: { value: "Save one test value" },
+  });
+  expect(
+    screen.getByText("Enter the page URL for the app you want to record."),
+  ).toBeTruthy();
+
+  fireEvent.change(screen.getByLabelText("Page URL"), {
+    target: { value: "https://example.test/form" },
+  });
+
+  expect(recordButton.disabled).toBe(false);
+  fireEvent.click(recordButton);
+
+  await waitFor(() =>
+    expect(engineInvoke).toHaveBeenCalledWith("start_recording", {
+      target: { backend: "web", url: "https://example.test/form" },
+      purpose: "Save one test value",
+    }),
+  );
+});

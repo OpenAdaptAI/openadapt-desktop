@@ -43,10 +43,44 @@ interface CompileProgress {
   recording_retained?: boolean;
 }
 
+function firstTargetIssue(target: ExecutionTarget): string | null {
+  switch (target.backend) {
+    case "web":
+      return target.url?.trim()
+        ? null
+        : "Enter the page URL for the app you want to record.";
+    case "windows":
+      return target.agent_url?.trim()
+        ? null
+        : "Enter the Windows connection for the computer that owns the app.";
+    case "macos":
+      return target.macos_app?.trim()
+        ? null
+        : "Enter the name of the Mac app you want to record.";
+    case "linux":
+      if (!target.linux_app?.trim()) {
+        return "Enter the Linux application name.";
+      }
+      return target.linux_window_title?.trim()
+        ? null
+        : "Enter the exact Linux window title.";
+    case "rdp":
+      return target.rdp_host?.trim() || target.rdp_window?.trim()
+        ? null
+        : "Choose the RDP host or the local client window.";
+    case "citrix":
+      return target.rdp_readiness_text?.trim()
+        ? null
+        : "Enter stable text from the app screen you plan to record.";
+  }
+}
+
 export function RecordReview({
   onCompiled,
+  firstWorkflow = false,
 }: {
   onCompiled: (id: string, target: ExecutionTarget) => void;
+  firstWorkflow?: boolean;
 }) {
   const [status, setStatus] = useState<EngineStatus>({
     recording: false,
@@ -227,21 +261,45 @@ export function RecordReview({
   }
 
   const recording = status.recording;
+  const targetIssue = firstWorkflow ? firstTargetIssue(target) : null;
+  const taskMissing = firstWorkflow && !task.trim();
+  const firstWorkflowReady = !taskMissing && !targetIssue;
 
   return (
     <div className="content">
       <div className="page-head">
         <div className="titles">
-          <p className="eyebrow">Author</p>
-          <h1>Record &amp; review</h1>
+          <p className="eyebrow">
+            {firstWorkflow ? "First workflow" : "Author"}
+          </p>
+          <h1>
+            {firstWorkflow
+              ? "Show OpenAdapt one small task"
+              : "Record & review"}
+          </h1>
         </div>
       </div>
+
+      {firstWorkflow && (
+        <Callout title="Pick a task you can verify yourself">
+          A good first task takes less than a minute. Use test data and choose
+          a result that is easy to see.
+        </Callout>
+      )}
 
       <Card>
         <CardHead
           eyebrow="Target"
-          title="What are you demonstrating?"
-          sub="The same target contract follows this recording into compile and execution."
+          title={
+            firstWorkflow
+              ? "Choose the app and task"
+              : "What are you demonstrating?"
+          }
+          sub={
+            firstWorkflow
+              ? "Open the app first. Select its surface here, then describe the result you want."
+              : "The same target contract follows this recording into compile and execution."
+          }
         />
         <ExecutionTargetForm
           target={target}
@@ -250,8 +308,12 @@ export function RecordReview({
           disabled={recording || busy}
         />
         <Field
-          label="Task description"
-          hint="Optional local description stored with this recording."
+          label={firstWorkflow ? "Task to record" : "Task description"}
+          hint={
+            firstWorkflow
+              ? "Required for your first workflow. Keep it short and specific."
+              : "Optional local description stored with this recording."
+          }
           htmlFor={`${fieldPrefix}-record-task`}
           hintId={`${fieldPrefix}-record-task-hint`}
         >
@@ -262,8 +324,20 @@ export function RecordReview({
             disabled={recording || busy}
             aria-describedby={`${fieldPrefix}-record-task-hint`}
             onChange={(event) => setTask(event.target.value)}
+            placeholder={
+              firstWorkflow
+                ? "Copy a test value into a form and save it"
+                : undefined
+            }
           />
         </Field>
+        {firstWorkflow && !firstWorkflowReady && (
+          <Callout tone="info" title="Finish the task setup">
+            {taskMissing
+              ? "Describe the task you want to record."
+              : targetIssue}
+          </Callout>
+        )}
         <p className="page-sub">
           Target selectors are handed to OpenAdapt Flow through a short-lived
           private file; they never appear in the process command line or
@@ -305,8 +379,12 @@ export function RecordReview({
 
         <div className="row" style={{ marginTop: "var(--space-5)" }}>
           {!recording ? (
-            <Button variant="primary" disabled={busy} onClick={start}>
-              Start recording
+            <Button
+              variant="primary"
+              disabled={busy || (firstWorkflow && !firstWorkflowReady)}
+              onClick={start}
+            >
+              {firstWorkflow ? "Record this task" : "Start recording"}
             </Button>
           ) : (
             <>

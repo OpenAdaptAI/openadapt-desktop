@@ -1,7 +1,11 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
-import { engineInvoke, engineTry } from "../lib/engine";
-import type { ExecutionResponse, RunReport } from "../lib/types";
+import { CMD, engineInvoke, engineTry } from "../lib/engine";
+import type {
+  ExecutionResponse,
+  QualificationProject,
+  RunReport,
+} from "../lib/types";
 import { WatchRun } from "./WatchRun";
 
 vi.mock("../lib/engine", async (importOriginal) => {
@@ -66,6 +70,7 @@ it("renders the precise execution evidence returned by the sidecar", async () =>
     <WatchRun
       workflowId="workflow-1"
       initialTarget={{ backend: "web" }}
+      onQualify={() => {}}
       onTeach={() => {}}
     />,
   );
@@ -94,6 +99,7 @@ it("clears prior terminal evidence while a new run is in flight", async () => {
     <WatchRun
       workflowId="workflow-1"
       initialTarget={{ backend: "web" }}
+      onQualify={() => {}}
       onTeach={() => {}}
     />,
   );
@@ -136,6 +142,7 @@ it("keeps a report visible while local history is retried", async () => {
     <WatchRun
       workflowId="workflow-1"
       initialTarget={{ backend: "web" }}
+      onQualify={() => {}}
       onTeach={() => {}}
     />,
   );
@@ -153,4 +160,147 @@ it("keeps a report visible while local history is retried", async () => {
     expect(screen.queryByText("Local run history needs attention")).toBeNull(),
   );
   expect(screen.getByText("Outcome evidence")).toBeTruthy();
+});
+
+function firstWorkflowReview(): QualificationProject {
+  return {
+    ok: true,
+    workflow_id: "workflow-1",
+    graph: {
+      bundle: {
+        name: "Save a test note",
+        action_count: 2,
+        irreversible_count: 0,
+        identity_armed_count: 0,
+        identity_unarmed_count: 1,
+        effect_count: 0,
+        encrypted: false,
+        provenance: {},
+      },
+      nodes: [
+        {
+          id: "step-1",
+          index: 0,
+          kind: "action",
+          title: "Enter the test note",
+          effects: [],
+          postconditions: [],
+          halts: [],
+          badges: [],
+        },
+        {
+          id: "step-2",
+          index: 1,
+          kind: "action",
+          title: "Save the note",
+          effects: [],
+          postconditions: [],
+          halts: [],
+          badges: [],
+        },
+      ],
+      edges: [],
+    },
+    controls: {
+      parameters: [
+        {
+          name: "note_text",
+          type: "string",
+          secret: false,
+          required: true,
+          example: null,
+          choices: [],
+        },
+      ],
+      actions: {
+        "step-1": {
+          step_id: "step-1",
+          execution_paths: ["gui"],
+          classification: {
+            step_id: "step-1",
+            classification: "state_changing",
+            explanation: "The action changes a field.",
+            operator_confirmed: false,
+          },
+          identity: { can_arm: false, armed: false, sources: [] },
+          effects: [],
+        },
+        "step-2": {
+          step_id: "step-2",
+          execution_paths: ["gui"],
+          classification: {
+            step_id: "step-2",
+            classification: "consequential",
+            explanation: "The action saves the note.",
+            operator_confirmed: false,
+          },
+          identity: { can_arm: false, armed: false, sources: [] },
+          effects: [],
+        },
+      },
+      business_decisions: {
+        available: false,
+        required_flow_capability: "qualification.set_business_decision",
+        graphs: [],
+      },
+      judgment_cases: {
+        available: false,
+        required_flow_capability: "qualification.set_judgment_cases",
+        contexts: [],
+        report: null,
+      },
+    },
+  } as unknown as QualificationProject;
+}
+
+it("requires the first user to review the compiled workflow before a supervised run", async () => {
+  const qualification = firstWorkflowReview();
+  vi.mocked(engineTry).mockImplementation(async (command) => {
+    if (command === CMD.GET_QUALIFICATION) return qualification;
+    return null;
+  });
+  vi.mocked(engineInvoke).mockResolvedValue(preciseReport("VERIFIED"));
+  const onQualify = vi.fn();
+
+  render(
+    <WatchRun
+      workflowId="workflow-1"
+      initialTarget={{ backend: "web", url: "https://example.test" }}
+      firstWorkflow
+      onQualify={onQualify}
+      onTeach={() => {}}
+    />,
+  );
+
+  expect(await screen.findByText("Enter the test note")).toBeTruthy();
+  expect(screen.getByText("Save the note")).toBeTruthy();
+  expect(screen.getByText("note_text")).toBeTruthy();
+  expect(screen.getByText("state changing")).toBeTruthy();
+  expect(screen.getByText("consequential")).toBeTruthy();
+
+  const runButton = screen.getByRole("button", {
+    name: "Run once while I watch",
+  }) as HTMLButtonElement;
+  expect(runButton.disabled).toBe(true);
+
+  fireEvent.click(
+    screen.getByRole("checkbox", {
+      name: "I reviewed these steps and will keep the target app in view.",
+    }),
+  );
+  expect(runButton.disabled).toBe(false);
+  fireEvent.click(runButton);
+
+  await waitFor(() =>
+    expect(engineInvoke).toHaveBeenCalledWith("replay_workflow", {
+      workflow_id: "workflow-1",
+      target: { backend: "web", url: "https://example.test" },
+    }),
+  );
+  fireEvent.click(
+    await screen.findByRole("button", {
+      name: "Review identity, effects, and policy",
+    }),
+  );
+  expect(onQualify).toHaveBeenCalledWith("workflow-1");
 });

@@ -36,9 +36,14 @@ import {
 
 type Route =
   | { name: "library" }
-  | { name: "record" }
+  | { name: "record"; firstWorkflow?: boolean }
   | { name: "qualify"; id: string }
-  | { name: "watch"; id: string; target?: ExecutionTarget }
+  | {
+      name: "watch";
+      id: string;
+      target?: ExecutionTarget;
+      firstWorkflow?: boolean;
+    }
   | { name: "teach"; id: string }
   | { name: "runner" }
   | { name: "portal" }
@@ -228,7 +233,7 @@ export default function App() {
           <Onboarding
             onStart={() => {
               setOnboarded(true);
-              setRoute({ name: "record" });
+              setRoute({ name: "record", firstWorkflow: true });
             }}
           />
         </DesktopEntryShell>
@@ -311,8 +316,14 @@ export default function App() {
         )}
         {route.name === "record" && (
           <RecordReview
+            firstWorkflow={route.firstWorkflow}
             onCompiled={(id, target) =>
-              setRoute({ name: "watch", id, target })
+              setRoute({
+                name: "watch",
+                id,
+                target,
+                firstWorkflow: route.firstWorkflow,
+              })
             }
           />
         )}
@@ -320,6 +331,8 @@ export default function App() {
           <WatchRun
             workflowId={route.id}
             initialTarget={route.target}
+            firstWorkflow={route.firstWorkflow}
+            onQualify={(id) => setRoute({ name: "qualify", id })}
             onTeach={(id) => setRoute({ name: "teach", id })}
           />
         )}
