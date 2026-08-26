@@ -307,7 +307,7 @@ export function WatchRun({
         <Card>
           <CardHead
             eyebrow="Compiled review"
-            title="Check what OpenAdapt learned"
+            title="Check the compiled workflow"
             sub="Read the steps and inputs before OpenAdapt touches the app."
           />
           {reviewReady && review ? (
