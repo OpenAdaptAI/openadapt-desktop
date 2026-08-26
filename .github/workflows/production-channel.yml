@@ -274,7 +274,7 @@ jobs:
     environment: production-release
     permissions:
       attestations: write
-      contents: write
+      contents: read
       id-token: write
     env:
       GH_TOKEN: ${{ github.token }}
@@ -364,11 +364,23 @@ jobs:
         with:
           subject-path: ${{ steps.channel.outputs.path }}
 
+      - name: Mint the release App token for GitHub publication
+        id: release_app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.OPENADAPT_RELEASE_APP_ID }}
+          private-key: ${{ secrets.OPENADAPT_RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-metadata: read
+
       - name: Publish once and verify the derived cache
         env:
           CACHE_ASSET: ${{ steps.channel.outputs.name }}
           CACHE_PATH: ${{ steps.channel.outputs.path }}
           DESKTOP_COMMIT: ${{ needs.inspect.outputs.desktop_commit }}
+          GH_TOKEN: ${{ steps.release_app.outputs.token }}
         shell: bash
         run: |
           set -euo pipefail
