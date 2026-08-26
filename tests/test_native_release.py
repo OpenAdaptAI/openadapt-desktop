@@ -2574,8 +2574,10 @@ def _production_admission_fixture(tmp_path: Path) -> tuple[Path, Path, Path, Pat
         repository=DESKTOP_REPOSITORY,
         engine_tag=f"v{version}",
         engine_commit="b" * 40,
-        workflow_ref=(f"{DESKTOP_REPOSITORY}/.github/workflows/release.yml@refs/heads/main"),
-        workflow_commit="a" * 40,
+        workflow_ref=(
+            f"{DESKTOP_REPOSITORY}/.github/workflows/release.yml@refs/tags/v{version}"
+        ),
+        workflow_commit="b" * 40,
         run_id=100,
         run_attempt=1,
         runner_environment="github-hosted",
@@ -2869,6 +2871,10 @@ def test_production_workflow_keeps_normal_publication_unadmitted() -> None:
     assert '"${GITHUB_REF}" != refs/heads/main' in production_text
     assert "${observed}-${digest#sha256:}" in production_text
     assert production_text.count("status --porcelain --untracked-files=all") == 2
+    assert "native-release.yml@refs/tags/desktop-v${VERSION}" in production_text
+    assert "release.yml@refs/tags/v${VERSION}" in production_text
+    assert "native-release.yml@refs/heads/main" not in production_text
+    assert "release.yml@refs/heads/main" not in production_text
 
     normal_release_text = (ROOT / ".github/workflows/release.yml").read_text()
     native_release_text = (ROOT / ".github/workflows/native-release.yml").read_text()
