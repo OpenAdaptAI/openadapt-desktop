@@ -25,11 +25,34 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  authorize-native-dispatch:
+    name: Refuse an invalid native release dispatch
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-22.04
+    permissions: {}
+    steps:
+      - name: Require the exact repository, main ref, and stable version input
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" != "workflow_dispatch" ] || \
+             [ "${GITHUB_REPOSITORY}" != "OpenAdaptAI/openadapt-desktop" ] || \
+             [ "${GITHUB_REF}" != "refs/heads/main" ] || \
+             [ "${GITHUB_REF_TYPE}" != "branch" ] || \
+             ! printf '%s' "${REQUESTED_VERSION}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "error: native dispatch requires OpenAdaptAI/openadapt-desktop main and X.Y.Z" >&2
+            exit 1
+          fi
+
   create-native-tag:
     name: Create the reviewed native release tag
+    needs: authorize-native-dispatch
     if: >-
       github.event_name == 'workflow_dispatch' &&
-      github.ref == 'refs/heads/main'
+      github.ref == 'refs/heads/main' &&
+      needs.authorize-native-dispatch.result == 'success'
     runs-on: ubuntu-22.04
     environment: release-identity
     permissions:
@@ -299,9 +322,210 @@ jobs:
             echo "engine_commit=${engine_commit}"
           } >> "${GITHUB_OUTPUT}"
 
+  recover-published-native:
+    name: Authenticate an existing native prerelease before recovery
+    needs: validate
+    runs-on: ubuntu-22.04
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      NATIVE_TAG: ${{ needs.validate.outputs.native_tag }}
+      SOURCE_COMMIT: ${{ needs.validate.outputs.source_commit }}
+    outputs:
+      state: ${{ steps.recovery.outputs.state }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate.outputs.source_commit }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Resolve the exact release without treating API failure as absence
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          status="$(curl --show-error --silent --location \
+            --header 'Accept: application/vnd.github+json' \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header 'X-GitHub-Api-Version: 2022-11-28' \
+            --output native-release.json \
+            --write-out '%{http_code}' \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${NATIVE_TAG}")"
+          if [ "${status}" = "404" ]; then
+            echo "found=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          if [ "${status}" != "200" ]; then
+            echo "error: release lookup returned HTTP ${status}; refusing a rebuild" >&2
+            exit 1
+          fi
+          if ! jq -e --arg tag "${NATIVE_TAG}" \
+            '.tag_name == $tag and .draft == false and .prerelease == true and
+             (.body | contains("<!-- installer-release -->"))' \
+            native-release.json >/dev/null; then
+            echo "error: existing native release has the wrong public identity" >&2
+            exit 1
+          fi
+          echo "found=true" >> "${GITHUB_OUTPUT}"
+
+      - name: Authenticate a complete public set or request partial recovery
+        id: published
+        if: steps.release.outputs.found == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --force origin "refs/tags/${NATIVE_TAG}:refs/tags/${NATIVE_TAG}"
+          observed="$(git rev-parse --verify "${NATIVE_TAG}^{commit}")"
+          if [ "${observed}" != "${SOURCE_COMMIT}" ]; then
+            echo "error: existing native release tag does not bind this source" >&2
+            exit 1
+          fi
+
+          mkdir published-assets
+          jq -r '.assets[].name' native-release.json > published-assets.txt
+          while IFS= read -r name; do
+            if [ -z "${name}" ]; then
+              continue
+            fi
+            if [ "$(basename "${name}")" != "${name}" ]; then
+              echo "error: existing release has an invalid asset name: ${name}" >&2
+              exit 1
+            fi
+            gh release download "${NATIVE_TAG}" --dir published-assets \
+              --pattern "${name}"
+          done < published-assets.txt
+
+          provenance=published-assets/openadapt-desktop-native-release-provenance.json
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/native-release.yml@refs/tags/${NATIVE_TAG}"
+          if [ -f published-assets/SHA256SUMS ] && \
+             python scripts/native_release.py verify-checksums \
+               --directory published-assets \
+               --manifest published-assets/SHA256SUMS && \
+             python scripts/native_release.py validate-set --directory published-assets && \
+             python scripts/native_release.py validate-sbom \
+               --file "published-assets/OpenAdapt-Desktop-${NATIVE_TAG}.cyclonedx.json" && \
+             python scripts/native_release.py validate-website-manifest \
+               --file published-assets/openadapt-desktop-release-manifest.json \
+               --checksums published-assets/SHA256SUMS && \
+             gh attestation verify "${provenance}" \
+               --repo "${GITHUB_REPOSITORY}" \
+               --cert-identity "${identity}" \
+               --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
+               --deny-self-hosted-runners \
+               --format json > public-attestation.json && \
+             gh attestation verify published-assets/SHA256SUMS \
+               --repo "${GITHUB_REPOSITORY}" \
+               --cert-identity "${identity}" \
+               --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
+               --deny-self-hosted-runners && \
+             python scripts/native_release.py validate-attestation \
+               --file public-attestation.json \
+               --directory published-assets \
+               --checksums published-assets/SHA256SUMS \
+               --provenance "${provenance}" \
+               --repository "${GITHUB_REPOSITORY}" \
+               --tag "${NATIVE_TAG}" \
+               --source-commit "${SOURCE_COMMIT}"; then
+            echo "state=complete" >> "${GITHUB_OUTPUT}"
+          else
+            echo "state=partial" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Download the original attested set for partial recovery
+        if: steps.published.outputs.state == 'partial'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: native-release-${{ needs.validate.outputs.native_tag }}
+          path: attested-assets
+
+      - name: Authenticate the original set and every published byte
+        id: partial
+        if: steps.published.outputs.state == 'partial'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/native_release.py verify-checksums \
+            --directory attested-assets \
+            --manifest attested-assets/SHA256SUMS
+          python scripts/native_release.py validate-set --directory attested-assets
+          python scripts/native_release.py validate-sbom \
+            --file "attested-assets/OpenAdapt-Desktop-${NATIVE_TAG}.cyclonedx.json"
+          python scripts/native_release.py validate-website-manifest \
+            --file attested-assets/openadapt-desktop-release-manifest.json \
+            --checksums attested-assets/SHA256SUMS
+          provenance=attested-assets/openadapt-desktop-native-release-provenance.json
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/native-release.yml@refs/tags/${NATIVE_TAG}"
+          gh attestation verify "${provenance}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --cert-identity "${identity}" \
+            --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --deny-self-hosted-runners \
+            --format json > attestation.json
+          gh attestation verify attested-assets/SHA256SUMS \
+            --repo "${GITHUB_REPOSITORY}" \
+            --cert-identity "${identity}" \
+            --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --deny-self-hosted-runners
+          python scripts/native_release.py validate-attestation \
+            --file attestation.json \
+            --directory attested-assets \
+            --checksums attested-assets/SHA256SUMS \
+            --provenance "${provenance}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --tag "${NATIVE_TAG}" \
+            --source-commit "${SOURCE_COMMIT}"
+
+          while IFS= read -r name; do
+            if [ -z "${name}" ]; then
+              continue
+            fi
+            if [ "$(basename "${name}")" != "${name}" ] || \
+               [ ! -f "attested-assets/${name}" ]; then
+              echo "error: existing release has an unexpected asset: ${name}" >&2
+              exit 1
+            fi
+            cmp "attested-assets/${name}" "published-assets/${name}"
+          done < published-assets.txt
+
+          find attested-assets -maxdepth 1 -type f -exec basename {} \; | sort \
+            > attested-assets.txt
+          sort -o published-assets.txt published-assets.txt
+          if cmp -s attested-assets.txt published-assets.txt; then
+            echo "error: complete public release failed authentication" >&2
+            exit 1
+          fi
+          echo "state=partial" >> "${GITHUB_OUTPUT}"
+
+      - name: Expose the authenticated recovery decision
+        id: recovery
+        shell: bash
+        env:
+          FOUND: ${{ steps.release.outputs.found }}
+          PUBLISHED_STATE: ${{ steps.published.outputs.state }}
+          PARTIAL_STATE: ${{ steps.partial.outputs.state }}
+        run: |
+          if [ "${PARTIAL_STATE}" = "partial" ]; then
+            echo "state=partial" >> "${GITHUB_OUTPUT}"
+          elif [ "${PUBLISHED_STATE}" = "complete" ]; then
+            echo "state=${PUBLISHED_STATE}" >> "${GITHUB_OUTPUT}"
+          elif [ "${FOUND}" = "false" ]; then
+            echo "state=absent" >> "${GITHUB_OUTPUT}"
+          else
+            echo "error: no authenticated native recovery state exists" >&2
+            exit 1
+          fi
+
   build-macos:
     name: macOS ${{ matrix.architecture }}
-    needs: validate
+    needs: [validate, recover-published-native]
+    if: needs.recover-published-native.outputs.state == 'absent'
     runs-on: ${{ matrix.os }}
     # The protected environment owns the Developer ID identity and notary
     # credentials. A native release cannot fall back to an ad-hoc artifact.
@@ -445,7 +669,7 @@ jobs:
       - name: Upload smoke-tested DMG
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: native-macos-${{ matrix.architecture }}
+          name: native-macos-${{ matrix.architecture }}-attempt-${{ github.run_attempt }}
           path: dist/native/*
           if-no-files-found: error
 
@@ -458,7 +682,8 @@ jobs:
 
   build-windows:
     name: Windows x86_64
-    needs: validate
+    needs: [validate, recover-published-native]
+    if: needs.recover-published-native.outputs.state == 'absent'
     runs-on: windows-2022
     # The protected environment owns either Azure Trusted Signing or the PFX
     # identity. A native release cannot fall back to unsigned installers.
@@ -630,7 +855,7 @@ jobs:
       - name: Upload smoke-tested Windows installers
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: native-windows-x86_64
+          name: native-windows-x86_64-attempt-${{ github.run_attempt }}
           path: dist/native/*
           if-no-files-found: error
 
@@ -647,7 +872,8 @@ jobs:
 
   build-linux:
     name: Linux x86_64 (GitHub-attested bytes)
-    needs: validate
+    needs: [validate, recover-published-native]
+    if: needs.recover-published-native.outputs.state == 'absent'
     runs-on: ubuntu-22.04
     # DEB and AppImage have no one shared native signing format. The attest job
     # below uses GitHub OIDC to sign provenance for the exact staged bytes and
@@ -765,7 +991,7 @@ jobs:
       - name: Upload smoke-tested Linux packages
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: native-linux-x86_64
+          name: native-linux-x86_64-attempt-${{ github.run_attempt }}
           path: dist/native/*
           if-no-files-found: error
 
@@ -794,7 +1020,7 @@ jobs:
       - name: Download all smoke-tested platform artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: native-*
+          pattern: native-*-attempt-${{ github.run_attempt }}
           path: release-assets
           merge-multiple: true
 
@@ -950,10 +1176,18 @@ jobs:
           name: native-release-${{ needs.validate.outputs.native_tag }}
           path: release-assets/*
           if-no-files-found: error
+          overwrite: true
 
   publish-native:
     name: Publish the verified candidate prerelease
-    needs: [validate, attest]
+    needs: [validate, recover-published-native, attest]
+    if: >-
+      always() &&
+      needs.validate.result == 'success' &&
+      needs.recover-published-native.result == 'success' &&
+      ((needs.recover-published-native.outputs.state == 'absent' &&
+        needs.attest.result == 'success') ||
+       needs.recover-published-native.outputs.state == 'partial')
     runs-on: ubuntu-22.04
     # This is the irreversible boundary. The protected environment admits only
     # the exact tag run and this job never replaces published bytes.
@@ -1092,7 +1326,13 @@ jobs:
 
   verify-published-release:
     name: Verify the published native release
-    needs: [validate, publish-native]
+    needs: [validate, recover-published-native, publish-native]
+    if: >-
+      always() &&
+      needs.validate.result == 'success' &&
+      needs.recover-published-native.result == 'success' &&
+      (needs.recover-published-native.outputs.state == 'complete' ||
+       needs.publish-native.result == 'success')
     runs-on: ubuntu-22.04
     permissions:
       actions: read
@@ -1221,11 +1461,14 @@ jobs:
       - name: Retain the exact verified bytes for the write jobs
         id: artifact
         shell: bash
-        run: echo "verified_artifact=verified-published-native-${GITHUB_RUN_ID}" >> "${GITHUB_OUTPUT}"
+        run: >-
+          echo
+          "verified_artifact=verified-published-native-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          >> "${GITHUB_OUTPUT}"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: verified-published-native-${{ github.run_id }}
+          name: verified-published-native-${{ github.run_id }}-${{ github.run_attempt }}
           path: release-assets/*
           if-no-files-found: error
 

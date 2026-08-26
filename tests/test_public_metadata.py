@@ -218,6 +218,14 @@ def test_release_recovery_is_an_exact_tag_rerun() -> None:
     assert "GH_TOKEN: ${{ steps.release_app.outputs.token }}" in publication
 
 
+def test_native_release_health_requires_failed_job_recovery() -> None:
+    config = json.loads((ROOT / ".github/release-health.json").read_text())
+    native = next(lane for lane in config["lanes"] if lane["id"] == "native")
+
+    assert "gh run rerun RUN_ID --failed" in native["remediation"]
+    assert "Do not rerun all jobs" in native["remediation"]
+
+
 def test_candidate_release_notes_describe_the_bundled_flow_runtime() -> None:
     notes = (ROOT / "docs/RELEASE_CANDIDATE_INSTALLERS.md").read_text()
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())

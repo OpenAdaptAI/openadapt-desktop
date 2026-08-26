@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 
 from scripts.verify_release_lock import verify_release_lock
 
@@ -59,3 +62,33 @@ def test_release_workflow_checks_lock_repository_actor_and_source_boundary() -> 
     assert "permission-metadata: read" in workflow
     assert "GH_TOKEN: ${{ steps.release_app.outputs.token }}" in workflow
     assert "python scripts/verify_pypi_release.py" in workflow
+    assert "authorize-release-dispatch" in workflow
+    assert "GITHUB_REF_TYPE" in workflow
+    assert "needs.authorize-release-dispatch.result == 'success'" in workflow
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("GITHUB_EVENT_NAME", "push"),
+        ("GITHUB_REPOSITORY", "OpenAdaptAI/fork"),
+        ("GITHUB_REF", "refs/heads/release"),
+        ("GITHUB_REF_TYPE", "tag"),
+        ("REQUESTED_VERSION", "1.2"),
+    ],
+)
+def test_release_dispatch_guard_refuses_every_invalid_identity(
+    field: str, value: str
+) -> None:
+    workflow = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text())
+    script = workflow["jobs"]["authorize-release-dispatch"]["steps"][0]["run"]
+    env = os.environ | {
+        "GITHUB_EVENT_NAME": "workflow_dispatch",
+        "GITHUB_REPOSITORY": "OpenAdaptAI/openadapt-desktop",
+        "GITHUB_REF": "refs/heads/main",
+        "GITHUB_REF_TYPE": "branch",
+        "REQUESTED_VERSION": "1.2.3",
+        field: value,
+    }
+
+    assert subprocess.run(["bash", "-c", script], env=env, check=False).returncode != 0

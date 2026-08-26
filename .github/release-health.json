@@ -12,7 +12,8 @@
     "all -- nor could one see `cancelled` or `skipped`.",
     "The target-state workflows create only an annotated tag from the exact",
     "reviewed main candidate. Publication then runs from that protected tag.",
-    "A failed publication resumes only by rerunning the exact tag workflow.",
+    "For a failed tag run, rerun only its failed jobs with the same run ID.",
+    "Do not rerun all jobs after a public prerelease exists.",
     "The historical failures remain detector fixtures."
   ],
   "repository": "OpenAdaptAI/openadapt-desktop",
@@ -38,7 +39,7 @@
       "release_workflows": ["native-release.yml"],
       "tracks_main": false,
       "tag_without_release_grace_hours": 6,
-      "remediation": "# After the complete candidate merges and vX.Y.Z publishes, create its native tag.\ngh workflow run native-release.yml --repo OpenAdaptAI/openadapt-desktop --ref main -f version=X.Y.Z\n# Approve release-identity for tag creation and native-release for the exact tag run."
+      "remediation": "# Create the native tag after the reviewed candidate and vX.Y.Z release exist.\ngh workflow run native-release.yml --repo OpenAdaptAI/openadapt-desktop --ref main -f version=X.Y.Z\n# Approve release-identity for tag creation and native-release for the tag run.\n# If the tag run fails, keep its run ID and rerun only the failed jobs.\ngh run rerun RUN_ID --failed --repo OpenAdaptAI/openadapt-desktop\n# Do not rerun all jobs after the public prerelease exists."
     }
   ]
 }

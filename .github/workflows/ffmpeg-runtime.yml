@@ -15,6 +15,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ffmpeg-runtime-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   FFMPEG_VERSION: "8.1.2"
   RUNTIME_REVISION: "r2"
@@ -24,13 +28,35 @@ env:
   SIGNING_KEY_FINGERPRINT: "FCF986EA15E6E293A5644F10B4322F04D67658D8"
 
 jobs:
+  authorize-runtime-dispatch:
+    name: Refuse an invalid managed-runtime dispatch
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-22.04
+    permissions: {}
+    steps:
+      - name: Require the exact repository, main ref, and boolean publish input
+        env:
+          PUBLISH: ${{ inputs.publish }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" != "workflow_dispatch" ] || \
+             [ "${GITHUB_REPOSITORY}" != "OpenAdaptAI/openadapt-desktop" ] || \
+             [ "${GITHUB_REF}" != "refs/heads/main" ] || \
+             [ "${GITHUB_REF_TYPE}" != "branch" ] || \
+             { [ "${PUBLISH}" != "true" ] && [ "${PUBLISH}" != "false" ]; }; then
+            echo "error: managed-runtime dispatch requires the Desktop main branch" >&2
+            exit 1
+          fi
+
   create-runtime-tag:
     name: Create the reviewed managed-runtime tag
     if: >-
       github.event_name == 'workflow_dispatch' &&
       github.ref == 'refs/heads/main' &&
+      needs.authorize-runtime-dispatch.result == 'success' &&
       inputs.publish
-    needs: [source, build]
+    needs: [authorize-runtime-dispatch, source, build]
     runs-on: ubuntu-22.04
     environment: release-identity
     permissions:

@@ -31,7 +31,6 @@ jobs:
        !github.event.release.prerelease &&
        !github.event.release.draft)
     runs-on: ubuntu-22.04
-    environment: release-identity
     env:
       GH_TOKEN: ${{ github.token }}
     steps:

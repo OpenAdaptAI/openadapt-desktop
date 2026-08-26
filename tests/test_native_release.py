@@ -134,7 +134,16 @@ def test_native_workflows_are_pinned_and_preserve_candidate_boundary() -> None:
     assert release["concurrency"]["cancel-in-progress"] is False
 
     jobs = release["jobs"]
+    dispatch = jobs["authorize-native-dispatch"]
+    assert dispatch["permissions"] == {}
+    dispatch_script = _job_steps(dispatch)[
+        "Require the exact repository, main ref, and stable version input"
+    ]["run"]
+    assert '"${GITHUB_REF}" != "refs/heads/main"' in dispatch_script
+    assert '"${GITHUB_REF_TYPE}" != "branch"' in dispatch_script
     tagger = jobs["create-native-tag"]
+    assert tagger["needs"] == "authorize-native-dispatch"
+    assert "needs.authorize-native-dispatch.result == 'success'" in tagger["if"]
     assert tagger["environment"] == "release-identity"
     tagger_steps = _job_steps(tagger)
     app_token = tagger_steps["Mint the release App token for this repository"]
@@ -228,6 +237,135 @@ def test_native_workflows_are_pinned_and_preserve_candidate_boundary() -> None:
     assert attest_steps["Attest SHA256SUMS as the consumer trust root"]["with"] == {
         "subject-path": "release-assets/SHA256SUMS"
     }
+
+
+def test_existing_native_prerelease_skips_rebuild_only_after_authentication() -> None:
+    jobs = _workflow("native-release.yml")["jobs"]
+    recovery = jobs["recover-published-native"]
+    assert recovery["permissions"] == {
+        "actions": "read",
+        "attestations": "read",
+        "contents": "read",
+    }
+    assert recovery["outputs"]["state"] == "${{ steps.recovery.outputs.state }}"
+    steps = _job_steps(recovery)
+    lookup = steps["Resolve the exact release without treating API failure as absence"]["run"]
+    assert 'if [ "${status}" = "404" ]' in lookup
+    assert "refusing a rebuild" in lookup
+    public_proof = steps[
+        "Authenticate a complete public set or request partial recovery"
+    ]["run"]
+    for contract in (
+        "verify-checksums",
+        "validate-set",
+        "validate-sbom",
+        "validate-website-manifest",
+        "gh attestation verify",
+        "validate-attestation",
+    ):
+        assert contract in public_proof
+
+    artifact_download = steps["Download the original attested set for partial recovery"]
+    assert artifact_download["if"] == "steps.published.outputs.state == 'partial'"
+    assert artifact_download["with"]["name"] == (
+        "native-release-${{ needs.validate.outputs.native_tag }}"
+    )
+    partial_proof = steps["Authenticate the original set and every published byte"]["run"]
+    assert 'cmp "attested-assets/${name}" "published-assets/${name}"' in partial_proof
+    assert "complete public release failed authentication" in partial_proof
+
+    for name in ("build-macos", "build-windows", "build-linux"):
+        assert set(jobs[name]["needs"]) == {"validate", "recover-published-native"}
+        assert jobs[name]["if"] == (
+            "needs.recover-published-native.outputs.state == 'absent'"
+        )
+    publisher = jobs["publish-native"]
+    assert set(publisher["needs"]) == {
+        "validate",
+        "recover-published-native",
+        "attest",
+    }
+    assert "recover-published-native.outputs.state == 'partial'" in publisher["if"]
+    assert "needs.attest.result == 'success'" in publisher["if"]
+    verifier = jobs["verify-published-release"]
+    assert set(verifier["needs"]) == {
+        "validate",
+        "recover-published-native",
+        "publish-native",
+    }
+    assert "always()" in verifier["if"]
+    assert "recover-published-native.outputs.state == 'complete'" in verifier["if"]
+    assert "needs.publish-native.result == 'success'" in verifier["if"]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("GITHUB_EVENT_NAME", "push"),
+        ("GITHUB_REPOSITORY", "OpenAdaptAI/fork"),
+        ("GITHUB_REF", "refs/heads/release"),
+        ("GITHUB_REF_TYPE", "tag"),
+        ("REQUESTED_VERSION", "1.2"),
+    ],
+)
+def test_native_dispatch_guard_refuses_every_invalid_identity(
+    field: str, value: str
+) -> None:
+    job = _workflow("native-release.yml")["jobs"]["authorize-native-dispatch"]
+    script = job["steps"][0]["run"]
+    env = os.environ | {
+        "GITHUB_EVENT_NAME": "workflow_dispatch",
+        "GITHUB_REPOSITORY": "OpenAdaptAI/openadapt-desktop",
+        "GITHUB_REF": "refs/heads/main",
+        "GITHUB_REF_TYPE": "branch",
+        "REQUESTED_VERSION": "1.2.3",
+        field: value,
+    }
+
+    assert subprocess.run(["bash", "-c", script], env=env, check=False).returncode != 0
+
+
+def test_complete_native_recovery_does_not_require_an_unexpired_actions_artifact() -> None:
+    recovery = _workflow("native-release.yml")["jobs"]["recover-published-native"]
+    steps = recovery["steps"]
+    names = [str(step.get("name") or step.get("uses")) for step in steps]
+    public_index = names.index(
+        "Authenticate a complete public set or request partial recovery"
+    )
+    artifact_index = names.index("Download the original attested set for partial recovery")
+    assert public_index < artifact_index
+
+    public_proof = steps[public_index]["run"]
+    assert 'echo "state=complete"' in public_proof
+    assert "published-assets/SHA256SUMS" in public_proof
+    assert "attested-assets" not in public_proof
+    assert steps[artifact_index]["if"] == "steps.published.outputs.state == 'partial'"
+
+
+def test_native_reruns_use_attempt_scoped_intermediate_artifacts() -> None:
+    jobs = _workflow("native-release.yml")["jobs"]
+    for name in ("build-macos", "build-windows", "build-linux"):
+        upload = next(
+            step
+            for step in jobs[name]["steps"]
+            if str(step.get("uses", "")).startswith("actions/upload-artifact@")
+        )
+        assert "${{ github.run_attempt }}" in upload["with"]["name"]
+    attest_steps = _job_steps(jobs["attest"])
+    platform_download = attest_steps["Download all smoke-tested platform artifacts"]
+    assert platform_download["with"]["pattern"] == (
+        "native-*-attempt-${{ github.run_attempt }}"
+    )
+    exact_set_upload = attest_steps["Upload exact attested release set"]
+    assert exact_set_upload["with"]["overwrite"] is True
+
+    verifier = jobs["verify-published-release"]
+    verified_upload = next(
+        step
+        for step in verifier["steps"]
+        if str(step.get("uses", "")).startswith("actions/upload-artifact@")
+    )
+    assert verified_upload["with"]["name"].endswith("-${{ github.run_attempt }}")
 
 
 def test_engine_and_native_release_form_one_attested_acceptance_chain() -> None:
@@ -380,7 +518,7 @@ def test_freshness_workflow_syncs_engine_releases_into_the_native_lane() -> None
     assert set(freshness["jobs"]) == {"validate-native-version"}
 
     validation = freshness["jobs"]["validate-native-version"]
-    assert validation["environment"] == "release-identity"
+    assert "environment" not in validation
     validation_steps = _job_steps(validation)
     validation_checkout = validation_steps[
         "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import subprocess
 import zipfile
 from pathlib import Path
 
 import pytest
+import yaml
 
 from scripts.package_ffmpeg_runtime import (
     FFMPEG_VERSION,
@@ -158,6 +161,11 @@ def test_runtime_workflow_is_pinned_attested_and_separate_from_installers() -> N
     assert "GH_TOKEN: ${{ steps.release_app.outputs.token }}" in workflow
     assert "environment: release-identity" in workflow
     assert "environment: native-release" in workflow
+    assert "group: ffmpeg-runtime-${{ github.ref }}" in workflow
+    assert "cancel-in-progress: false" in workflow
+    assert "authorize-runtime-dispatch" in workflow
+    assert "needs.authorize-runtime-dispatch.result == 'success'" in workflow
+    assert '"${GITHUB_REF_TYPE}" != "branch"' in workflow
     assert 'tags:\n      - "ffmpeg-runtime-v*"' in workflow
     assert 'git tag --annotate "${RUNTIME_TAG}" "${GITHUB_SHA}"' in workflow
     assert 'push origin "refs/tags/${RUNTIME_TAG}:refs/tags/${RUNTIME_TAG}"' in workflow
@@ -197,6 +205,34 @@ def test_runtime_workflow_is_pinned_attested_and_separate_from_installers() -> N
     assert "software_fallback_encoder" in script
     assert "--enable-encoder=png,mpeg4,rawvideo" in script
     assert "-c:v rawvideo -f rawvideo" in script
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("GITHUB_EVENT_NAME", "push"),
+        ("GITHUB_REPOSITORY", "OpenAdaptAI/fork"),
+        ("GITHUB_REF", "refs/heads/release"),
+        ("GITHUB_REF_TYPE", "tag"),
+        ("PUBLISH", "yes"),
+    ],
+)
+def test_ffmpeg_dispatch_guard_refuses_every_invalid_identity(
+    field: str, value: str
+) -> None:
+    root = Path(__file__).resolve().parents[1]
+    workflow = yaml.safe_load((root / ".github/workflows/ffmpeg-runtime.yml").read_text())
+    script = workflow["jobs"]["authorize-runtime-dispatch"]["steps"][0]["run"]
+    env = os.environ | {
+        "GITHUB_EVENT_NAME": "workflow_dispatch",
+        "GITHUB_REPOSITORY": "OpenAdaptAI/openadapt-desktop",
+        "GITHUB_REF": "refs/heads/main",
+        "GITHUB_REF_TYPE": "branch",
+        "PUBLISH": "false",
+        field: value,
+    }
+
+    assert subprocess.run(["bash", "-c", script], env=env, check=False).returncode != 0
 
 
 def test_runtime_builder_normalizes_windows_paths_and_materializes_smoke_bytes() -> None:
