@@ -1,4 +1,10 @@
-"""Outbound runner lane for governed cloud dispatch to local execution.
+"""Deprecated hosted-runner implementation with no production import path.
+
+The production dispatcher imports :mod:`engine.hosted_runner` and fails closed
+when Flow's strict hosted adapter is absent. This file remains temporarily as
+tracked recovery material. No entry point imports it.
+
+Historical implementation details follow.
 
 Implements the desktop half of the hosted runner platform (P0): an outbound
 HTTPS long-poll loop against ``/api/runners/*`` on the hosted control plane
