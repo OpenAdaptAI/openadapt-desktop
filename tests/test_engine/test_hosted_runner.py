@@ -32,11 +32,7 @@ class WireModel:
 
     def model_dump(self, *, mode: str) -> dict[str, Any]:
         assert mode == "json"
-        value = {
-            key: item
-            for key, item in self.__dict__.items()
-            if not key.startswith("_")
-        }
+        value = {key: item for key, item in self.__dict__.items() if not key.startswith("_")}
         return json.loads(json.dumps(value))
 
     @classmethod
@@ -157,6 +153,9 @@ class FakeAdapter:
         self.reconciliation_calls: list[WireModel] = []
         self.callback_build_calls: list[WireModel] = []
 
+    def protected_runner_origin(self, _runner_config: Path) -> str:
+        return "https://app.openadapt.ai"
+
     def registration_request(self, **values: Any) -> WireModel:
         capabilities = values["capabilities"]
         assert capabilities["backends"]
@@ -274,7 +273,8 @@ class FakeFlowBridge:
 
 
 class FakeTransport:
-    def __init__(self) -> None:
+    def __init__(self, host: str = "https://app.openadapt.ai") -> None:
+        self.host = host
         self.queue: list[WireModel] = []
         self.register_requests: list[WireModel] = []
         self.poll_requests: list[WireModel] = []
@@ -293,6 +293,9 @@ class FakeTransport:
     def poll(self, request: WireModel) -> WireModel | None:
         self.poll_requests.append(request)
         return self.queue.pop(0) if self.queue else None
+
+    def callback_target(self, run_id: str) -> str:
+        return hosted_runner.callback_url(self.host, run_id)
 
     def callback(self, run_id: str, request: WireModel) -> WireModel:
         body = request.model_dump(mode="json")
@@ -343,8 +346,16 @@ def _service(
     *,
     transport: FakeTransport,
     adapter: FakeAdapter,
+    registered: bool = False,
 ) -> RunnerService:
-    registration: dict[str, Any] = {}
+    registration: dict[str, Any] = (
+        {
+            **_registration_response().model_dump(mode="json"),
+            "local_runtime_release": _local_runtime_release(),
+        }
+        if registered
+        else {}
+    )
 
     def load_registration(_host: str) -> dict[str, Any] | None:
         return dict(registration) if registration else None
@@ -355,9 +366,7 @@ def _service(
         return True
 
     monkeypatch.setattr(hosted_runner, "load_runner_credential", load_registration)
-    monkeypatch.setattr(
-        hosted_runner, "store_runner_registration_secure", store_registration
-    )
+    monkeypatch.setattr(hosted_runner, "store_runner_registration_secure", store_registration)
     monkeypatch.setattr(
         hosted_runner,
         "auth_header",
@@ -374,11 +383,14 @@ def _service(
         audit=FakeAudit(),
         db=FakeDB(),
     )
-    return RunnerService(
+    service = RunnerService(
         config,
         services,
         transport_factory=lambda **_values: transport,
     )
+    if registered:
+        service._registration = dict(registration)
+    return service
 
 
 @pytest.mark.parametrize(
@@ -422,6 +434,7 @@ def test_three_uncertain_delivery_trials_require_reconciliation_without_replay(
     journal_path = service.journal._path(str(dispatch.dispatch_id))
     assert stat.S_IMODE(journal_path.stat().st_mode) == 0o600
     assert dispatch.lease_token not in json.dumps(service.status())
+    assert dispatch.lease_token not in json.dumps(service.services.audit.entries)
 
     assert service.tick() == 0.0  # exact callback recovery; no poll and no execute
     assert service.tick() is None  # replayed terminal lease stops before Flow
@@ -453,6 +466,37 @@ def test_three_uncertain_delivery_trials_require_reconciliation_without_replay(
     assert callback_bodies[0]["events"][-1]["outcome"] == "RECONCILIATION_REQUIRED"
     assert service.status()["last_runs"][0]["phase"] == "finished"
     assert service.status()["state"] == "reauth_required"
+    assert dispatch.lease_token not in journal_path.read_text()
+
+
+def test_dispatch_params_preserve_finite_json_scalar_types(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = FakeAdapter()
+    transport = FakeTransport()
+    dispatch = _dispatch("json-scalars")
+    values = {
+        "text": "42",
+        "integer": 42,
+        "decimal": 4.25,
+        "enabled": True,
+    }
+    dispatch.payload = {
+        "schema_version": "openadapt.runner-dispatch-payload/v1",
+        "params": {"kind": "inline", "values": values},
+    }
+    transport.queue.append(dispatch)
+    service = _service(tmp_path, monkeypatch, transport=transport, adapter=adapter)
+
+    assert service.tick() == 0.0
+
+    executed = adapter.execute_calls[0].payload["params"]["values"]
+    assert executed == values
+    assert type(executed["text"]) is str
+    assert type(executed["integer"]) is int
+    assert type(executed["decimal"]) is float
+    assert type(executed["enabled"]) is bool
 
 
 def test_http_transport_uses_exact_routes_credentials_and_bodies() -> None:
@@ -526,16 +570,12 @@ def test_http_transport_uses_exact_routes_credentials_and_bodies() -> None:
     ]
     assert seen[0].headers["Authorization"] == "Bearer oai_ingest_enrollment"
     assert all(
-        request.headers["Authorization"] == "Bearer " + "oar_" + "f" * 64
-        for request in seen[1:]
+        request.headers["Authorization"] == "Bearer " + "oar_" + "f" * 64 for request in seen[1:]
     )
     assert all(request.headers["Content-Type"] == "application/json" for request in seen)
     assert json.loads(seen[2].content) == callback.model_dump(mode="json")
     assert "run_id" not in json.loads(seen[2].content)
-    assert all(
-        "secret" not in json.dumps(values)
-        for _event, values in audit.entries
-    )
+    assert all("secret" not in json.dumps(values) for _event, values in audit.entries)
 
 
 def test_http_transport_refuses_noncanonical_callback_run_uuid() -> None:
@@ -555,6 +595,28 @@ def test_http_transport_refuses_noncanonical_callback_run_uuid() -> None:
 
     with pytest.raises(RunnerTransportError, match="canonical run UUID"):
         transport.callback("run-1", WireModel(schema_version="invalid"))
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "http://app.openadapt.ai",
+        "https://APP.openadapt.ai",
+        "https://app.openadapt.ai/",
+        "https://app.openadapt.ai:443",
+        "https://user@app.openadapt.ai",
+        "https://app.openadapt.ai/path",
+    ],
+)
+def test_http_transport_requires_one_canonical_https_origin(host: str) -> None:
+    with pytest.raises(RunnerTransportError, match="origin"):
+        HttpHostedRunnerTransport(
+            host=host,
+            contract=CONTRACT,
+            enrollment_token="enrollment-token",
+            runner_token="oar_" + "f" * 64,
+            audit=FakeAudit(),
+        )
 
 
 def test_http_callback_retries_exact_body_after_lost_accepted_response() -> None:
@@ -611,8 +673,7 @@ def test_http_callback_retries_exact_body_after_lost_accepted_response() -> None
     ]
     assert requests[0].content == requests[1].content
     assert all(
-        request.headers["Authorization"] == "Bearer " + "oar_" + "f" * 64
-        for request in requests
+        request.headers["Authorization"] == "Bearer " + "oar_" + "f" * 64 for request in requests
     )
 
 
@@ -638,9 +699,7 @@ def test_http_callback_rejects_status_that_disagrees_with_http_code(
                     http_status,
                     headers={"Cache-Control": "no-store"},
                     json={
-                        "schema_version": (
-                            "openadapt.hosted-runner-callback-result/v1"
-                        ),
+                        "schema_version": ("openadapt.hosted-runner-callback-result/v1"),
                         "status": wire_status,
                         "run_id": run_id,
                         "outcome": "RECONCILIATION_REQUIRED",
@@ -708,6 +767,21 @@ def test_windows_journal_refuses_when_temp_file_acl_check_is_unavailable(
     assert list((tmp_path / "journal").glob("*.tmp")) == []
 
 
+@pytest.mark.skipif(hosted_runner._is_windows(), reason="POSIX mode check")
+def test_journal_refuses_to_unlink_an_unsafe_temporary_file(tmp_path: Path) -> None:
+    journal = hosted_runner.RunnerJournal(tmp_path / "journal")
+    dispatch_id = "77777777-7777-4777-8777-777777777777"
+    journal._secure_dir()
+    temporary = journal._dir / f".{dispatch_id}.unsafe.tmp"
+    temporary.write_text("credential-bearing")
+    temporary.chmod(0o644)
+
+    with pytest.raises(hosted_runner.RunnerJournalError, match="journal is unsafe"):
+        journal.clear_temporary(dispatch_id)
+
+    assert temporary.exists()
+
+
 def test_mismatched_callback_response_keeps_exact_callback_pending(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -742,35 +816,147 @@ def test_interrupted_lease_uses_recovery_binding_without_execute(
 ) -> None:
     adapter = FakeAdapter()
     transport = FakeTransport()
-    service = _service(tmp_path, monkeypatch, transport=transport, adapter=adapter)
+    service = _service(
+        tmp_path,
+        monkeypatch,
+        transport=transport,
+        adapter=adapter,
+        registered=True,
+    )
     dispatch = _dispatch("process-exit")
     binding = adapter.recovery_binding(dispatch)
+    target = hosted_runner.callback_url(
+        service.config.hosted_host,
+        str(dispatch.run_id),
+    )
     service.journal.record(
         str(dispatch.dispatch_id),
         phase,
         run_id=str(dispatch.run_id),
         workflow_id=str(dispatch.workflow_id),
+        callback_url=target,
         recovery_binding=binding.model_dump(mode="json"),
     )
 
-    assert service.tick() is None
+    assert service.tick() == 0.0
 
     assert adapter.execute_calls == []
     assert adapter.actuations == []
     assert transport.poll_requests == []
     assert len(adapter.reconciliation_calls) == 1
-    assert adapter.callback_build_calls == []
-    assert transport.callback_requests == []
+    assert [item.model_dump(mode="json") for item in adapter.callback_build_calls] == [
+        binding.model_dump(mode="json")
+    ]
+    assert len(transport.callback_requests) == 1
+    assert transport.callback_requests[0][0] == str(dispatch.run_id)
+    assert transport.callback_requests[0][1]["events"][-1]["outcome"] == "RECONCILIATION_REQUIRED"
     retained_entry = service.journal.get(str(dispatch.dispatch_id))
     assert retained_entry is not None
-    assert retained_entry["phase"] == "reconciliation_required"
+    assert retained_entry["phase"] == "finished"
     assert retained_entry["outcome"] == "RECONCILIATION_REQUIRED"
     retained = json.dumps(retained_entry)
     assert "delivery_authority_token" not in retained
     assert dispatch.delivery_authority_token not in retained
+    assert dispatch.lease_token not in retained
     assert dispatch.lease_token not in json.dumps(service.status())
-    assert service.status()["state"] == "error"
-    assert "will not run more hosted work" in service.status()["last_error"]
+    assert service.status()["state"] == "polling"
+    assert service.status()["last_error"] is None
+
+
+def test_interrupted_callback_ambiguity_keeps_private_state_without_reexecution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = FakeAdapter()
+    transport = FakeTransport()
+    transport.callback_failures = 1
+    service = _service(
+        tmp_path,
+        monkeypatch,
+        transport=transport,
+        adapter=adapter,
+        registered=True,
+    )
+    dispatch = _dispatch("interrupted-callback-ambiguity")
+    binding = adapter.recovery_binding(dispatch)
+    target = hosted_runner.callback_url(
+        service.config.hosted_host,
+        str(dispatch.run_id),
+    )
+    service.journal.record(
+        str(dispatch.dispatch_id),
+        "executing",
+        run_id=str(dispatch.run_id),
+        workflow_id=str(dispatch.workflow_id),
+        callback_url=target,
+        recovery_binding=binding.model_dump(mode="json"),
+    )
+
+    delay = service.tick()
+
+    assert delay is not None and delay > 0
+    pending = service.journal.get(str(dispatch.dispatch_id))
+    assert pending is not None
+    assert pending["phase"] == "callback_pending"
+    assert pending["outcome"] == "RECONCILIATION_REQUIRED"
+    assert pending["callback_url"] == target
+    assert pending["callback"]["lease_token"] == dispatch.lease_token
+    assert adapter.execute_calls == []
+    assert transport.poll_requests == []
+    assert dispatch.lease_token not in json.dumps(service.status())
+    assert dispatch.lease_token not in json.dumps(service.services.audit.entries)
+    stale_temporary = service.journal._dir / (
+        f".{dispatch.dispatch_id}.accepted-before-replace.tmp"
+    )
+    stale_temporary.write_text(json.dumps({"lease_token": dispatch.lease_token}))
+    stale_temporary.chmod(0o600)
+
+    assert service.tick() == 0.0
+    finished = service.journal.get(str(dispatch.dispatch_id))
+    assert finished is not None
+    assert finished["phase"] == "finished"
+    assert finished["callback"] is None
+    assert dispatch.lease_token not in json.dumps(finished)
+    assert not stale_temporary.exists()
+    assert adapter.execute_calls == []
+    assert transport.poll_requests == []
+
+
+def test_interrupted_callback_uses_retained_url_after_config_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = FakeAdapter()
+    transport = FakeTransport()
+    service = _service(
+        tmp_path,
+        monkeypatch,
+        transport=transport,
+        adapter=adapter,
+        registered=True,
+    )
+    dispatch = _dispatch("retained-callback-target")
+    binding = adapter.recovery_binding(dispatch)
+    retained_target = hosted_runner.callback_url(
+        "https://app.openadapt.ai",
+        str(dispatch.run_id),
+    )
+    service.journal.record(
+        str(dispatch.dispatch_id),
+        "executing",
+        run_id=str(dispatch.run_id),
+        workflow_id=str(dispatch.workflow_id),
+        callback_url=retained_target,
+        recovery_binding=binding.model_dump(mode="json"),
+    )
+    service.config.hosted_host = "https://different.example"
+
+    assert service.tick() == 0.0
+
+    assert transport.callback_target(str(dispatch.run_id)) == retained_target
+    assert len(transport.callback_requests) == 1
+    assert transport.poll_requests == []
+    assert adapter.execute_calls == []
 
 
 def test_air_gapped_enable_refuses_before_loading_flow_or_network(tmp_path: Path) -> None:
@@ -832,7 +1018,7 @@ def test_missing_protected_runner_host_refuses_before_network_or_thread(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class MissingHostAdapter(FakeAdapter):
-        def registration_request(self, **_values: Any) -> WireModel:
+        def protected_runner_origin(self, _runner_config: Path) -> str:
             raise ValueError("hosted runner requires a protected runner host origin")
 
     adapter = MissingHostAdapter()
@@ -852,3 +1038,42 @@ def test_missing_protected_runner_host_refuses_before_network_or_thread(
     assert transport.register_requests == []
     assert transport.poll_requests == []
     assert service._thread is None
+
+
+def test_desktop_host_mismatch_refuses_before_network(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = FakeAdapter()
+    transport = FakeTransport()
+    service = _service(tmp_path, monkeypatch, transport=transport, adapter=adapter)
+    service.config.hosted_host = "https://different.example"
+
+    assert service.tick() is None
+
+    assert transport.register_requests == []
+    assert transport.poll_requests == []
+    assert service.status()["state"] == "error"
+    assert "differs from the protected runner host" in service.status()["last_error"]
+
+
+def test_dispatch_refuses_callback_target_outside_the_bound_transport_origin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RedirectingTransport(FakeTransport):
+        def callback_target(self, run_id: str) -> str:
+            return hosted_runner.callback_url("https://other.example", run_id)
+
+    adapter = FakeAdapter()
+    transport = RedirectingTransport()
+    dispatch = _dispatch("redirected-callback-target")
+    transport.queue.append(dispatch)
+    service = _service(tmp_path, monkeypatch, transport=transport, adapter=adapter)
+
+    delay = service.tick()
+
+    assert delay is not None and delay > 0
+    assert adapter.execute_calls == []
+    assert transport.callback_requests == []
+    assert service.journal.get(str(dispatch.dispatch_id)) is None

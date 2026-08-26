@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 import httpx
 from loguru import logger
@@ -46,15 +47,66 @@ def callback_path(run_id: str) -> str:
     return f"/api/runners/runs/{run_id}/callback"
 
 
+def canonical_https_origin(host: str) -> str:
+    """Require one lowercase HTTPS origin with no implicit-normalization drift."""
+
+    if not isinstance(host, str):
+        raise RunnerTransportError("The hosted runner origin is invalid.")
+    try:
+        parsed = urlsplit(host)
+        port = parsed.port
+    except (TypeError, ValueError) as exc:
+        raise RunnerTransportError("The hosted runner origin is invalid.") from exc
+    canonical = f"https://{parsed.netloc}"
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.hostname != parsed.hostname.lower()
+        or parsed.netloc != parsed.netloc.lower()
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+        or port == 443
+        or host != canonical
+    ):
+        raise RunnerTransportError("The hosted runner origin is not canonical.")
+    return canonical
+
+
+def callback_url(host: str, run_id: str) -> str:
+    """Return the exact canonical HTTPS callback URL for one run."""
+
+    if not _UUID_V1_8.fullmatch(str(run_id)):
+        raise RunnerTransportError("The callback target is invalid.")
+    return f"{canonical_https_origin(host)}{callback_path(str(run_id))}"
+
+
+def callback_origin(target: str, run_id: str) -> str:
+    """Validate a retained callback URL and return its exact HTTPS origin."""
+
+    try:
+        parsed = urlsplit(target)
+    except (TypeError, ValueError) as exc:
+        raise RunnerJournalError("runner callback target is invalid") from exc
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    try:
+        expected = callback_url(origin, run_id)
+    except RunnerTransportError as exc:
+        raise RunnerJournalError("runner callback target is invalid") from exc
+    if target != expected:
+        raise RunnerJournalError("runner callback target is invalid")
+    return origin
+
+
 DEFAULT_WAIT_S = 25
 DEFAULT_LEASE_S = 900
 BACKOFF_BASE_S = 1.0
 BACKOFF_CAP_S = 60.0
 
 _SAFE_LOCAL_ID = re.compile(r"[A-Za-z0-9_.:-]{1,200}")
-_UUID_V1_8 = re.compile(
-    r"[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"
-)
+_UUID_V1_8 = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
 _RUNNER_TOKEN = re.compile(r"oar_[a-f0-9]{64}")
 MAX_JOURNAL_BYTES = 8 * 1024 * 1024
 
@@ -139,9 +191,7 @@ def _require_private_windows_acl(descriptor: int) -> None:
 
         private = windows_descriptor_has_private_acl(descriptor)
     except Exception as exc:
-        raise RunnerJournalError(
-            "Windows runner journal ACL verification is unavailable"
-        ) from exc
+        raise RunnerJournalError("Windows runner journal ACL verification is unavailable") from exc
     if not private:
         raise RunnerJournalError("Windows runner journal ACL is unsafe")
 
@@ -222,8 +272,7 @@ class RunnerJournal:
             unsafe_permissions = False
         else:
             unsafe_permissions = (
-                opened.st_uid != os.geteuid()
-                or stat.S_IMODE(opened.st_mode) != 0o600
+                opened.st_uid != os.geteuid() or stat.S_IMODE(opened.st_mode) != 0o600
             )
         if (
             not stat.S_ISREG(before.st_mode)
@@ -233,6 +282,7 @@ class RunnerJournal:
             or stat.S_ISLNK(after.st_mode)
             or identity_changed
             or unsafe_permissions
+            or opened.st_nlink != 1
             or opened.st_size > MAX_JOURNAL_BYTES
         ):
             raise RunnerJournalError("runner observation journal is unsafe")
@@ -262,9 +312,7 @@ class RunnerJournal:
                 chunks.append(chunk)
                 remaining -= len(chunk)
             if os.read(descriptor, 1):
-                raise RunnerJournalError(
-                    "runner observation journal changed during the safe read"
-                )
+                raise RunnerJournalError("runner observation journal changed during the safe read")
             after = os.fstat(descriptor)
             if any(
                 (
@@ -272,9 +320,7 @@ class RunnerJournal:
                     for field in ("st_dev", "st_ino", "st_size", "st_mtime_ns")
                 )
             ):
-                raise RunnerJournalError(
-                    "runner observation journal changed during the safe read"
-                )
+                raise RunnerJournalError("runner observation journal changed during the safe read")
             value = json.loads(b"".join(chunks).decode("utf-8"))
         except RunnerJournalError:
             raise
@@ -338,6 +384,41 @@ class RunnerJournal:
                 except FileNotFoundError:
                     pass
 
+    def clear_temporary(self, dispatch_id: str) -> None:
+        """Remove private temporary copies after Cloud accepts the callback."""
+
+        self._path(dispatch_id)
+        with self._lock:
+            self._secure_dir()
+            for path in self._dir.glob(f".{dispatch_id}.*.tmp"):
+                try:
+                    before = path.lstat()
+                except FileNotFoundError:
+                    continue
+                except OSError as exc:
+                    raise RunnerJournalError("runner observation journal is unavailable") from exc
+                descriptor = -1
+                try:
+                    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                    descriptor = os.open(path, flags)
+                    self._opened_metadata(path, descriptor, before)
+                    os.unlink(path)
+                except RunnerJournalError:
+                    raise
+                except OSError as exc:
+                    raise RunnerJournalError(
+                        "runner observation journal temporary file is unavailable"
+                    ) from exc
+                finally:
+                    if descriptor >= 0:
+                        os.close(descriptor)
+            if not _is_windows():
+                directory_descriptor = os.open(self._dir, os.O_RDONLY)
+                try:
+                    os.fsync(directory_descriptor)
+                finally:
+                    os.close(directory_descriptor)
+
     def entries(self) -> list[dict[str, Any]]:
         if not self._dir.exists():
             return []
@@ -362,8 +443,7 @@ class RunnerJournal:
             "updated_at",
         )
         return [
-            {key: entry[key] for key in keep if key in entry}
-            for entry in self.entries()[:limit]
+            {key: entry[key] for key in keep if key in entry} for entry in self.entries()[:limit]
         ]
 
 
@@ -380,7 +460,7 @@ class HttpHostedRunnerTransport:
         audit: Any,
         client: httpx.Client | None = None,
     ) -> None:
-        self.host = host.rstrip("/")
+        self.host = canonical_https_origin(host)
         self.contract = contract
         self._enrollment_token = enrollment_token
         self._runner_token = runner_token
@@ -399,6 +479,11 @@ class HttpHostedRunnerTransport:
         if not isinstance(token, str) or _RUNNER_TOKEN.fullmatch(token) is None:
             raise ReauthRequired("Cloud returned an invalid runner credential")
         self._runner_token = token
+
+    def callback_target(self, run_id: str) -> str:
+        """Return the exact callback URL used by this transport."""
+
+        return callback_url(self.host, run_id)
 
     def _headers(self, *, enrollment: bool) -> dict[str, str]:
         token = self._enrollment_token if enrollment else self._runner_token
@@ -462,9 +547,7 @@ class HttpHostedRunnerTransport:
         if response.status_code == 401:
             raise ReauthRequired("The hosted runner credential was rejected.")
         if response.status_code == 409:
-            raise RunnerSessionStale(
-                "The hosted runner session or its admission binding is stale."
-            )
+            raise RunnerSessionStale("The hosted runner session or its admission binding is stale.")
         if (response.headers.get("cache-control") or "").strip().lower() != "no-store":
             raise RunnerTransportError(
                 f"The hosted runner {operation} response was not marked no-store."
@@ -476,8 +559,7 @@ class HttpHostedRunnerTransport:
         )
         if response.status_code not in expected_statuses:
             raise RunnerTransportError(
-                f"The hosted runner {operation} request returned HTTP "
-                f"{response.status_code}."
+                f"The hosted runner {operation} request returned HTTP {response.status_code}."
             )
         try:
             parsed = _model_validate(response_type, response.json())
@@ -516,6 +598,9 @@ class HttpHostedRunnerTransport:
         run_id = str(run_id)
         if not _UUID_V1_8.fullmatch(run_id):
             raise RunnerTransportError("The callback has no canonical run UUID")
+        target = self.callback_target(run_id)
+        if callback_origin(target, run_id) != self.host:
+            raise RunnerTransportError("The callback target differs from its transport.")
         return self._post(
             callback_path(run_id),
             request,
@@ -612,20 +697,27 @@ class RunnerService:
         contract: Any,
         enrollment_token: str,
         runner_token: str,
+        host: str,
     ) -> HttpHostedRunnerTransport:
         return HttpHostedRunnerTransport(
-            host=self.config.hosted_host,
+            host=host,
             contract=contract,
             enrollment_token=enrollment_token,
             runner_token=runner_token,
             audit=self.services.audit,
         )
 
-    def _registration_request(self, adapter: Any) -> Any:
+    def _registration_request(self, adapter: Any) -> tuple[Any, str]:
         from engine import __version__
 
         try:
-            return adapter.registration_request(
+            protected_origin = self._protected_runner_origin(adapter)
+            configured_origin = canonical_https_origin(self.config.hosted_host)
+            if protected_origin != configured_origin:
+                raise RunnerTrustManifestError(
+                    "The Desktop hosted origin differs from the protected runner host."
+                )
+            request = adapter.registration_request(
                 runner_config=self.runner_config,
                 name=_platform.node() or "desktop-runner",
                 platform=_platform_name(),
@@ -634,6 +726,15 @@ class RunnerService:
                 mode="attended",
                 capabilities=_capabilities(),
             )
+            if self._protected_runner_origin(adapter) != configured_origin:
+                raise RunnerTrustManifestError(
+                    "The protected runner host changed during registration."
+                )
+            return request, configured_origin
+        except RunnerTrustManifestError:
+            raise
+        except RunnerTransportError as exc:
+            raise RunnerTrustManifestError(str(exc)) from exc
         except ValueError as exc:
             if str(exc) in {
                 "hosted runner requires a protected runner host origin",
@@ -646,6 +747,37 @@ class RunnerService:
                     "Desktop won't edit this operator trust manifest."
                 ) from exc
             raise
+
+    def _protected_runner_origin(self, adapter: Any) -> str:
+        accessor = getattr(adapter, "protected_runner_origin", None)
+        if not callable(accessor):
+            raise HostedRunnerAdapterUnavailableError(
+                "This Desktop build needs a newer bundled OpenAdapt Flow runtime."
+            )
+        try:
+            origin = accessor(self.runner_config)
+        except ValueError as exc:
+            if str(exc) in {
+                "hosted runner requires a protected runner host origin",
+                "protected runner host origin is invalid",
+                "protected runner host is not one canonical HTTPS origin",
+            }:
+                raise RunnerTrustManifestError(
+                    f'Set [runner].host = "{self.config.hosted_host}" in '
+                    f"{self.runner_config} before you enable hosted execution. "
+                    "Desktop won't edit this operator trust manifest."
+                ) from exc
+            raise
+        if not isinstance(origin, str):
+            raise HostedRunnerAdapterUnavailableError(
+                "The bundled OpenAdapt Flow hosted-runner contract is incomplete."
+            )
+        try:
+            return canonical_https_origin(origin)
+        except RunnerTransportError as exc:
+            raise HostedRunnerAdapterUnavailableError(
+                "The bundled OpenAdapt Flow hosted-runner contract is incomplete."
+            ) from exc
 
     def _registration_is_current(self, stored: dict[str, Any], request: Any) -> bool:
         request_data = _model_dump(request)
@@ -664,17 +796,22 @@ class RunnerService:
                 "The hosted runner is unavailable while storage mode is air-gapped."
             )
         contract, adapter = self._runtime()
-        request = self._registration_request(adapter)
-        stored = load_runner_credential(self.config.hosted_host) or {}
-        enrollment = auth_header(self.config.hosted_host).get("Authorization", "")
+        request, origin = self._registration_request(adapter)
+        stored = load_runner_credential(origin) or {}
+        enrollment = auth_header(origin).get("Authorization", "")
         enrollment_token = enrollment.removeprefix("Bearer ") if enrollment else ""
         runner_token = str(stored.get("runner_token") or "")
         if self._registration_is_current(stored, request):
-            if self._transport is None or self._registration != stored:
+            if (
+                self._transport is None
+                or self._registration != stored
+                or getattr(self._transport, "host", None) != origin
+            ):
                 transport = self._transport_factory(
                     contract=contract,
                     enrollment_token=enrollment_token,
                     runner_token=runner_token,
+                    host=origin,
                 )
                 self._replace_transport(transport)
             self._registration = stored
@@ -687,19 +824,16 @@ class RunnerService:
             contract=contract,
             enrollment_token=enrollment_token,
             runner_token=runner_token,
+            host=origin,
         )
         try:
             response = transport.register(request)
             response_data = _model_dump(response)
             registration = {
                 **response_data,
-                "local_runtime_release": _model_dump(request)[
-                    "local_runtime_release"
-                ],
+                "local_runtime_release": _model_dump(request)["local_runtime_release"],
             }
-            if not store_runner_registration_secure(
-                self.config.hosted_host, registration
-            ):
+            if not store_runner_registration_secure(origin, registration):
                 raise RunnerTransportError(
                     "Desktop could not store the new runner credential in the OS keychain."
                 )
@@ -731,9 +865,7 @@ class RunnerService:
         )
 
     def status(self) -> dict[str, Any]:
-        registration = self._registration or load_runner_credential(
-            self.config.hosted_host
-        ) or {}
+        registration = self._registration or load_runner_credential(self.config.hosted_host) or {}
         return {
             "enabled": bool(self.config.runner_enabled),
             "state": self._state,
@@ -749,9 +881,7 @@ class RunnerService:
         self.config.runner_enabled = True
         if self.config.storage_mode == "air-gapped":
             self.config.runner_enabled = False
-            self._set_error(
-                "The hosted runner is unavailable while storage mode is air-gapped."
-            )
+            self._set_error("The hosted runner is unavailable while storage mode is air-gapped.")
             return self.status()
         try:
             self._runtime()
@@ -808,18 +938,17 @@ class RunnerService:
         with self._tick_lock:
             try:
                 contract, adapter = self._runtime()
-                if self._retain_interrupted_reconciliations(contract, adapter):
-                    return None
-                contract, adapter, registration = self._connect()
-                transport = self._transport
-                if transport is None:
-                    raise RunnerTransportError("The hosted runner transport is absent.")
-                if self._send_pending_callbacks(contract, transport):
+                self._prepare_interrupted_callbacks(contract, adapter)
+                if self._send_pending_callbacks(contract):
                     self._last_seen_at = datetime.now(timezone.utc).isoformat()
                     self._attempt = 0
                     self._last_error = None
                     self._set_state("polling")
                     return 0.0
+                contract, adapter, registration = self._connect()
+                transport = self._transport
+                if transport is None:
+                    raise RunnerTransportError("The hosted runner transport is absent.")
                 self._set_state("polling")
                 dispatch = transport.poll(self._poll_request(contract, registration))
                 self._last_seen_at = datetime.now(timezone.utc).isoformat()
@@ -846,8 +975,7 @@ class RunnerService:
                     kind=type(exc).__name__,
                 )
                 self._set_error(
-                    f"The hosted runner stopped before a terminal callback "
-                    f"({type(exc).__name__})."
+                    f"The hosted runner stopped before a terminal callback ({type(exc).__name__})."
                 )
                 return None
             delay = backoff_delay(self._attempt, self._rng)
@@ -870,11 +998,22 @@ class RunnerService:
                 "Cloud replayed a terminal hosted dispatch. Re-enroll this runner."
             )
         recovery_binding = adapter.recovery_binding(dispatch)
+        protected_origin = self._protected_runner_origin(adapter)
+        configured_origin = canonical_https_origin(self.config.hosted_host)
+        if (
+            protected_origin != configured_origin
+            or getattr(transport, "host", None) != protected_origin
+        ):
+            raise RunnerTrustManifestError(
+                "The Desktop, Flow, and active transport origins do not match."
+            )
+        target = self._exact_callback_target(transport, run_id)
         self.journal.record(
             dispatch_id,
             "leased",
             run_id=run_id,
             workflow_id=workflow_id,
+            callback_url=target,
             recovery_binding=_model_dump(recovery_binding),
         )
         self.journal.record(dispatch_id, "executing")
@@ -900,29 +1039,58 @@ class RunnerService:
             uncertain_delivery=uncertain,
             callback=_model_dump(callback),
         )
-        response = transport.callback(run_id, callback)
+        response = self._send_exact_callback(transport, run_id, target, callback)
         self._finish_callback(dispatch_id, response)
         self._set_state("polling")
 
-    def _retain_interrupted_reconciliations(
+    @staticmethod
+    def _exact_callback_target(transport: Any, run_id: str) -> str:
+        target_for = getattr(transport, "callback_target", None)
+        if not callable(target_for):
+            raise RunnerTransportError(
+                "The hosted runner transport cannot bind an exact callback target."
+            )
+        target = target_for(run_id)
+        if not isinstance(target, str):
+            raise RunnerTransportError("The hosted runner callback target is invalid.")
+        host = canonical_https_origin(getattr(transport, "host", None))
+        if target != callback_url(host, run_id):
+            raise RunnerTransportError(
+                "The hosted runner callback target differs from its transport."
+            )
+        return target
+
+    def _send_exact_callback(
+        self,
+        transport: Any,
+        run_id: str,
+        target: str,
+        request: Any,
+    ) -> Any:
+        if self._exact_callback_target(transport, run_id) != target:
+            raise RunnerTransportError("The hosted runner callback target changed after the lease.")
+        return transport.callback(run_id, request)
+
+    def _prepare_interrupted_callbacks(
         self,
         contract: Any,
         adapter: Any,
-    ) -> bool:
-        """Stop on a crash window without executing or inventing a callback."""
+    ) -> int:
+        """Convert every interrupted execution to an exact fail-safe callback."""
 
-        reconciled = False
+        prepared = 0
         for entry in self.journal.entries():
-            if entry.get("phase") == "reconciliation_required":
-                reconciled = True
+            if entry.get("phase") == "callback_pending":
                 continue
-            if entry.get("phase") not in {"leased", "executing"}:
+            if entry.get("phase") not in {
+                "leased",
+                "executing",
+                "reconciliation_required",
+            }:
                 continue
             binding_data = entry.get("recovery_binding")
             if not isinstance(binding_data, dict):
-                raise RunnerJournalError(
-                    "runner execution journal is missing its recovery binding"
-                )
+                raise RunnerJournalError("runner execution journal is missing its recovery binding")
             binding = _model_validate(contract.HostedRecoveryBinding, binding_data)
             interrupted_phase = str(entry["phase"])
             result = adapter.reconciliation_required(
@@ -933,36 +1101,52 @@ class RunnerService:
             uncertain = bool(getattr(result, "uncertain_delivery", False))
             started = bool(getattr(result, "started", False))
             if outcome != "RECONCILIATION_REQUIRED" or not uncertain or not started:
-                raise RunnerJournalError(
-                    "Flow returned an unsafe interrupted-run classification"
-                )
+                raise RunnerJournalError("Flow returned an unsafe interrupted-run classification")
             dispatch_id = str(entry["dispatch_id"])
             run_id = str(entry.get("run_id") or "")
+            target = entry.get("callback_url")
+            if not isinstance(target, str):
+                raise RunnerJournalError(
+                    "runner execution journal is missing its exact callback target"
+                )
+            callback_origin(target, run_id)
+            callback = adapter.callback_request(binding, result)
             self.journal.record(
                 dispatch_id,
-                "reconciliation_required",
+                "callback_pending",
                 outcome=outcome,
                 uncertain_delivery=True,
+                callback=_model_dump(callback),
+                recovery_binding=None,
             )
-            workflow_id = str(entry.get("workflow_id") or "")
-            run_dir = self.config.data_dir / "runner" / "runs" / run_id
-            self._record_local_result(run_id, workflow_id, run_dir, outcome)
             self.services.audit.log(
-                "hosted_runner_reconciliation_pending",
+                "hosted_runner_recovery_callback_pending",
                 dispatch_id=dispatch_id,
                 run_id=run_id,
                 outcome=outcome,
             )
-            reconciled = True
-        if reconciled:
-            self._set_error(
-                "A hosted run needs reconciliation because Desktop stopped before "
-                "it received Flow's result. Desktop will not run more hosted work "
-                "until the hosted recovery update is installed."
-            )
-        return reconciled
+            prepared += 1
+        return prepared
 
-    def _send_pending_callbacks(self, contract: Any, transport: Any) -> bool:
+    def _callback_transport(self, contract: Any, origin: str) -> tuple[Any, bool]:
+        current = self._transport
+        if current is not None and getattr(current, "host", None) == origin:
+            return current, False
+        stored = load_runner_credential(origin) or {}
+        runner_token = str(stored.get("runner_token") or "")
+        if _RUNNER_TOKEN.fullmatch(runner_token) is None:
+            raise ReauthRequired("The retained hosted callback has no matching runner credential.")
+        enrollment = auth_header(origin).get("Authorization", "")
+        enrollment_token = enrollment.removeprefix("Bearer ") if enrollment else ""
+        transport = self._transport_factory(
+            contract=contract,
+            enrollment_token=enrollment_token,
+            runner_token=runner_token,
+            host=origin,
+        )
+        return transport, True
+
+    def _send_pending_callbacks(self, contract: Any) -> bool:
         """Resend retained callbacks without polling or executing a dispatch."""
 
         sent = False
@@ -972,12 +1156,26 @@ class RunnerService:
             callback_data = entry.get("callback")
             run_id = entry.get("run_id")
             if not isinstance(callback_data, dict) or not isinstance(run_id, str):
-                raise RunnerJournalError(
-                    "runner callback journal is missing its exact request"
-                )
+                raise RunnerJournalError("runner callback journal is missing its exact request")
+            target = entry.get("callback_url")
+            if not isinstance(target, str):
+                raise RunnerJournalError("runner callback journal is missing its exact target")
+            origin = callback_origin(target, run_id)
             callback = _model_validate(contract.CallbackRequest, callback_data)
-            response = transport.callback(run_id, callback)
-            self._finish_callback(str(entry["dispatch_id"]), response)
+            transport, close_after = self._callback_transport(contract, origin)
+            try:
+                response = self._send_exact_callback(
+                    transport,
+                    run_id,
+                    target,
+                    callback,
+                )
+                self._finish_callback(str(entry["dispatch_id"]), response)
+            finally:
+                if close_after:
+                    close = getattr(transport, "close", None)
+                    if callable(close):
+                        close()
             sent = True
         return sent
 
@@ -1001,6 +1199,7 @@ class RunnerService:
                 "Cloud returned a callback result for a different hosted run."
             )
         run_dir = self.config.data_dir / "runner" / "runs" / run_id
+        self.journal.clear_temporary(dispatch_id)
         self.journal.record(
             dispatch_id,
             "finished",
