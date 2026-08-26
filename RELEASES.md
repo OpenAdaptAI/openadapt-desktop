@@ -95,7 +95,7 @@ addressed directly instead of by withholding the artifact:
 
 - `desktop-vX.Y.Z` **stays a prerelease**. Flipping it to non-prerelease would
   make the native lane GitHub's "Latest" outright, and that remains forbidden.
-- Every filename encodes its trust state — `…-developer-id-notarized.dmg`,
+- Every filename encodes its trust state: `…-developer-id-notarized.dmg`,
   `…-authenticode.msi`, or `…-github-attested.AppImage`.
 - The pointer block leads with the required platform trust contracts and gives
   the `sha256sum -c` and `gh attestation verify` commands.
@@ -107,9 +107,9 @@ addressed directly instead of by withholding the artifact:
   `<!-- installer-release -->` marker, so the machine-readable selection rule
   below is unchanged and download-page consumers keep resolving `desktop-v*`.
 
-`desktop-vX.Y.Z` therefore remains the canonical installer release — build
-provenance, attestations, and supersession notices are bound to it — and
-`vX.Y.Z` carries a byte-identical convenience copy.
+`desktop-vX.Y.Z` therefore remains the canonical installer release. Its build
+provenance, attestations, and supersession notices stay bound to it. `vX.Y.Z`
+carries a byte-identical convenience copy.
 
 ## Freshness automation
 
@@ -194,13 +194,13 @@ Production activation is a separate action after candidate publication:
 4. Verify the appended cache attestation and the next scheduled drift check.
 
 Until these steps pass, the candidate is not actively admitted. A failed
-promotion does not change or remove a prior cache.
+promotion doesn't change or remove a prior cache.
 
 ## Supersession
 
 After the verified index and candidate channel are published, the same transaction edits
 every lower marked `desktop-v*` prerelease to carry a prominent "Superseded by
-`desktop-vX.Y.Z` — do not use"
+`desktop-vX.Y.Z`: do not use"
 notice at the top of its notes (machine marker:
 `<!-- openadapt-superseded-by: desktop-vX.Y.Z -->`). CI never
 deletes releases or assets; superseded assets are retained for provenance and

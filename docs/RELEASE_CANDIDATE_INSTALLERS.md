@@ -48,9 +48,9 @@ that pull request. The freshness workflow never creates a tag or release. A
 maintainer then dispatches the Native Installer Release workflow from reviewed
 `main`. That one transaction verifies the engine receipt, creates the matching
 `desktop-vX.Y.Z` tag, publishes and verifies the installers, mirrors them to the
-engine release, and updates the signed candidate channel. This transaction does
-not change the admission-driven Production channel.
-All lower native prereleases receive a prominent "Superseded — do not use"
+engine release, and updates the signed candidate channel. This transaction
+doesn't change the admission-driven Production channel.
+All lower native prereleases receive a prominent "Superseded: do not use"
 notice. Their assets remain for provenance. The full two-lane release policy
 and its planned convergence into a single release are documented in
 [RELEASES.md](https://github.com/OpenAdaptAI/openadapt-desktop/blob/main/RELEASES.md).
@@ -127,8 +127,8 @@ and Windows signing credential sets. A missing or partial set fails the build.
   SHA-256 and an RFC 3161 timestamp) **or** Azure Trusted Signing
   (`AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`,
   `TRUSTED_SIGNING_ENDPOINT`, `TRUSTED_SIGNING_ACCOUNT`,
-  `TRUSTED_SIGNING_CERTIFICATE_PROFILE`) — the cheaper, token-free option for a
-  startup. Configure one set, not both. Both produce a publicly trusted,
+  `TRUSTED_SIGNING_CERTIFICATE_PROFILE`), which is the cheaper, token-free option
+  for a startup. Configure one set, not both. Both produce a publicly trusted,
   timestamped `authenticode` artifact.
 - Linux uses the required GitHub OIDC exact-byte attestation above. It has no
   founder-managed secret and is not described as native-signed.
@@ -142,9 +142,9 @@ Before a release, the repository must also have a no-bypass pull-request
 ruleset for `main` and immutable release-tag rules for both `v*` and
 `desktop-v*`. The engine workflow can create `v*`. The explicitly dispatched
 native release workflow can create `desktop-v*`. Neither release identity can
-update or delete a tag. The historical `desktop-v0.15.0` prerelease does not satisfy the new
-trust contract.
+update or delete a tag. The historical `desktop-v0.15.0` prerelease doesn't
+satisfy the new trust contract.
 
-The founder activation runbook — exactly which certificates to buy, their costs,
-how to add each secret, and what each public surface may then truthfully claim —
-is in [CODE_SIGNING.md](CODE_SIGNING.md).
+The founder activation runbook lists the exact certificates to buy, their costs,
+the secrets to add, and the claims each public surface can make. See
+[CODE_SIGNING.md](CODE_SIGNING.md).
