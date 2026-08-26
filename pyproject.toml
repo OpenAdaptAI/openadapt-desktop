@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "openadapt-desktop"
 version = "0.15.0"
-description = "Desktop authoring surface and local capture/review tooling for OpenAdapt workflows"
+description = "Desktop authoring and governed execution surface for OpenAdapt workflows"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
