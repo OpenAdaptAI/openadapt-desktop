@@ -187,6 +187,16 @@ jobs:
           persist-credentials: false
           token: ${{ steps.release_app.outputs.token }}
 
+      - name: Require the exact release App identity
+        env:
+          RELEASE_APP_SLUG: ${{ steps.release_app.outputs.app-slug }}
+        shell: bash
+        run: |
+          if [ "${RELEASE_APP_SLUG}" != openadapt-release ]; then
+            echo "error: release token came from ${RELEASE_APP_SLUG:-an unknown App}" >&2
+            exit 1
+          fi
+
       - name: Create only the exact candidate tag
         env:
           APP_TOKEN: ${{ steps.release_app.outputs.token }}
@@ -350,6 +360,36 @@ jobs:
           python scripts/check_source_boundary.py --require-dist
           python scripts/verify_build_artifact.py python-distribution
 
+      - name: Authenticate any existing PyPI files before skip-existing
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          status="$(curl --show-error --silent --location \
+            --connect-timeout 10 --max-time 30 \
+            --output pypi-existing.json \
+            --write-out '%{http_code}' \
+            "https://pypi.org/pypi/openadapt-desktop/${version}/json")"
+          if [ "${status}" = 404 ]; then
+            exit 0
+          fi
+          if [ "${status}" != 200 ]; then
+            echo "error: PyPI lookup returned HTTP ${status}" >&2
+            exit 1
+          fi
+          python scripts/verify_pypi_release.py \
+            --metadata pypi-existing.json \
+            --directory dist \
+            --version "${version}" \
+            --allow-subset
+          mkdir pypi-existing-files
+          while IFS=$'\t' read -r name url; do
+            curl --fail --show-error --silent --location \
+              --connect-timeout 10 --max-time 60 \
+              --output "pypi-existing-files/${name}" "${url}"
+            cmp "dist/${name}" "pypi-existing-files/${name}"
+          done < <(jq -r '.urls[] | [.filename, .url] | @tsv' pypi-existing.json)
+
       - name: Publish to PyPI with Trusted Publishing
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
@@ -381,6 +421,13 @@ jobs:
             --metadata pypi-release.json \
             --directory dist \
             --version "${version}"
+          mkdir pypi-published-files
+          while IFS=$'\t' read -r name url; do
+            curl --fail --show-error --silent --location \
+              --connect-timeout 10 --max-time 60 \
+              --output "pypi-published-files/${name}" "${url}"
+            cmp "dist/${name}" "pypi-published-files/${name}"
+          done < <(jq -r '.urls[] | [.filename, .url] | @tsv' pypi-release.json)
 
       - name: Mint the release App token for GitHub publication
         id: release_app
@@ -393,6 +440,16 @@ jobs:
           permission-contents: write
           permission-metadata: read
 
+      - name: Require the exact release App identity
+        env:
+          RELEASE_APP_SLUG: ${{ steps.release_app.outputs.app-slug }}
+        shell: bash
+        run: |
+          if [ "${RELEASE_APP_SLUG}" != openadapt-release ]; then
+            echo "error: release token came from ${RELEASE_APP_SLUG:-an unknown App}" >&2
+            exit 1
+          fi
+
       - name: Create or resume the exact GitHub Release
         env:
           GH_TOKEN: ${{ steps.release_app.outputs.token }}
@@ -401,31 +458,34 @@ jobs:
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
           title="OpenAdapt Desktop ${tag#v}"
-          if gh release view "${tag}" --json assets,isDraft,isPrerelease,tagName \
+          if gh release view "${tag}" --json assets,author,isDraft,isPrerelease,tagName \
             > release.json 2>/dev/null; then
             if ! jq -e --arg tag "${tag}" \
-              '.tagName == $tag and .isDraft == false and .isPrerelease == false' \
+              '.tagName == $tag and .isDraft == false and .isPrerelease == false and
+               .author.login == "openadapt-release[bot]"' \
               release.json >/dev/null; then
               echo "error: existing GitHub Release has the wrong identity" >&2
               exit 1
             fi
-            mkdir -p existing-assets
+            mkdir -p existing-assets existing-release-assets
+            gh release download "${tag}" --dir existing-release-assets --pattern '*'
+            gh release view "${tag}" \
+              --json author,databaseId,isDraft,isPrerelease,publishedAt,tagName,url \
+              > existing-engine-release.json
+            python scripts/native_release.py validate-engine-inventory \
+              --directory existing-release-assets \
+              --release existing-engine-release.json \
+              --repository "${GITHUB_REPOSITORY}" \
+              --engine-tag "${tag}" \
+              --engine-commit "${GITHUB_SHA}" \
+              --local-engine-directory dist
             jq -r '.assets[].name' release.json > existing-assets.txt
-            while IFS= read -r name; do
-              [ -n "${name}" ] || continue
-              if [ "${name}" = "openadapt-desktop-engine-release-provenance.json" ]; then
-                continue
-              fi
-              if [ "$(basename "${name}")" != "${name}" ] || [ ! -f "dist/${name}" ]; then
-                echo "error: existing release has an unexpected asset ${name}" >&2
-                exit 1
-              fi
-              gh release download "${tag}" --dir existing-assets --pattern "${name}"
-              cmp "dist/${name}" "existing-assets/${name}"
-            done < existing-assets.txt
             for path in dist/*.whl dist/*.tar.gz; do
               name="$(basename "${path}")"
-              if ! grep -qxF "${name}" existing-assets.txt; then
+              if grep -qxF "${name}" existing-assets.txt; then
+                gh release download "${tag}" --dir existing-assets --pattern "${name}"
+                cmp "${path}" "existing-assets/${name}"
+              else
                 gh release upload "${tag}" "${path}"
               fi
             done
@@ -441,6 +501,17 @@ jobs:
           for path in dist/*.whl dist/*.tar.gz; do
             cmp "${path}" "published-assets/$(basename "${path}")"
           done
+          gh release view "${tag}" \
+            --json author,databaseId,isDraft,isPrerelease,publishedAt,tagName,url \
+            > strict-engine-release.json
+          mkdir strict-engine-release-assets
+          gh release download "${tag}" --dir strict-engine-release-assets --pattern '*'
+          python scripts/native_release.py validate-engine-inventory \
+            --directory strict-engine-release-assets \
+            --release strict-engine-release.json \
+            --repository "${GITHUB_REPOSITORY}" \
+            --engine-tag "${tag}" \
+            --engine-commit "${GITHUB_SHA}"
 
       - name: Resolve the exact release receipt state
         id: receipt
@@ -451,7 +522,7 @@ jobs:
           set -euo pipefail
           engine_tag="${GITHUB_REF_NAME}"
           gh release view "${engine_tag}" \
-            --json databaseId,isDraft,isPrerelease,publishedAt,tagName,url \
+            --json author,databaseId,isDraft,isPrerelease,publishedAt,tagName,url \
             > engine-release.json
           mkdir engine-assets
           gh release download "${engine_tag}" --dir engine-assets \

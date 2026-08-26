@@ -46,7 +46,13 @@ def _local_distributions(directory: Path) -> dict[str, tuple[str, int, str]]:
     return result
 
 
-def verify_pypi_release(metadata_path: Path, directory: Path, version: str) -> None:
+def verify_pypi_release(
+    metadata_path: Path,
+    directory: Path,
+    version: str,
+    *,
+    allow_subset: bool = False,
+) -> None:
     """Require exact public names, sizes, and SHA-256 digests for one version."""
 
     if VERSION_PATTERN.fullmatch(version) is None:
@@ -94,7 +100,14 @@ def verify_pypi_release(metadata_path: Path, directory: Path, version: str) -> N
             entry["size"],
             entry["packagetype"],
         )
-    if published != local:
+    if allow_subset:
+        mismatched = {name: value for name, value in published.items() if local.get(name) != value}
+        if not published or mismatched:
+            raise ValueError(
+                "existing PyPI distributions are not a matching reviewed subset: "
+                f"published={published!r}, local={local!r}"
+            )
+    elif published != local:
         raise ValueError(
             "public PyPI distributions differ from the reviewed build: "
             f"published={published!r}, local={local!r}"
@@ -106,9 +119,15 @@ def main() -> int:
     parser.add_argument("--metadata", type=Path, required=True)
     parser.add_argument("--directory", type=Path, required=True)
     parser.add_argument("--version", required=True)
+    parser.add_argument("--allow-subset", action="store_true")
     args = parser.parse_args()
     try:
-        verify_pypi_release(args.metadata, args.directory, args.version)
+        verify_pypi_release(
+            args.metadata,
+            args.directory,
+            args.version,
+            allow_subset=args.allow_subset,
+        )
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         parser.exit(1, f"{exc}\n")
     return 0

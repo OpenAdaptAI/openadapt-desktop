@@ -96,9 +96,7 @@ def test_runtime_manifest_refuses_missing_probe_or_license(tmp_path: Path) -> No
 def test_embedded_runtime_manifest_pins_complete_reviewed_release() -> None:
     manifest = json.loads(
         (
-            Path(__file__).resolve().parents[1]
-            / "src-tauri"
-            / "ffmpeg-runtime-manifest.json"
+            Path(__file__).resolve().parents[1] / "src-tauri" / "ffmpeg-runtime-manifest.json"
         ).read_text()
     )
     assert manifest["schema_version"] == 1
@@ -118,15 +116,11 @@ def test_embedded_runtime_manifest_pins_complete_reviewed_release() -> None:
         )
         assert re.fullmatch(r"[0-9a-f]{64}", artifact["archive_sha256"])
         assert artifact["source"]["sha256"] == SOURCE_SHA256
-        assert (
-            artifact["source"]["signing_key_fingerprint"]
-            == SIGNING_KEY_FINGERPRINT
-        )
-        assert {
-            file.get("role")
-            for file in artifact["files"]
-            if file.get("role") is not None
-        } == {"ffmpeg", "ffprobe"}
+        assert artifact["source"]["signing_key_fingerprint"] == SIGNING_KEY_FINGERPRINT
+        assert {file.get("role") for file in artifact["files"] if file.get("role") is not None} == {
+            "ffmpeg",
+            "ffprobe",
+        }
 
 
 def test_runtime_workflow_is_pinned_attested_and_separate_from_installers() -> None:
@@ -144,14 +138,12 @@ def test_runtime_workflow_is_pinned_attested_and_separate_from_installers() -> N
     assert SOURCE_SHA256 in workflow
     assert SIGNING_KEY_FINGERPRINT in workflow
     assert (
-        'SOURCE_SIGNATURE_SHA256: '
-        '"0a0963fccd70597838073f3e31b20f4a4d8cc2b5e577472c9a5a1f22624246f8"'
-        in workflow
+        "SOURCE_SIGNATURE_SHA256: "
+        '"0a0963fccd70597838073f3e31b20f4a4d8cc2b5e577472c9a5a1f22624246f8"' in workflow
     )
     assert (
-        'SIGNING_KEY_SHA256: '
-        '"397b3becedcd5a98769967ff1ff8501ddc89f8368b8f766e4701377d7dbaabe5"'
-        in workflow
+        "SIGNING_KEY_SHA256: "
+        '"397b3becedcd5a98769967ff1ff8501ddc89f8368b8f766e4701377d7dbaabe5"' in workflow
     )
     assert "actions/attest-build-provenance@" in workflow
     assert "actions/create-github-app-token@" in workflow
@@ -176,6 +168,8 @@ def test_runtime_workflow_is_pinned_attested_and_separate_from_installers() -> N
     assert "--verify-tag" in workflow
     assert "--target" not in workflow
     assert 'cmp "release-assets/${name}" "existing-assets/${name}"' in workflow
+    assert '.author.login == "openadapt-release[bot]"' in workflow
+    assert "--json assets,author,isDraft,isPrerelease,tagName" in workflow
     assert "--clobber" not in workflow
     assert "ADMIN_TOKEN" not in workflow
     assert "--prerelease" in workflow
@@ -217,9 +211,7 @@ def test_runtime_workflow_is_pinned_attested_and_separate_from_installers() -> N
         ("PUBLISH", "yes"),
     ],
 )
-def test_ffmpeg_dispatch_guard_refuses_every_invalid_identity(
-    field: str, value: str
-) -> None:
+def test_ffmpeg_dispatch_guard_refuses_every_invalid_identity(field: str, value: str) -> None:
     root = Path(__file__).resolve().parents[1]
     workflow = yaml.safe_load((root / ".github/workflows/ffmpeg-runtime.yml").read_text())
     script = workflow["jobs"]["authorize-runtime-dispatch"]["steps"][0]["run"]

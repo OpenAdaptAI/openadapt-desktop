@@ -149,10 +149,11 @@ jobs:
         run: |
           set -euo pipefail
           engine_tag="v${VERSION}"
-          mkdir -p candidate engine-files
+          mkdir -p candidate engine-files engine-release-assets
           gh release view "${engine_tag}" \
-            --json databaseId,isDraft,isPrerelease,publishedAt,tagName,url \
+            --json author,databaseId,isDraft,isPrerelease,publishedAt,tagName,url \
             > candidate/engine-release.json
+          gh release download "${engine_tag}" --dir engine-release-assets --pattern '*'
           gh release download "${engine_tag}" --dir candidate \
             --pattern 'openadapt-desktop-verified-release.json' \
             --pattern 'openadapt-desktop-engine-release-provenance.json'
@@ -174,6 +175,23 @@ jobs:
           python scripts/native_release.py validate-verified-index \
             --file candidate/openadapt-desktop-verified-release.json
           engine_commit="$(jq -r .engine_commit candidate/openadapt-desktop-verified-release.json)"
+          engine_tag_ref="refs/tags/${engine_tag}"
+          git ls-remote origin "${engine_tag_ref}" "${engine_tag_ref}^{}" \
+            > engine-tag-refs.txt
+          if [ "$(awk -v ref="${engine_tag_ref}" '$2 == ref { count++ } END { print count + 0 }' \
+              engine-tag-refs.txt)" != 1 ] || \
+             [ "$(awk -v ref="${engine_tag_ref}^{}" '$2 == ref { print $1 }' \
+              engine-tag-refs.txt)" != "${engine_commit}" ]; then
+            echo "error: ${engine_tag} is not one annotated tag for ${engine_commit}" >&2
+            exit 1
+          fi
+          python scripts/native_release.py validate-engine-inventory \
+            --directory engine-release-assets \
+            --release candidate/engine-release.json \
+            --repository "${GITHUB_REPOSITORY}" \
+            --engine-tag "${engine_tag}" \
+            --engine-commit "${engine_commit}" \
+            --require-index
           python scripts/native_release.py validate-engine-provenance \
             --file candidate/openadapt-desktop-engine-release-provenance.json \
             --directory engine-files \
@@ -198,9 +216,10 @@ jobs:
           fi
           exists=false
           if gh release view "${PRODUCTION_CHANNEL_TAG}" \
-            --json isDraft,isPrerelease,body,assets > production-cache-release.json 2>/dev/null; then
+            --json author,isDraft,isPrerelease,body,assets > production-cache-release.json 2>/dev/null; then
             if ! jq -e \
               '.isDraft == false and .isPrerelease == true and
+               .author.login == "openadapt-release[bot]" and
                (.body | contains("<!-- production-channel-derived-cache -->"))' \
               production-cache-release.json >/dev/null; then
               echo "error: Production cache release identity differs" >&2
@@ -331,6 +350,29 @@ jobs:
             --file prepared/candidate/openadapt-desktop-verified-release.json
           engine_tag="$(jq -r .engine_tag prepared/candidate/openadapt-desktop-verified-release.json)"
           engine_commit="$(jq -r .engine_commit prepared/candidate/openadapt-desktop-verified-release.json)"
+          engine_tag_ref="refs/tags/${engine_tag}"
+          git ls-remote origin "${engine_tag_ref}" "${engine_tag_ref}^{}" \
+            > current-engine-tag-refs.txt
+          if [ "$(awk -v ref="${engine_tag_ref}" '$2 == ref { count++ } END { print count + 0 }' \
+              current-engine-tag-refs.txt)" != 1 ] || \
+             [ "$(awk -v ref="${engine_tag_ref}^{}" '$2 == ref { print $1 }' \
+              current-engine-tag-refs.txt)" != "${engine_commit}" ]; then
+            echo "error: ${engine_tag} moved from ${engine_commit}" >&2
+            exit 1
+          fi
+          mkdir current-engine-release-assets
+          gh release view "${engine_tag}" \
+            --json author,databaseId,isDraft,isPrerelease,publishedAt,tagName,url \
+            > current-engine-release.json
+          cmp prepared/candidate/engine-release.json current-engine-release.json
+          gh release download "${engine_tag}" --dir current-engine-release-assets --pattern '*'
+          python scripts/native_release.py validate-engine-inventory \
+            --directory current-engine-release-assets \
+            --release current-engine-release.json \
+            --repository "${GITHUB_REPOSITORY}" \
+            --engine-tag "${engine_tag}" \
+            --engine-commit "${engine_commit}" \
+            --require-index
           python scripts/native_release.py validate-engine-provenance \
             --file prepared/candidate/openadapt-desktop-engine-release-provenance.json \
             --directory prepared/engine-files \
@@ -375,6 +417,16 @@ jobs:
           permission-contents: write
           permission-metadata: read
 
+      - name: Require the exact release App identity
+        env:
+          RELEASE_APP_SLUG: ${{ steps.release_app.outputs.app-slug }}
+        shell: bash
+        run: |
+          if [ "${RELEASE_APP_SLUG}" != openadapt-release ]; then
+            echo "error: release token came from ${RELEASE_APP_SLUG:-an unknown App}" >&2
+            exit 1
+          fi
+
       - name: Publish once and verify the derived cache
         env:
           CACHE_ASSET: ${{ steps.channel.outputs.name }}
@@ -385,15 +437,62 @@ jobs:
         run: |
           set -euo pipefail
           identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/production-channel.yml@refs/heads/main"
+          revalidate_authority() {
+            local desktop_main central_main engine_tag engine_commit engine_tag_ref
+            desktop_main="$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq .sha)"
+            central_main="$(gh api repos/OpenAdaptAI/.github/commits/main --jq .sha)"
+            if [ "${desktop_main}" != "${DESKTOP_COMMIT}" ] || \
+               [ "${central_main}" != "${{ needs.inspect.outputs.central_commit }}" ]; then
+              echo "error: a protected main branch changed before cache publication" >&2
+              exit 1
+            fi
+            python scripts/production_release.py state \
+              --lifecycle-root production-lifecycle \
+              --central-source-commit "${central_main}" \
+              --output publication-admission-state.json
+            cmp current-admission-state.json publication-admission-state.json
+            engine_tag="$(jq -r .engine_tag prepared/candidate/openadapt-desktop-verified-release.json)"
+            engine_commit="$(jq -r .engine_commit prepared/candidate/openadapt-desktop-verified-release.json)"
+            engine_tag_ref="refs/tags/${engine_tag}"
+            git ls-remote origin "${engine_tag_ref}" "${engine_tag_ref}^{}" \
+              > publication-engine-tag-refs.txt
+            if [ "$(awk -v ref="${engine_tag_ref}" '$2 == ref { count++ } END { print count + 0 }' \
+                publication-engine-tag-refs.txt)" != 1 ] || \
+               [ "$(awk -v ref="${engine_tag_ref}^{}" '$2 == ref { print $1 }' \
+                publication-engine-tag-refs.txt)" != "${engine_commit}" ]; then
+              echo "error: ${engine_tag} moved before cache publication" >&2
+              exit 1
+            fi
+            mkdir publication-engine-release-assets
+            gh release view "${engine_tag}" \
+              --json author,databaseId,isDraft,isPrerelease,publishedAt,tagName,url \
+              > publication-engine-release.json
+            cmp prepared/candidate/engine-release.json publication-engine-release.json
+            gh release download "${engine_tag}" \
+              --dir publication-engine-release-assets --pattern '*'
+            cmp prepared/candidate/openadapt-desktop-verified-release.json \
+              publication-engine-release-assets/openadapt-desktop-verified-release.json
+            cmp prepared/candidate/openadapt-desktop-engine-release-provenance.json \
+              publication-engine-release-assets/openadapt-desktop-engine-release-provenance.json
+            python scripts/native_release.py validate-engine-inventory \
+              --directory publication-engine-release-assets \
+              --release publication-engine-release.json \
+              --repository "${GITHUB_REPOSITORY}" \
+              --engine-tag "${engine_tag}" \
+              --engine-commit "${engine_commit}" \
+              --require-index
+          }
           gh attestation verify "${CACHE_PATH}" \
             --repo "${GITHUB_REPOSITORY}" \
             --cert-identity "${identity}" \
             --cert-oidc-issuer 'https://token.actions.githubusercontent.com' \
             --deny-self-hosted-runners
+          compare_local=true
           if gh release view "${PRODUCTION_CHANNEL_TAG}" \
-            --json isDraft,isPrerelease,body,assets > production-cache-release.json 2>/dev/null; then
-            if ! jq -e \
-              '.isDraft == false and .isPrerelease == true and
+            --json author,isDraft,isPrerelease,tagName,body,assets > production-cache-release.json 2>/dev/null; then
+            if ! jq -e --arg tag "${PRODUCTION_CHANNEL_TAG}" \
+              '.tagName == $tag and .isDraft == false and .isPrerelease == true and
+               .author.login == "openadapt-release[bot]" and
                (.body | contains("<!-- production-channel-derived-cache -->"))' \
               production-cache-release.json >/dev/null; then
               echo "error: Production cache release identity differs" >&2
@@ -401,10 +500,11 @@ jobs:
             fi
             if jq -e --arg name "${CACHE_ASSET}" \
               '.assets | any(.name == $name)' production-cache-release.json >/dev/null; then
-              echo "error: the append-only Production cache asset already exists" >&2
-              exit 1
+              compare_local=false
+            else
+              revalidate_authority
+              gh release upload "${PRODUCTION_CHANNEL_TAG}" "${CACHE_PATH}"
             fi
-            gh release upload "${PRODUCTION_CHANNEL_TAG}" "${CACHE_PATH}"
           else
             if git ls-remote --exit-code --tags origin \
               "refs/tags/${PRODUCTION_CHANNEL_TAG}" >/dev/null; then
@@ -416,6 +516,7 @@ jobs:
               '<!-- production-channel-derived-cache -->' \
               'Derived cache only. OpenAdaptAI/.github remains the Production authority.' \
               > production-cache-notes.md
+            revalidate_authority
             gh release create "${PRODUCTION_CHANNEL_TAG}" \
               "${create_ref[@]}" \
               --prerelease \
@@ -424,9 +525,14 @@ jobs:
               "${CACHE_PATH}"
           fi
           mkdir published-cache
+          if [ "${compare_local}" = false ]; then
+            revalidate_authority
+          fi
           gh release download "${PRODUCTION_CHANNEL_TAG}" --dir published-cache \
             --pattern "${CACHE_ASSET}"
-          cmp "${CACHE_PATH}" "published-cache/${CACHE_ASSET}"
+          if [ "${compare_local}" = true ]; then
+            cmp "${CACHE_PATH}" "published-cache/${CACHE_ASSET}"
+          fi
           gh attestation verify "published-cache/${CACHE_ASSET}" \
             --repo "${GITHUB_REPOSITORY}" \
             --cert-identity "${identity}" \

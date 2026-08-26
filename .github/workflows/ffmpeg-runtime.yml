@@ -116,6 +116,16 @@ jobs:
           persist-credentials: false
           token: ${{ steps.release_app.outputs.token }}
 
+      - name: Require the exact release App identity
+        env:
+          RELEASE_APP_SLUG: ${{ steps.release_app.outputs.app-slug }}
+        shell: bash
+        run: |
+          if [ "${RELEASE_APP_SLUG}" != openadapt-release ]; then
+            echo "error: release token came from ${RELEASE_APP_SLUG:-an unknown App}" >&2
+            exit 1
+          fi
+
       - name: Create only the exact managed-runtime tag
         env:
           APP_TOKEN: ${{ steps.release_app.outputs.token }}
@@ -409,6 +419,16 @@ jobs:
           permission-contents: write
           permission-metadata: read
 
+      - name: Require the exact release App identity
+        env:
+          RELEASE_APP_SLUG: ${{ steps.release_app.outputs.app-slug }}
+        shell: bash
+        run: |
+          if [ "${RELEASE_APP_SLUG}" != openadapt-release ]; then
+            echo "error: release token came from ${RELEASE_APP_SLUG:-an unknown App}" >&2
+            exit 1
+          fi
+
       - name: Publish separately licensed runtime prerelease
         shell: bash
         env:
@@ -421,10 +441,11 @@ jobs:
             echo "error: publication ref differs from the managed-runtime tag" >&2
             exit 1
           fi
-          if gh release view "${tag}" --json assets,isDraft,isPrerelease,tagName \
+          if gh release view "${tag}" --json assets,author,isDraft,isPrerelease,tagName \
             > release.json 2>/dev/null; then
             if ! jq -e --arg tag "${tag}" \
-              '.tagName == $tag and .isDraft == false and .isPrerelease == true' \
+              '.tagName == $tag and .isDraft == false and .isPrerelease == true and
+               .author.login == "openadapt-release[bot]"' \
               release.json >/dev/null; then
               echo "error: existing managed-runtime release has the wrong identity" >&2
               exit 1

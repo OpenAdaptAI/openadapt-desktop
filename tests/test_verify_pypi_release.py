@@ -44,10 +44,26 @@ def test_verify_pypi_release_accepts_the_exact_public_artifacts(tmp_path: Path) 
     verify_pypi_release(metadata, dist, "1.2.3")
 
 
-@pytest.mark.parametrize("mutation", ["digest", "extra", "yanked", "host"])
-def test_verify_pypi_release_refuses_publication_drift(
-    tmp_path: Path, mutation: str
+def test_verify_pypi_release_accepts_only_a_matching_existing_subset(
+    tmp_path: Path,
 ) -> None:
+    metadata, dist = _fixture(tmp_path)
+    data = json.loads(metadata.read_text(encoding="utf-8"))
+    data["urls"] = data["urls"][:1]
+    metadata.write_text(json.dumps(data), encoding="utf-8")
+
+    verify_pypi_release(metadata, dist, "1.2.3", allow_subset=True)
+    with pytest.raises(ValueError, match="public PyPI distributions differ"):
+        verify_pypi_release(metadata, dist, "1.2.3")
+
+    data["urls"][0]["digests"]["sha256"] = "0" * 64
+    metadata.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError, match="matching reviewed subset"):
+        verify_pypi_release(metadata, dist, "1.2.3", allow_subset=True)
+
+
+@pytest.mark.parametrize("mutation", ["digest", "extra", "yanked", "host"])
+def test_verify_pypi_release_refuses_publication_drift(tmp_path: Path, mutation: str) -> None:
     metadata, dist = _fixture(tmp_path)
     data = json.loads(metadata.read_text(encoding="utf-8"))
     if mutation == "digest":

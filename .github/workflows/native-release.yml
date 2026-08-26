@@ -127,7 +127,7 @@ jobs:
             --tags remote-native-tags.txt
 
           gh release view "${engine_tag}" \
-            --json databaseId,isDraft,isPrerelease,publishedAt,tagName,url \
+            --json author,databaseId,isDraft,isPrerelease,publishedAt,tagName,url \
             > engine-release.json
           mkdir engine-assets
           gh release download "${engine_tag}" --dir engine-assets \
@@ -173,6 +173,16 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
           token: ${{ steps.release_app.outputs.token }}
+
+      - name: Require the exact release App identity
+        env:
+          RELEASE_APP_SLUG: ${{ steps.release_app.outputs.app-slug }}
+        shell: bash
+        run: |
+          if [ "${RELEASE_APP_SLUG}" != openadapt-release ]; then
+            echo "error: release token came from ${RELEASE_APP_SLUG:-an unknown App}" >&2
+            exit 1
+          fi
 
       - name: Create only the exact native candidate tag
         env:
@@ -290,7 +300,7 @@ jobs:
             --candidate-tag "${native_tag}" \
             --tags remote-native-tags.txt
           gh release view "${engine_tag}" \
-            --json databaseId,isDraft,isPrerelease,publishedAt,tagName,url \
+            --json author,databaseId,isDraft,isPrerelease,publishedAt,tagName,url \
             > engine-release.json
           mkdir engine-assets
           gh release download "${engine_tag}" --dir engine-assets \
@@ -368,6 +378,7 @@ jobs:
           fi
           if ! jq -e --arg tag "${NATIVE_TAG}" \
             '.tag_name == $tag and .draft == false and .prerelease == true and
+             .author.login == "openadapt-release[bot]" and
              (.body | contains("<!-- installer-release -->"))' \
             native-release.json >/dev/null; then
             echo "error: existing native release has the wrong public identity" >&2
@@ -1056,7 +1067,7 @@ jobs:
         run: |
           set -euo pipefail
           gh release view "${ENGINE_TAG}" \
-            --json databaseId,isDraft,isPrerelease,publishedAt,tagName,url \
+            --json author,databaseId,isDraft,isPrerelease,publishedAt,tagName,url \
             > engine-release.json
           python scripts/native_release.py validate-engine-release \
             --file engine-release.json \
@@ -1252,6 +1263,16 @@ jobs:
           permission-contents: write
           permission-metadata: read
 
+      - name: Require the exact release App identity
+        env:
+          RELEASE_APP_SLUG: ${{ steps.release_app.outputs.app-slug }}
+        shell: bash
+        run: |
+          if [ "${RELEASE_APP_SLUG}" != openadapt-release ]; then
+            echo "error: release token came from ${RELEASE_APP_SLUG:-an unknown App}" >&2
+            exit 1
+          fi
+
       - name: Create or safely resume the immutable public prerelease
         env:
           GH_TOKEN: ${{ steps.release_app.outputs.token }}
@@ -1280,9 +1301,10 @@ jobs:
             --tags remote-native-tags.txt
           title="OpenAdapt Desktop release candidate ${NATIVE_TAG#desktop-v}"
           if gh release view "${NATIVE_TAG}" \
-            --json assets,body,isDraft,isPrerelease,tagName > native-release.json 2>/dev/null; then
+            --json assets,author,body,isDraft,isPrerelease,tagName > native-release.json 2>/dev/null; then
             if ! jq -e --arg tag "${NATIVE_TAG}" \
               '.tagName == $tag and .isDraft == false and .isPrerelease == true and
+               .author.login == "openadapt-release[bot]" and
                (.body | contains("<!-- installer-release -->"))' \
               native-release.json >/dev/null; then
               echo "error: existing native release has the wrong public identity" >&2
@@ -1425,7 +1447,7 @@ jobs:
             exit 1
           fi
           gh release view "${ENGINE_TAG}" \
-            --json databaseId,isDraft,isPrerelease,publishedAt,tagName,url \
+            --json author,databaseId,isDraft,isPrerelease,publishedAt,tagName,url \
             > engine-release.json
           python scripts/native_release.py validate-engine-release \
             --file engine-release.json \
@@ -1521,6 +1543,16 @@ jobs:
           permission-contents: write
           permission-metadata: read
 
+      - name: Require the exact release App identity
+        env:
+          RELEASE_APP_SLUG: ${{ steps.release_app.outputs.app-slug }}
+        shell: bash
+        run: |
+          if [ "${RELEASE_APP_SLUG}" != openadapt-release ]; then
+            echo "error: release token came from ${RELEASE_APP_SLUG:-an unknown App}" >&2
+            exit 1
+          fi
+
       - name: Prepend an idempotent installer pointer to the engine release
         env:
           GH_TOKEN: ${{ steps.release_app.outputs.token }}
@@ -1544,7 +1576,7 @@ jobs:
             exit 1
           fi
           gh release view "${engine_tag}" \
-            --json databaseId,isDraft,isPrerelease,publishedAt,tagName,url \
+            --json author,databaseId,isDraft,isPrerelease,publishedAt,tagName,url \
             > engine-release.json
           python scripts/native_release.py validate-engine-release \
             --file engine-release.json \
@@ -1636,6 +1668,16 @@ jobs:
           permission-contents: write
           permission-metadata: read
 
+      - name: Require the exact release App identity
+        env:
+          RELEASE_APP_SLUG: ${{ steps.release_app.outputs.app-slug }}
+        shell: bash
+        run: |
+          if [ "${RELEASE_APP_SLUG}" != openadapt-release ]; then
+            echo "error: release token came from ${RELEASE_APP_SLUG:-an unknown App}" >&2
+            exit 1
+          fi
+
       - name: Mirror and re-download the exact verified asset set
         env:
           GH_TOKEN: ${{ steps.release_app.outputs.token }}
@@ -1659,7 +1701,7 @@ jobs:
             exit 1
           fi
           gh release view "${engine_tag}" \
-            --json databaseId,isDraft,isPrerelease,publishedAt,tagName,url \
+            --json author,databaseId,isDraft,isPrerelease,publishedAt,tagName,url \
             > engine-release.json
           python scripts/native_release.py validate-engine-release \
             --file engine-release.json \
@@ -1667,6 +1709,15 @@ jobs:
             --engine-tag "${engine_tag}" \
             --engine-commit "${ENGINE_COMMIT}" \
             --provenance mirror/openadapt-desktop-native-release-provenance.json
+          mkdir engine-inventory
+          gh release download "${engine_tag}" --dir engine-inventory --pattern '*'
+          python scripts/native_release.py validate-engine-inventory \
+            --directory engine-inventory \
+            --release engine-release.json \
+            --repository "${GITHUB_REPOSITORY}" \
+            --engine-tag "${engine_tag}" \
+            --engine-commit "${ENGINE_COMMIT}" \
+            --native-directory mirror
           gh release view "${engine_tag}" --json assets --jq '.assets[].name' \
             > engine-release-assets.txt
           mkdir existing-mirror
@@ -1743,7 +1794,7 @@ jobs:
             exit 1
           fi
           gh release view "${ENGINE_TAG}" \
-            --json databaseId,isDraft,isPrerelease,publishedAt,tagName,url \
+            --json author,databaseId,isDraft,isPrerelease,publishedAt,tagName,url \
             > engine-release-current.json
           python scripts/native_release.py validate-engine-release \
             --file engine-release-current.json \
@@ -1777,63 +1828,84 @@ jobs:
             --cert-identity "${identity}" \
             --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
             --deny-self-hosted-runners
+          mkdir complete-engine-inventory
+          gh release download "${ENGINE_TAG}" --dir complete-engine-inventory --pattern '*'
+          python scripts/native_release.py validate-engine-inventory \
+            --directory complete-engine-inventory \
+            --release engine-release-current.json \
+            --repository "${GITHUB_REPOSITORY}" \
+            --engine-tag "${ENGINE_TAG}" \
+            --engine-commit "${ENGINE_COMMIT}" \
+            --require-index
 
       - name: Write the monotonic candidate channel descriptor
+        id: channel
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
           channel_tag=desktop-channel
+          descriptor=openadapt-desktop-channel.json
+          recovery=openadapt-desktop-channel-recovery.json
           existing=()
           reuse=false
-          if gh release view "${channel_tag}" --json isDraft,isPrerelease,assets \
+          release_exists=false
+          if gh release view "${channel_tag}" --json assets,author,isDraft,isPrerelease,tagName \
             > channel-release.json 2>/dev/null; then
-            if [ "$(jq -r '.isDraft' channel-release.json)" != "false" ] || \
-               [ "$(jq -r '.isPrerelease' channel-release.json)" != "true" ]; then
+            release_exists=true
+            if ! jq -e --arg tag "${channel_tag}" --arg descriptor "${descriptor}" \
+              --arg recovery "${recovery}" \
+              '.tagName == $tag and .isDraft == false and .isPrerelease == true and
+               .author.login == "openadapt-release[bot]" and
+               ([.assets[].name] | length == (unique | length)) and
+               (.assets | length >= 1 and length <= 2) and
+               (.assets | all(.name == $descriptor or .name == $recovery))' \
+              channel-release.json >/dev/null; then
               echo "error: ${channel_tag} is not the expected public prerelease authority" >&2
               exit 1
             fi
-            if ! jq -e '.assets | any(.name == "openadapt-desktop-channel.json")' \
-              channel-release.json >/dev/null; then
-              echo "error: ${channel_tag} exists without its channel descriptor" >&2
-              exit 1
+            authority="${descriptor}"
+            if ! jq -e --arg name "${descriptor}" \
+              '.assets | any(.name == $name)' channel-release.json >/dev/null; then
+              authority="${recovery}"
             fi
             mkdir prior-channel
             gh release download "${channel_tag}" --dir prior-channel \
-              --pattern 'openadapt-desktop-channel.json'
-            python scripts/native_release.py validate-release-channel \
-              --file prior-channel/openadapt-desktop-channel.json
-            identity="https://github.com/$(jq -r '.promotion.workflow_ref' \
-              prior-channel/openadapt-desktop-channel.json)"
-            gh attestation verify prior-channel/openadapt-desktop-channel.json \
+              --pattern "${authority}"
+            cp "prior-channel/${authority}" "prior-channel/${descriptor}"
+            python scripts/native_release.py validate-release-channel --file "prior-channel/${descriptor}"
+            identity="https://github.com/$(jq -r '.promotion.workflow_ref' "prior-channel/${descriptor}")"
+            gh attestation verify "prior-channel/${descriptor}" \
               --repo "${GITHUB_REPOSITORY}" \
               --cert-identity "${identity}" \
               --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
               --deny-self-hosted-runners
-            prior_tag="$(jq -r '.native_tag' prior-channel/openadapt-desktop-channel.json)"
+            prior_sha256="$(sha256sum "prior-channel/${authority}" | cut -d ' ' -f 1)"
+            echo "prior_sha256=${prior_sha256}" >> "${GITHUB_OUTPUT}"
+            prior_tag="$(jq -r '.native_tag' "prior-channel/${descriptor}")"
             if [ "${prior_tag}" = "${NATIVE_TAG}" ]; then
               expected_index="$(jq -r '.verified_index.sha256' \
-                prior-channel/openadapt-desktop-channel.json)"
+                "prior-channel/${descriptor}")"
               observed_index="$(sha256sum remote-index/openadapt-desktop-verified-release.json | cut -d ' ' -f 1)"
               expected_checksums="$(jq -r '.checksums.sha256' \
-                prior-channel/openadapt-desktop-channel.json)"
+                "prior-channel/${descriptor}")"
               observed_checksums="$(sha256sum mirror/SHA256SUMS | cut -d ' ' -f 1)"
               prior_source="$(jq -r '.native_source_commit' \
-                prior-channel/openadapt-desktop-channel.json)"
+                "prior-channel/${descriptor}")"
               if [ "${expected_index}" != "${observed_index}" ] || \
                  [ "${expected_checksums}" != "${observed_checksums}" ] || \
                  [ "${prior_source}" != "${SOURCE_COMMIT}" ]; then
                 echo "error: existing channel conflicts with this release transaction" >&2
                 exit 1
               fi
-              cp prior-channel/openadapt-desktop-channel.json \
-                openadapt-desktop-channel.json
+              cp "prior-channel/${descriptor}" "${descriptor}"
               reuse=true
             else
-              existing=(--existing prior-channel/openadapt-desktop-channel.json)
+              existing=(--existing "prior-channel/${descriptor}")
             fi
           fi
+          echo "release_exists=${release_exists}" >> "${GITHUB_OUTPUT}"
           if [ "${reuse}" = false ]; then
             python scripts/native_release.py write-release-channel \
               --output openadapt-desktop-channel.json \
@@ -1854,25 +1926,153 @@ jobs:
       - name: Publish and reverify the candidate channel authority
         env:
           GH_TOKEN: ${{ steps.release_app.outputs.token }}
+          PRIOR_SHA256: ${{ steps.channel.outputs.prior_sha256 }}
+          RELEASE_EXISTS: ${{ steps.channel.outputs.release_exists }}
         shell: bash
         run: |
           set -euo pipefail
           channel_tag=desktop-channel
+          descriptor=openadapt-desktop-channel.json
+          recovery=openadapt-desktop-channel-recovery.json
           identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/native-release.yml@refs/tags/${NATIVE_TAG}"
           gh attestation verify openadapt-desktop-channel.json \
             --repo "${GITHUB_REPOSITORY}" \
             --cert-identity "${identity}" \
             --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
             --deny-self-hosted-runners
-          if gh release view "${channel_tag}" >/dev/null 2>&1; then
-            gh release upload "${channel_tag}" openadapt-desktop-channel.json --clobber
+          if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${channel_tag}" \
+            > channel-release-current.json 2>/dev/null; then
+            if [ "${RELEASE_EXISTS}" != true ]; then
+              echo "error: candidate channel appeared after the authenticated read" >&2
+              exit 1
+            fi
+            if ! jq -e --arg tag "${channel_tag}" --arg descriptor "${descriptor}" \
+              --arg recovery "${recovery}" \
+              '.tag_name == $tag and .draft == false and .prerelease == true and
+               .author.login == "openadapt-release[bot]" and
+               ([.assets[].name] | length == (unique | length)) and
+               (.assets | length >= 1 and length <= 2) and
+               (.assets | all(.name == $descriptor or .name == $recovery))' \
+              channel-release-current.json >/dev/null; then
+              echo "error: candidate channel identity or recovery inventory differs" >&2
+              exit 1
+            fi
+            authority="${descriptor}"
+            if ! jq -e --arg name "${descriptor}" \
+              '.assets | any(.name == $name)' channel-release-current.json >/dev/null; then
+              authority="${recovery}"
+            fi
+            mkdir current-channel
+            gh release download "${channel_tag}" --dir current-channel --pattern "${authority}"
+            cp "current-channel/${authority}" "current-channel/${descriptor}"
+            python scripts/native_release.py validate-release-channel \
+              --file "current-channel/${descriptor}"
+            current_identity="https://github.com/$(jq -r '.promotion.workflow_ref' \
+              "current-channel/${descriptor}")"
+            gh attestation verify "current-channel/${descriptor}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --cert-identity "${current_identity}" \
+              --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
+              --deny-self-hosted-runners
+            observed_prior="$(sha256sum "current-channel/${authority}" | cut -d ' ' -f 1)"
+            if [ -z "${PRIOR_SHA256}" ] || [ "${observed_prior}" != "${PRIOR_SHA256}" ]; then
+              echo "error: candidate channel changed after descriptor construction" >&2
+              exit 1
+            fi
+            candidate_sha256="$(sha256sum "${descriptor}" | cut -d ' ' -f 1)"
+            fixed_id="$(jq -r --arg name "${descriptor}" \
+              '.assets[] | select(.name == $name) | .id' channel-release-current.json)"
+            recovery_id="$(jq -r --arg name "${recovery}" \
+              '.assets[] | select(.name == $name) | .id' channel-release-current.json)"
+            if [ "${authority}" = "${descriptor}" ] && \
+               [ "${observed_prior}" = "${candidate_sha256}" ]; then
+              if [ -n "${recovery_id}" ]; then
+                gh api --method DELETE \
+                  "repos/${GITHUB_REPOSITORY}/releases/assets/${recovery_id}"
+              fi
+            elif [ "${authority}" = "${recovery}" ]; then
+              gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${channel_tag}" \
+                > channel-release-before-restore.json
+              if ! jq -e --arg recovery "${recovery}" \
+                '.draft == false and .prerelease == true and
+                 .author.login == "openadapt-release[bot]" and
+                 (.assets | length == 1) and .assets[0].name == $recovery' \
+                channel-release-before-restore.json >/dev/null; then
+                echo "error: candidate channel changed before fixed-name recovery" >&2
+                exit 1
+              fi
+              mkdir restore-prior
+              gh release download "${channel_tag}" --dir restore-prior --pattern "${recovery}"
+              if [ "$(sha256sum "restore-prior/${recovery}" | cut -d ' ' -f 1)" != \
+                   "${PRIOR_SHA256}" ]; then
+                echo "error: recovery authority changed before fixed-name recovery" >&2
+                exit 1
+              fi
+              gh release upload "${channel_tag}" "${descriptor}"
+              mkdir restored-fixed
+              gh release download "${channel_tag}" --dir restored-fixed --pattern "${descriptor}"
+              cmp "${descriptor}" "restored-fixed/${descriptor}"
+              gh api --method DELETE \
+                "repos/${GITHUB_REPOSITORY}/releases/assets/${recovery_id}"
+            else
+              if [ -n "${recovery_id}" ]; then
+                gh api --method DELETE \
+                  "repos/${GITHUB_REPOSITORY}/releases/assets/${recovery_id}"
+              fi
+              cp "current-channel/${descriptor}" "${recovery}"
+              gh release upload "${channel_tag}" "${recovery}"
+              mkdir recovery-check
+              gh release download "${channel_tag}" --dir recovery-check --pattern "${recovery}"
+              cmp "${recovery}" "recovery-check/${recovery}"
+              # Re-read the remote authority immediately before the fixed-name write.
+              gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${channel_tag}" \
+                > channel-release-before-write.json
+              if ! jq -e --arg descriptor "${descriptor}" --arg recovery "${recovery}" \
+                '.draft == false and .prerelease == true and
+                 .author.login == "openadapt-release[bot]" and
+                 ([.assets[].name] | sort) == ([$descriptor, $recovery] | sort)' \
+                channel-release-before-write.json >/dev/null; then
+                echo "error: candidate channel changed before fixed-name publication" >&2
+                exit 1
+              fi
+              mkdir publication-prior
+              gh release download "${channel_tag}" --dir publication-prior \
+                --pattern "${descriptor}" --pattern "${recovery}"
+              if [ "$(sha256sum "publication-prior/${descriptor}" | cut -d ' ' -f 1)" != \
+                   "${PRIOR_SHA256}" ]; then
+                echo "error: prior descriptor changed before fixed-name publication" >&2
+                exit 1
+              fi
+              cmp "${recovery}" "publication-prior/${recovery}"
+              fixed_id="$(jq -r --arg name "${descriptor}" \
+                '.assets[] | select(.name == $name) | .id' channel-release-before-write.json)"
+              gh api --method DELETE \
+                "repos/${GITHUB_REPOSITORY}/releases/assets/${fixed_id}"
+              gh release upload "${channel_tag}" "${descriptor}"
+              mkdir replaced-fixed
+              gh release download "${channel_tag}" --dir replaced-fixed --pattern "${descriptor}"
+              cmp "${descriptor}" "replaced-fixed/${descriptor}"
+              recovery_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${channel_tag}" \
+                --jq ".assets[] | select(.name == \"${recovery}\") | .id")"
+              gh api --method DELETE \
+                "repos/${GITHUB_REPOSITORY}/releases/assets/${recovery_id}"
+            fi
           else
+            if [ "${RELEASE_EXISTS}" = true ]; then
+              echo "error: candidate channel disappeared after the authenticated read" >&2
+              exit 1
+            fi
+            if git ls-remote --exit-code --tags origin \
+              "refs/tags/${channel_tag}" >/dev/null; then
+              echo "error: candidate channel tag exists without its App-authored Release" >&2
+              exit 1
+            fi
             gh release create "${channel_tag}" \
               --target "${SOURCE_COMMIT}" \
               --prerelease \
               --title "OpenAdapt Desktop native release-candidate channel" \
               --notes "Machine-readable signed index for the latest verified, unadmitted release candidate." \
-              openadapt-desktop-channel.json
+              "${descriptor}"
           fi
           mkdir published-channel
           gh release download "${channel_tag}" --dir published-channel \
@@ -1886,6 +2086,15 @@ jobs:
             --cert-identity "${identity}" \
             --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
             --deny-self-hosted-runners
+          gh release view "${channel_tag}" \
+            --json assets,author,isDraft,isPrerelease,tagName > channel-release-final.json
+          jq -e --arg tag "${channel_tag}" --arg descriptor "${descriptor}" \
+            --arg recovery "${recovery}" \
+            '.tagName == $tag and .isDraft == false and .isPrerelease == true and
+             .author.login == "openadapt-release[bot]" and
+             (.assets | length >= 1 and length <= 2) and
+             (.assets | all(.name == $descriptor or .name == $recovery))' \
+            channel-release-final.json >/dev/null
 
   supersede-published-native:
     name: Mark every lower native prerelease superseded
@@ -1919,6 +2128,16 @@ jobs:
 
       # This includes an older release that triggered the current event after a
       # newer release was already public. No lower event can retarget consumers.
+      - name: Require the exact release App identity
+        env:
+          RELEASE_APP_SLUG: ${{ steps.release_app.outputs.app-slug }}
+        shell: bash
+        run: |
+          if [ "${RELEASE_APP_SLUG}" != openadapt-release ]; then
+            echo "error: release token came from ${RELEASE_APP_SLUG:-an unknown App}" >&2
+            exit 1
+          fi
+
       - name: Prepend a superseded notice to every lower native prerelease
         env:
           GH_TOKEN: ${{ steps.release_app.outputs.token }}
@@ -1927,6 +2146,7 @@ jobs:
           set -euo pipefail
           gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate \
             --jq '.[] | select(.draft == false and .prerelease == true)
+                  | select(.author.login == "openadapt-release[bot]")
                   | select(.tag_name | startswith("desktop-v"))
                   | select(.body | contains("<!-- installer-release -->"))
                   | .tag_name' > native-tags.txt
@@ -1934,7 +2154,17 @@ jobs:
             if [ -z "${tag}" ] || [ "${tag}" = "${SELECTED_TAG}" ]; then
               continue
             fi
-            gh release view "${tag}" --json body --jq .body > candidate-notes.md
+            gh release view "${tag}" \
+              --json author,body,isDraft,isPrerelease,tagName > candidate-release.json
+            if ! jq -e --arg tag "${tag}" \
+              '.tagName == $tag and .isDraft == false and .isPrerelease == true and
+               .author.login == "openadapt-release[bot]" and
+               (.body | contains("<!-- installer-release -->"))' \
+              candidate-release.json >/dev/null; then
+              echo "error: ${tag} changed before the superseded notice update" >&2
+              exit 1
+            fi
+            jq -r .body candidate-release.json > candidate-notes.md
             result="$(python scripts/native_release.py supersede-notes \
               --newer-tag "${SELECTED_TAG}" \
               --candidate-tag "${tag}" \

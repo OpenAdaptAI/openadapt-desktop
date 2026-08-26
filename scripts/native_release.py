@@ -83,6 +83,7 @@ WEBSITE_RELEASE_VERIFICATION = {
     "installer_smoke": "install, launch, and uninstall",
 }
 WEBSITE_RELEASE_SBOM_FORMAT = "CycloneDX"
+RELEASE_APP_LOGIN = "openadapt-release[bot]"
 
 
 def expected_engine_asset_names(version: str) -> set[str]:
@@ -113,6 +114,20 @@ def expected_release_asset_names(version: str) -> set[str]:
         names.add(f"{prefix}-metadata.json")
         names.update(f"{prefix}{suffix}" for _kind, _pattern, suffix in ARTIFACT_RULES[platform])
     return names
+
+
+def expected_engine_release_asset_names(version: str) -> set[str]:
+    """Return the closed asset allowlist for the public engine Release."""
+
+    return (
+        expected_engine_asset_names(version)
+        | expected_release_asset_names(version)
+        | {
+            ENGINE_RELEASE_PROVENANCE,
+            VERIFIED_RELEASE_INDEX,
+            "SHA256SUMS",
+        }
+    )
 
 
 def native_versions(root: Path = ROOT) -> dict[str, str]:
@@ -883,6 +898,7 @@ def validate_engine_release(
     _validate_commit(engine_commit)
     release = json.loads(release_path.read_text(encoding="utf-8"))
     expected_keys = {
+        "author",
         "databaseId",
         "isDraft",
         "isPrerelease",
@@ -894,7 +910,9 @@ def validate_engine_release(
         raise ValueError("engine release does not use the closed identity schema")
     expected_url = f"https://github.com/{repository}/releases/tag/{engine_tag}"
     if (
-        not isinstance(release.get("databaseId"), int)
+        not isinstance(release.get("author"), dict)
+        or release["author"].get("login") != RELEASE_APP_LOGIN
+        or not isinstance(release.get("databaseId"), int)
         or release["databaseId"] <= 0
         or release.get("isDraft") is not False
         or release.get("isPrerelease") is not False
@@ -1096,6 +1114,165 @@ def validate_engine_release_provenance(
     return data
 
 
+def validate_engine_release_inventory(
+    directory: Path,
+    *,
+    release_path: Path,
+    repository: str,
+    engine_tag: str,
+    engine_commit: str,
+    local_engine_directory: Path | None = None,
+    native_directory: Path | None = None,
+    require_index: bool = False,
+) -> str:
+    """Authenticate the complete closed inventory on one engine Release.
+
+    A native publication can resume a partial mirror only when it supplies the
+    original attested native directory. Other consumers accept an engine-only
+    Release or a complete checksummed mirror. Production requires the closed
+    verified index too.
+    """
+
+    release = validate_engine_release(
+        release_path,
+        repository=repository,
+        engine_tag=engine_tag,
+        engine_commit=engine_commit,
+    )
+    version = engine_tag.removeprefix("v")
+    allowed = expected_engine_release_asset_names(version)
+    members = list(directory.iterdir())
+    invalid = [path for path in members if not path.is_file() or path.is_symlink()]
+    if invalid:
+        raise ValueError(f"engine release contains a non-regular asset: {invalid}")
+    actual = {path.name for path in members}
+    if len(actual) != len(members):
+        raise ValueError("engine release contains duplicate asset names")
+    unexpected = actual - allowed
+    if unexpected:
+        raise ValueError(f"engine release contains unexpected assets: {sorted(unexpected)}")
+
+    engine_names = expected_engine_asset_names(version)
+    missing_engine = engine_names - actual
+    if local_engine_directory is not None:
+        local_engine_members = list(local_engine_directory.iterdir())
+        local_invalid = [
+            path for path in local_engine_members if not path.is_file() or path.is_symlink()
+        ]
+        local_names = {path.name for path in local_engine_members}
+        if local_invalid or local_names != engine_names:
+            raise ValueError("local engine recovery source does not use the exact asset contract")
+        for name in engine_names & actual:
+            if (directory / name).read_bytes() != (local_engine_directory / name).read_bytes():
+                raise ValueError(f"published engine asset differs from recovery source: {name}")
+    elif missing_engine:
+        raise ValueError(f"engine release is missing engine assets: {sorted(missing_engine)}")
+    receipt_path = directory / ENGINE_RELEASE_PROVENANCE
+    mirror_names = expected_release_asset_names(version)
+    mirror_present = actual & (mirror_names | {"SHA256SUMS", VERIFIED_RELEASE_INDEX})
+    if mirror_present and (ENGINE_RELEASE_PROVENANCE not in actual or missing_engine):
+        raise ValueError("engine release mirror has no signed engine receipt")
+
+    if receipt_path.is_file():
+        if missing_engine:
+            raise ValueError("signed engine receipt exists without all engine artifacts")
+        receipt = validate_engine_release_provenance(
+            receipt_path,
+            repository=repository,
+            engine_tag=engine_tag,
+            engine_commit=engine_commit,
+            release_path=release_path,
+        )
+        expected_engine_digests = {item["name"]: item["sha256"] for item in receipt["assets"]}
+        observed_engine_digests = {
+            name: hashlib.sha256((directory / name).read_bytes()).hexdigest()
+            for name in engine_names
+        }
+        if observed_engine_digests != expected_engine_digests:
+            raise ValueError("engine release artifacts differ from the signed receipt")
+
+    if not mirror_present:
+        if require_index:
+            raise ValueError("engine release has no complete verified native mirror")
+        return "engine-recovery" if missing_engine else "engine"
+
+    if native_directory is not None:
+        native_manifest = native_directory / "SHA256SUMS"
+        verify_checksums(native_directory, native_manifest)
+        native_entries = read_checksums(native_manifest)
+        if set(native_entries) != mirror_names:
+            raise ValueError("native recovery source does not use the exact asset contract")
+        for name in mirror_names & actual:
+            if (directory / name).read_bytes() != (native_directory / name).read_bytes():
+                raise ValueError(f"mirrored native asset differs from recovery source: {name}")
+        if "SHA256SUMS" in actual and (directory / "SHA256SUMS").read_bytes() != (
+            native_manifest.read_bytes()
+        ):
+            raise ValueError("mirrored SHA256SUMS differs from recovery source")
+        entries = native_entries
+        manifest_bytes = native_manifest.read_bytes()
+    else:
+        required_mirror = mirror_names | {"SHA256SUMS"}
+        missing_mirror = required_mirror - actual
+        if missing_mirror:
+            raise ValueError(
+                "engine release has an incomplete unauthenticated native mirror: "
+                f"{sorted(missing_mirror)}"
+            )
+        manifest = directory / "SHA256SUMS"
+        entries = read_checksums(manifest)
+        if set(entries) != mirror_names:
+            raise ValueError("engine release SHA256SUMS does not bind the exact native set")
+        for name, digest in entries.items():
+            observed = hashlib.sha256((directory / name).read_bytes()).hexdigest()
+            if observed != digest:
+                raise ValueError(f"engine release checksum mismatch for {name}")
+        manifest_bytes = manifest.read_bytes()
+
+    index_path = directory / VERIFIED_RELEASE_INDEX
+    if index_path.is_file():
+        if not mirror_names.issubset(actual) or "SHA256SUMS" not in actual:
+            raise ValueError("verified index exists without the complete native mirror")
+        index = validate_verified_release_index(index_path)
+        expected_index = {
+            "repository": repository,
+            "native_tag": f"{NATIVE_TAG_PREFIX}{version}",
+            "native_version": version,
+            "native_source_commit": engine_commit,
+            "engine_tag": engine_tag,
+            "engine_commit": engine_commit,
+            "engine_release_id": release["databaseId"],
+            "engine_release_url": release["url"],
+        }
+        for field, value in expected_index.items():
+            if index.get(field) != value:
+                raise ValueError(f"verified index {field} differs from the engine Release")
+        if index["checksums"]["sha256"] != hashlib.sha256(manifest_bytes).hexdigest():
+            raise ValueError("verified index SHA256SUMS digest differs")
+        index_entries = {item["name"]: item["sha256"] for item in index["assets"]}
+        if index_entries != entries:
+            raise ValueError("verified index asset digests differ from SHA256SUMS")
+    elif require_index:
+        raise ValueError("engine release is missing the verified native index")
+
+    if require_index:
+        expected_complete = allowed
+        if actual != expected_complete:
+            raise ValueError(
+                "Production engine release inventory is incomplete: "
+                f"actual={sorted(actual)}, expected={sorted(expected_complete)}"
+            )
+        return "complete"
+    if actual == allowed:
+        return "complete"
+    if native_directory is None:
+        expected_mirrored = allowed - {VERIFIED_RELEASE_INDEX}
+        if actual != expected_mirrored:
+            raise ValueError("engine release mirror is not a closed complete state")
+        return "mirrored"
+    return "recovery"
+
+
 def write_verified_release_index(
     output: Path,
     *,
@@ -1261,9 +1438,7 @@ def write_verified_release_channel(
     if index["repository"] != repository:
         raise ValueError("verified index belongs to a different repository")
     _validate_commit(workflow_commit)
-    expected_ref = (
-        f"{repository}/{NATIVE_PROMOTION_WORKFLOW}@refs/tags/{index['native_tag']}"
-    )
+    expected_ref = f"{repository}/{NATIVE_PROMOTION_WORKFLOW}@refs/tags/{index['native_tag']}"
     if workflow_ref != expected_ref:
         raise ValueError(f"release channel workflow ref must be exactly {expected_ref!r}")
     if workflow_commit != index["native_source_commit"]:
@@ -2086,6 +2261,16 @@ def _parser() -> argparse.ArgumentParser:
     validate_engine_provenance_parser.add_argument("--engine-tag", required=True)
     validate_engine_provenance_parser.add_argument("--engine-commit", required=True)
 
+    engine_inventory_parser = subparsers.add_parser("validate-engine-inventory")
+    engine_inventory_parser.add_argument("--directory", type=Path, required=True)
+    engine_inventory_parser.add_argument("--release", type=Path, required=True)
+    engine_inventory_parser.add_argument("--repository", required=True)
+    engine_inventory_parser.add_argument("--engine-tag", required=True)
+    engine_inventory_parser.add_argument("--engine-commit", required=True)
+    engine_inventory_parser.add_argument("--local-engine-directory", type=Path)
+    engine_inventory_parser.add_argument("--native-directory", type=Path)
+    engine_inventory_parser.add_argument("--require-index", action="store_true")
+
     index_parser = subparsers.add_parser("write-verified-index")
     index_parser.add_argument("--output", type=Path, required=True)
     index_parser.add_argument("--directory", type=Path, required=True)
@@ -2328,6 +2513,18 @@ def main() -> int:
                 "Validated protected-main engine release provenance for run "
                 f"{receipt['run_id']} attempt {receipt['run_attempt']}"
             )
+        elif args.command == "validate-engine-inventory":
+            state = validate_engine_release_inventory(
+                args.directory,
+                release_path=args.release,
+                repository=args.repository,
+                engine_tag=args.engine_tag,
+                engine_commit=args.engine_commit,
+                local_engine_directory=args.local_engine_directory,
+                native_directory=args.native_directory,
+                require_index=args.require_index,
+            )
+            print(f"Validated {state} engine Release inventory")
         elif args.command == "write-verified-index":
             print(
                 write_verified_release_index(

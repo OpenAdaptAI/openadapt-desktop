@@ -216,6 +216,26 @@ def test_release_recovery_is_an_exact_tag_rerun() -> None:
     assert "--target" not in publication
     assert "Mint the release App token for GitHub publication" in publication
     assert "GH_TOKEN: ${{ steps.release_app.outputs.token }}" in publication
+    assert "validate-engine-inventory" in publication
+    assert "--local-engine-directory dist" in publication
+    assert publication.count("validate-engine-inventory") == 2
+    assert publication.index("--local-engine-directory dist") < publication.index(
+        "strict-engine-release-assets"
+    )
+    assert '.author.login == "openadapt-release[bot]"' in publication
+    assert "--json author,databaseId" in publication
+
+
+def test_pypi_skip_existing_has_subset_preflight_and_public_byte_verification() -> None:
+    workflow = (ROOT / ".github/workflows/release.yml").read_text()
+    preflight = workflow.index("Authenticate any existing PyPI files before skip-existing")
+    publisher = workflow.index("pypa/gh-action-pypi-publish@")
+    strict = workflow.index("Verify the exact public PyPI distributions")
+
+    assert preflight < publisher < strict
+    assert "--allow-subset" in workflow[preflight:publisher]
+    assert 'cmp "dist/${name}" "pypi-existing-files/${name}"' in workflow
+    assert 'cmp "dist/${name}" "pypi-published-files/${name}"' in workflow
 
 
 def test_native_release_health_requires_failed_job_recovery() -> None:
