@@ -1193,7 +1193,7 @@ jobs:
     # the exact tag run and this job never replaces published bytes.
     environment: native-release
     permissions:
-      contents: write
+      contents: read
       attestations: read
     env:
       GH_TOKEN: ${{ github.token }}
@@ -1487,9 +1487,8 @@ jobs:
     runs-on: ubuntu-22.04
     environment: native-release
     permissions:
-      contents: write
+      contents: read
     env:
-      GH_TOKEN: ${{ github.token }}
       NATIVE_TAG: ${{ needs.verify-published-release.outputs.native_tag }}
       SOURCE_COMMIT: ${{ needs.verify-published-release.outputs.source_commit }}
       ENGINE_TAG: ${{ needs.verify-published-release.outputs.engine_tag }}
@@ -1511,7 +1510,20 @@ jobs:
           name: ${{ needs.verify-published-release.outputs.verified_artifact }}
           path: mirror
 
+      - name: Mint the release App token for GitHub publication
+        id: release_app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.OPENADAPT_RELEASE_APP_ID }}
+          private-key: ${{ secrets.OPENADAPT_RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-metadata: read
+
       - name: Prepend an idempotent installer pointer to the engine release
+        env:
+          GH_TOKEN: ${{ steps.release_app.outputs.token }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1591,10 +1603,9 @@ jobs:
     permissions:
       actions: read
       attestations: write
-      contents: write
+      contents: read
       id-token: write
     env:
-      GH_TOKEN: ${{ github.token }}
       NATIVE_TAG: ${{ needs.verify-published-release.outputs.native_tag }}
       SOURCE_COMMIT: ${{ needs.verify-published-release.outputs.source_commit }}
       ENGINE_TAG: ${{ needs.verify-published-release.outputs.engine_tag }}
@@ -1614,7 +1625,20 @@ jobs:
           name: ${{ needs.verify-published-release.outputs.verified_artifact }}
           path: mirror
 
+      - name: Mint the release App token for GitHub publication
+        id: release_app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.OPENADAPT_RELEASE_APP_ID }}
+          private-key: ${{ secrets.OPENADAPT_RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-metadata: read
+
       - name: Mirror and re-download the exact verified asset set
+        env:
+          GH_TOKEN: ${{ steps.release_app.outputs.token }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1643,7 +1667,19 @@ jobs:
             --engine-tag "${engine_tag}" \
             --engine-commit "${ENGINE_COMMIT}" \
             --provenance mirror/openadapt-desktop-native-release-provenance.json
-          gh release upload "${engine_tag}" mirror/* --clobber
+          gh release view "${engine_tag}" --json assets --jq '.assets[].name' \
+            > engine-release-assets.txt
+          mkdir existing-mirror
+          for path in mirror/*; do
+            name="$(basename "${path}")"
+            if grep -qxF "${name}" engine-release-assets.txt; then
+              gh release download "${engine_tag}" --dir existing-mirror \
+                --pattern "${name}"
+              cmp "${path}" "existing-mirror/${name}"
+            else
+              gh release upload "${engine_tag}" "${path}"
+            fi
+          done
 
           mkdir remote-mirror
           gh release download "${engine_tag}" --dir remote-mirror \
@@ -1660,6 +1696,8 @@ jobs:
           echo "${engine_tag} carries the exact verified ${NATIVE_TAG} asset set."
 
       - name: Write the monotonic verified release index
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1693,6 +1731,8 @@ jobs:
           subject-path: openadapt-desktop-verified-release.json
 
       - name: Publish and verify the release index
+        env:
+          GH_TOKEN: ${{ steps.release_app.outputs.token }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1717,7 +1757,14 @@ jobs:
             --cert-identity "${identity}" \
             --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
             --deny-self-hosted-runners
-          gh release upload "${ENGINE_TAG}" openadapt-desktop-verified-release.json --clobber
+          if grep -qxF 'openadapt-desktop-verified-release.json' \
+            engine-release-assets.txt; then
+            cmp openadapt-desktop-verified-release.json \
+              existing-index/openadapt-desktop-verified-release.json
+          else
+            gh release upload "${ENGINE_TAG}" \
+              openadapt-desktop-verified-release.json
+          fi
           mkdir remote-index
           gh release download "${ENGINE_TAG}" --dir remote-index \
             --pattern 'openadapt-desktop-verified-release.json'
@@ -1732,6 +1779,8 @@ jobs:
             --deny-self-hosted-runners
 
       - name: Write the monotonic candidate channel descriptor
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1803,6 +1852,8 @@ jobs:
           subject-path: openadapt-desktop-channel.json
 
       - name: Publish and reverify the candidate channel authority
+        env:
+          GH_TOKEN: ${{ steps.release_app.outputs.token }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1842,9 +1893,8 @@ jobs:
     runs-on: ubuntu-22.04
     environment: native-release
     permissions:
-      contents: write
+      contents: read
     env:
-      GH_TOKEN: ${{ github.token }}
       SELECTED_TAG: ${{ needs.verify-published-release.outputs.native_tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1856,9 +1906,22 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Mint the release App token for GitHub publication
+        id: release_app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.OPENADAPT_RELEASE_APP_ID }}
+          private-key: ${{ secrets.OPENADAPT_RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-metadata: read
+
       # This includes an older release that triggered the current event after a
       # newer release was already public. No lower event can retarget consumers.
       - name: Prepend a superseded notice to every lower native prerelease
+        env:
+          GH_TOKEN: ${{ steps.release_app.outputs.token }}
         shell: bash
         run: |
           set -euo pipefail

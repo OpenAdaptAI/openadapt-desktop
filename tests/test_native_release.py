@@ -175,7 +175,7 @@ def test_native_workflows_are_pinned_and_preserve_candidate_boundary() -> None:
     assert "refs/heads/main:refs/heads/main" not in tag_write
     assert jobs["publish-native"]["environment"] == "native-release"
     assert jobs["publish-native"]["permissions"] == {
-        "contents": "write",
+        "contents": "read",
         "attestations": "read",
     }
     publish_steps = _job_steps(jobs["publish-native"])
@@ -599,17 +599,82 @@ def test_supersession_edits_notes_only_and_never_deletes() -> None:
     assert "  supersede-published-native:" in release
     supersede_job = release.split("  supersede-published-native:", 1)[1]
     assert "needs: [verify-published-release, mirror-installers-to-engine-release]" in supersede_job
-    assert "github.event" not in supersede_job
+    assert "github.event_name" not in supersede_job
     # The supersede job runs only after channel promotion succeeds and retains
     # the protected publication environment.
     assert "environment: native-release" in supersede_job
-    assert "contents: write" in supersede_job
+    assert "contents: read" in supersede_job
+    assert "actions/create-github-app-token@" in supersede_job
+    assert "GH_TOKEN: ${{ steps.release_app.outputs.token }}" in supersede_job
     assert "SELECTED_TAG: ${{ needs.verify-published-release.outputs.native_tag }}" in supersede_job
     assert "native_release.py supersede-notes" in supersede_job
     assert "gh release edit" in supersede_job
     assert "gh release delete" not in release + freshness
     assert "delete-asset" not in release + freshness
     assert "--clobber" not in supersede_job
+
+
+@pytest.mark.parametrize(
+    "workflow_name",
+    ["release.yml", "native-release.yml", "ffmpeg-runtime.yml"],
+)
+def test_every_github_release_mutation_uses_only_the_scoped_release_app(
+    workflow_name: str,
+) -> None:
+    """The workflow token stays read-only when a job mutates a GitHub Release."""
+
+    workflow = _workflow(workflow_name)
+    mutation = re.compile(r"\bgh release (?:create|edit|upload|delete)\b")
+    found = 0
+    for job in workflow["jobs"].values():
+        mutating_steps = [
+            step
+            for step in job["steps"]
+            if mutation.search(str(step.get("run", "")))
+        ]
+        if not mutating_steps:
+            continue
+        found += len(mutating_steps)
+        assert job.get("permissions", {}).get("contents") != "write"
+        app_steps = [step for step in job["steps"] if step.get("id") == "release_app"]
+        assert len(app_steps) == 1
+        app = app_steps[0]
+        assert app["uses"] == (
+            "actions/create-github-app-token@"
+            "bcd2ba49218906704ab6c1aa796996da409d3eb1"
+        )
+        assert app["with"] == {
+            "app-id": "${{ vars.OPENADAPT_RELEASE_APP_ID }}",
+            "private-key": "${{ secrets.OPENADAPT_RELEASE_APP_PRIVATE_KEY }}",
+            "owner": "${{ github.repository_owner }}",
+            "repositories": "${{ github.event.repository.name }}",
+            "permission-contents": "write",
+            "permission-metadata": "read",
+        }
+        app_index = job["steps"].index(app)
+        for step in mutating_steps:
+            assert job["steps"].index(step) > app_index
+            assert step.get("env", {}).get("GH_TOKEN") == (
+                "${{ steps.release_app.outputs.token }}"
+            )
+    assert found > 0
+
+
+def test_only_the_moving_candidate_channel_can_replace_an_asset() -> None:
+    workflow = _workflow("native-release.yml")
+    clobber_steps = [
+        step
+        for job in workflow["jobs"].values()
+        for step in job["steps"]
+        if "--clobber" in str(step.get("run", ""))
+    ]
+
+    assert [step["name"] for step in clobber_steps] == [
+        "Publish and reverify the candidate channel authority"
+    ]
+    assert clobber_steps[0]["env"]["GH_TOKEN"] == (
+        "${{ steps.release_app.outputs.token }}"
+    )
 
 
 def test_updater_feed_is_disabled_until_signing_key_lifecycle_exists() -> None:
@@ -946,13 +1011,24 @@ def test_native_release_workflow_points_latest_at_the_published_installers() -> 
         "verify-published-release",
         "mirror-installers-to-engine-release",
     }
-    assert job["permissions"] == {"contents": "write"}
+    assert job["permissions"] == {"contents": "read"}
     steps = _job_steps(job)
     assert steps["actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"]["with"] == {
         "name": "${{ needs.verify-published-release.outputs.verified_artifact }}",
         "path": "mirror",
     }
     script = steps["Prepend an idempotent installer pointer to the engine release"]["run"]
+    assert steps["Mint the release App token for GitHub publication"]["with"] == {
+        "app-id": "${{ vars.OPENADAPT_RELEASE_APP_ID }}",
+        "private-key": "${{ secrets.OPENADAPT_RELEASE_APP_PRIVATE_KEY }}",
+        "owner": "${{ github.repository_owner }}",
+        "repositories": "${{ github.event.repository.name }}",
+        "permission-contents": "write",
+        "permission-metadata": "read",
+    }
+    assert steps["Prepend an idempotent installer pointer to the engine release"]["env"] == {
+        "GH_TOKEN": "${{ steps.release_app.outputs.token }}"
+    }
     assert "validate-engine-release" in script
     assert "installer-pointer-notes" in script
     assert "gh release edit" in script
@@ -972,7 +1048,7 @@ def test_native_release_workflow_mirrors_installers_onto_the_engine_release() ->
     assert job["permissions"] == {
         "actions": "read",
         "attestations": "write",
-        "contents": "write",
+        "contents": "read",
         "id-token": "write",
     }
     steps = _job_steps(job)
@@ -985,12 +1061,23 @@ def test_native_release_workflow_mirrors_installers_onto_the_engine_release() ->
     assert "verify-checksums" in mirror
     assert "OpenAdapt-Desktop-desktop-v*.cyclonedx.json" in mirror
     assert "cmp mirror/SHA256SUMS remote-mirror/SHA256SUMS" in mirror
-    assert 'gh release upload "${engine_tag}" mirror/* --clobber' in mirror
+    assert 'gh release view "${engine_tag}" --json assets' in mirror
+    assert 'cmp "${path}" "existing-mirror/${name}"' in mirror
+    assert 'gh release upload "${engine_tag}" "${path}"' in mirror
+    assert "--clobber" not in mirror
     assert "gh release edit" not in mirror
     assert "--prerelease" not in mirror
     assert steps["Attest the verified release index"]["with"] == {
         "subject-path": VERIFIED_RELEASE_INDEX
     }
+
+    publish_index = steps["Publish and verify the release index"]
+    assert publish_index["env"] == {
+        "GH_TOKEN": "${{ steps.release_app.outputs.token }}"
+    }
+    assert "existing-index/openadapt-desktop-verified-release.json" in publish_index["run"]
+    assert "cmp openadapt-desktop-verified-release.json" in publish_index["run"]
+    assert "--clobber" not in publish_index["run"]
 
 
 @pytest.mark.parametrize(

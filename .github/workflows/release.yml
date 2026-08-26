@@ -257,7 +257,7 @@ jobs:
     permissions:
       actions: read
       attestations: write
-      contents: write
+      contents: read
       id-token: write
     steps:
       - name: Checkout the exact engine tag

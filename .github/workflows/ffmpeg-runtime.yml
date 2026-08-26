@@ -25,7 +25,7 @@ env:
   SOURCE_SHA256: "464beb5e7bf0c311e68b45ae2f04e9cc2af88851abb4082231742a74d97b524c"
   SOURCE_SIGNATURE_SHA256: "0a0963fccd70597838073f3e31b20f4a4d8cc2b5e577472c9a5a1f22624246f8"
   SIGNING_KEY_SHA256: "397b3becedcd5a98769967ff1ff8501ddc89f8368b8f766e4701377d7dbaabe5" # gitleaks:allow
-  SIGNING_KEY_FINGERPRINT: "FCF986EA15E6E293A5644F10B4322F04D67658D8"
+  SIGNING_KEY_FINGERPRINT: "FCF986EA15E6E293A5644F10B4322F04D67658D8" # gitleaks:allow
 
 jobs:
   authorize-runtime-dispatch:
@@ -366,7 +366,7 @@ jobs:
     runs-on: ubuntu-22.04
     environment: native-release
     permissions:
-      contents: write
+      contents: read
       id-token: write
       attestations: write
     steps:
