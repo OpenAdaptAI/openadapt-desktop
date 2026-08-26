@@ -759,7 +759,7 @@ def write_release_provenance(
     expected_engine_url = f"https://github.com/{repository}/releases/tag/{engine_tag}"
     if engine_release_url != expected_engine_url:
         raise ValueError("engine release URL does not match its repository and tag")
-    expected_ref = f"{repository}/{NATIVE_RELEASE_WORKFLOW}@refs/heads/main"
+    expected_ref = f"{repository}/{NATIVE_RELEASE_WORKFLOW}@refs/tags/{tag}"
     if workflow_ref != expected_ref:
         raise ValueError(f"workflow ref must be exactly {expected_ref!r}, got {workflow_ref!r}")
     if workflow_commit != source_commit:
@@ -783,7 +783,7 @@ def write_release_provenance(
         "workflow_path": NATIVE_RELEASE_WORKFLOW,
         "workflow_ref": workflow_ref,
         "workflow_commit": workflow_commit,
-        "event": "workflow_dispatch",
+        "event": "push",
         "run_id": run_id,
         "run_attempt": run_attempt,
         "runner_environment": runner_environment,
@@ -828,16 +828,25 @@ def validate_release_provenance(
     }
     if not isinstance(data, dict) or set(data) != expected_keys:
         raise ValueError("native release provenance does not use the closed v2 schema")
-    expected_ref = f"{repository}/{NATIVE_RELEASE_WORKFLOW}@refs/heads/main"
+    tag_ref = f"{repository}/{NATIVE_RELEASE_WORKFLOW}@refs/tags/{tag}"
+    main_ref = f"{repository}/{NATIVE_RELEASE_WORKFLOW}@refs/heads/main"
+    workflow_ref = str(data.get("workflow_ref") or "")
+    if workflow_ref == tag_ref:
+        expected_event = "push"
+    elif workflow_ref == main_ref:
+        # Keep already-published reviewed-main receipts verifiable.
+        expected_event = "workflow_dispatch"
+    else:
+        raise ValueError("native release provenance workflow ref differs")
     expected = {
         "schema": NATIVE_RELEASE_PROVENANCE_SCHEMA,
         "repository": repository,
         "source_tag": tag,
         "source_commit": source_commit,
         "workflow_path": NATIVE_RELEASE_WORKFLOW,
-        "workflow_ref": expected_ref,
+        "workflow_ref": workflow_ref,
         "workflow_commit": source_commit,
-        "event": "workflow_dispatch",
+        "event": expected_event,
         "runner_environment": "github-hosted",
         "engine_tag": f"v{tag.removeprefix(NATIVE_TAG_PREFIX)}",
         "engine_release_url": (
@@ -925,8 +934,8 @@ def write_engine_release_provenance(
 ) -> Path:
     """Write the attested identity receipt for one engine release.
 
-    The receipt binds the exact wheel and sdist bytes to the protected-main
-    release workflow that created the tag and public GitHub release.
+    The receipt binds the exact wheel and sdist bytes to the tag-push workflow
+    that published them.
     """
 
     release = validate_engine_release(
@@ -936,11 +945,11 @@ def write_engine_release_provenance(
         engine_commit=engine_commit,
     )
     _validate_commit(workflow_commit)
-    expected_ref = f"{repository}/{ENGINE_RELEASE_WORKFLOW}@refs/heads/main"
+    expected_ref = f"{repository}/{ENGINE_RELEASE_WORKFLOW}@refs/tags/{engine_tag}"
     if workflow_ref != expected_ref:
         raise ValueError(f"engine release workflow ref must be exactly {expected_ref!r}")
-    if workflow_commit == engine_commit:
-        raise ValueError("engine release workflow commit must precede the semantic release commit")
+    if workflow_commit != engine_commit:
+        raise ValueError("engine release workflow commit must equal the reviewed tag commit")
     if not isinstance(run_id, int) or run_id <= 0:
         raise ValueError("engine release run id must be a positive integer")
     if not isinstance(run_attempt, int) or run_attempt <= 0:
@@ -971,7 +980,7 @@ def write_engine_release_provenance(
         "workflow_path": ENGINE_RELEASE_WORKFLOW,
         "workflow_ref": workflow_ref,
         "workflow_commit": workflow_commit,
-        "event": "workflow_dispatch",
+        "event": "push",
         "run_id": run_id,
         "run_attempt": run_attempt,
         "runner_environment": runner_environment,
@@ -1019,6 +1028,17 @@ def validate_engine_release_provenance(
         engine_tag=engine_tag,
         engine_commit=engine_commit,
     )
+    tag_ref = f"{repository}/{ENGINE_RELEASE_WORKFLOW}@refs/tags/{engine_tag}"
+    main_ref = f"{repository}/{ENGINE_RELEASE_WORKFLOW}@refs/heads/main"
+    if data.get("workflow_ref") == tag_ref:
+        workflow_ref = tag_ref
+        event = "push"
+    elif data.get("workflow_ref") == main_ref:
+        # Keep already-published protected-main receipts verifiable.
+        workflow_ref = main_ref
+        event = "workflow_dispatch"
+    else:
+        raise ValueError("engine release provenance workflow_ref differs")
     expected = {
         "schema": ENGINE_RELEASE_PROVENANCE_SCHEMA,
         "repository": repository,
@@ -1027,16 +1047,22 @@ def validate_engine_release_provenance(
         "engine_release_id": release["databaseId"],
         "engine_release_url": release["url"],
         "workflow_path": ENGINE_RELEASE_WORKFLOW,
-        "workflow_ref": f"{repository}/{ENGINE_RELEASE_WORKFLOW}@refs/heads/main",
-        "event": "workflow_dispatch",
+        "workflow_ref": workflow_ref,
+        "event": event,
         "runner_environment": "github-hosted",
     }
     for field, value in expected.items():
         if data.get(field) != value:
             raise ValueError(f"engine release provenance {field} differs")
-    _validate_commit(str(data.get("workflow_commit") or ""))
-    if data["workflow_commit"] == engine_commit:
-        raise ValueError("engine release provenance does not identify the dispatched parent commit")
+    workflow_commit = str(data.get("workflow_commit") or "")
+    _validate_commit(workflow_commit)
+    if event == "push" and workflow_commit != engine_commit:
+        raise ValueError("tag-push engine release provenance workflow_commit differs")
+    if event == "workflow_dispatch" and workflow_commit == engine_commit:
+        raise ValueError("historic engine release provenance does not identify its parent")
+    # Older published receipts bind the generated release commit's protected
+    # main parent. New receipts bind the reviewed tag commit itself. The native
+    # tag workflow checks exact equality before it creates a tag.
     for field in ("run_id", "run_attempt"):
         if not isinstance(data.get(field), int) or data[field] <= 0:
             raise ValueError(f"engine release provenance {field} is invalid")
@@ -1235,7 +1261,9 @@ def write_verified_release_channel(
     if index["repository"] != repository:
         raise ValueError("verified index belongs to a different repository")
     _validate_commit(workflow_commit)
-    expected_ref = f"{repository}/{NATIVE_PROMOTION_WORKFLOW}@refs/heads/main"
+    expected_ref = (
+        f"{repository}/{NATIVE_PROMOTION_WORKFLOW}@refs/tags/{index['native_tag']}"
+    )
     if workflow_ref != expected_ref:
         raise ValueError(f"release channel workflow ref must be exactly {expected_ref!r}")
     if workflow_commit != index["native_source_commit"]:
@@ -1291,7 +1319,7 @@ def write_verified_release_channel(
             "workflow_path": NATIVE_PROMOTION_WORKFLOW,
             "workflow_ref": workflow_ref,
             "workflow_commit": workflow_commit,
-            "event": "workflow_dispatch",
+            "event": "push",
             "run_id": run_id,
             "run_attempt": run_attempt,
             "runner_environment": "github-hosted",
@@ -1386,10 +1414,21 @@ def validate_verified_release_channel(path: Path) -> dict:
     ):
         raise ValueError("release channel prior binding is invalid")
     promotion = data.get("promotion")
+    tag_ref = f"{repository}/{NATIVE_PROMOTION_WORKFLOW}@refs/tags/{data['native_tag']}"
+    main_ref = f"{repository}/{NATIVE_PROMOTION_WORKFLOW}@refs/heads/main"
+    if isinstance(promotion, dict) and promotion.get("workflow_ref") == tag_ref:
+        expected_event = "push"
+        expected_ref = tag_ref
+    elif isinstance(promotion, dict) and promotion.get("workflow_ref") == main_ref:
+        # Keep already-published reviewed-main channel descriptors verifiable.
+        expected_event = "workflow_dispatch"
+        expected_ref = main_ref
+    else:
+        raise ValueError("release channel promotion workflow ref differs")
     expected_promotion = {
         "workflow_path": NATIVE_PROMOTION_WORKFLOW,
-        "workflow_ref": (f"{repository}/{NATIVE_PROMOTION_WORKFLOW}@refs/heads/main"),
-        "event": "workflow_dispatch",
+        "workflow_ref": expected_ref,
+        "event": expected_event,
         "runner_environment": "github-hosted",
     }
     if not isinstance(promotion, dict) or set(promotion) != {
@@ -1454,24 +1493,31 @@ def _validate_attestation_record(record: object, *, provenance: dict, checksums:
     run_id = provenance["run_id"]
     run_attempt = provenance["run_attempt"]
     repository_url = f"https://github.com/{repository}"
-    workflow_uri = f"{repository_url}/{NATIVE_RELEASE_WORKFLOW}@refs/heads/main"
+    tag_ref = f"refs/tags/{provenance['source_tag']}"
+    if provenance["workflow_ref"].endswith(f"@{tag_ref}"):
+        workflow_ref = tag_ref
+        workflow_trigger = "push"
+    else:
+        workflow_ref = "refs/heads/main"
+        workflow_trigger = "workflow_dispatch"
+    workflow_uri = f"{repository_url}/{NATIVE_RELEASE_WORKFLOW}@{workflow_ref}"
     invocation_uri = f"{repository_url}/actions/runs/{run_id}/attempts/{run_attempt}"
     certificate_claims = {
         "subjectAlternativeName": workflow_uri,
-        "githubWorkflowTrigger": "workflow_dispatch",
+        "githubWorkflowTrigger": workflow_trigger,
         "githubWorkflowSHA": commit,
         "githubWorkflowName": NATIVE_RELEASE_WORKFLOW_NAME,
         "githubWorkflowRepository": repository,
-        "githubWorkflowRef": "refs/heads/main",
+        "githubWorkflowRef": workflow_ref,
         "buildSignerURI": workflow_uri,
         "buildSignerDigest": commit,
         "runnerEnvironment": "github-hosted",
         "sourceRepositoryURI": repository_url,
         "sourceRepositoryDigest": commit,
-        "sourceRepositoryRef": "refs/heads/main",
+        "sourceRepositoryRef": workflow_ref,
         "buildConfigURI": workflow_uri,
         "buildConfigDigest": commit,
-        "buildTrigger": "workflow_dispatch",
+        "buildTrigger": workflow_trigger,
         "runInvocationURI": invocation_uri,
     }
     for field, value in certificate_claims.items():
@@ -1492,20 +1538,20 @@ def _validate_attestation_record(record: object, *, provenance: dict, checksums:
     workflow = external.get("workflow") if isinstance(external, dict) else None
     if workflow != {
         "path": NATIVE_RELEASE_WORKFLOW,
-        "ref": "refs/heads/main",
+        "ref": workflow_ref,
         "repository": repository_url,
     }:
         raise ValueError("attestation external workflow identity differs")
     internal = build_definition.get("internalParameters")
     github = internal.get("github") if isinstance(internal, dict) else None
-    if not isinstance(github, dict) or github.get("event_name") != "workflow_dispatch":
-        raise ValueError("attestation was not produced by a workflow dispatch")
+    if not isinstance(github, dict) or github.get("event_name") != workflow_trigger:
+        raise ValueError("attestation was not produced by the bound workflow event")
     if github.get("runner_environment") != "github-hosted":
         raise ValueError("attestation was not produced on a GitHub-hosted runner")
     if build_definition.get("resolvedDependencies") != [
         {
             "digest": {"gitCommit": commit},
-            "uri": f"git+{repository_url}@refs/heads/main",
+            "uri": f"git+{repository_url}@{workflow_ref}",
         }
     ]:
         raise ValueError("attestation resolved source differs")
@@ -1566,12 +1612,18 @@ def validate_release_workflow_run(path: Path, *, provenance: dict) -> int:
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError("GitHub workflow run payload must be an object")
+    if provenance["workflow_ref"].endswith(f"@refs/tags/{provenance['source_tag']}"):
+        event = "push"
+        head_branch = provenance["source_tag"]
+    else:
+        event = "workflow_dispatch"
+        head_branch = "main"
     expected = {
         "databaseId": provenance["run_id"],
         "attempt": provenance["run_attempt"],
         "conclusion": "success",
-        "event": "workflow_dispatch",
-        "headBranch": "main",
+        "event": event,
+        "headBranch": head_branch,
         "headSha": provenance["source_commit"],
         "name": NATIVE_RELEASE_WORKFLOW_NAME,
         "status": "completed",
@@ -1598,8 +1650,13 @@ def validate_release_workflow_run(path: Path, *, provenance: dict) -> int:
         conclusions[job["name"]] = job.get("conclusion")
         if job.get("status") != "completed":
             raise ValueError(f"native release workflow job is not complete: {job['name']}")
+    validation_job = (
+        "Validate the exact tagged native source"
+        if event == "push"
+        else "Validate reviewed main release source"
+    )
     required = {
-        "Validate reviewed main release source",
+        validation_job,
         "macOS arm64",
         "macOS x86_64",
         "Windows x86_64",

@@ -85,7 +85,8 @@ def test_native_release_workflow_requires_protected_signing_environment() -> Non
         Path(__file__).resolve().parents[1] / ".github/workflows/native-release.yml"
     ).read_text(encoding="utf-8")
 
-    assert workflow.count("environment: native-release") == 3
+    assert workflow.count("environment: native-release") == 6
+    assert "environment: release-identity" in workflow
     assert "--require-mode developer-id-notarized" in workflow
     assert "--require-mode authenticode" in workflow
     assert "--signing github-attested" in workflow

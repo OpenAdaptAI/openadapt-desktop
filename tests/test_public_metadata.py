@@ -165,50 +165,57 @@ def test_release_workflow_uses_matching_pinned_actions() -> None:
 
     assert uses
     assert all(re.fullmatch(r"[0-9a-f]{40}", revision) for revision in uses)
-    assert "# v10.6.1" in workflow
-    assert "# v9.15.2" not in workflow
-    assert "token: ${{ secrets.ADMIN_TOKEN }}" in workflow
-    assert workflow.count("github_token: ${{ secrets.ADMIN_TOKEN }}") == 2
-    assert "- name: Build package" not in workflow
+    assert "actions/create-github-app-token@" in workflow
+    assert "vars.OPENADAPT_RELEASE_APP_ID" in workflow
+    assert "secrets.OPENADAPT_RELEASE_APP_PRIVATE_KEY" in workflow
+    assert "persist-credentials: false" in workflow
+    assert "token: ${{ steps.release_app.outputs.token }}" in workflow
+    assert "ADMIN_TOKEN" not in workflow
+    assert "environment: release-identity" in workflow
+    assert "environment: pypi" in workflow
+    assert "id-token: write" in workflow
 
 
 def test_release_is_manual_and_gated_on_exact_test_and_build_heads() -> None:
     workflow = (ROOT / ".github/workflows/release.yml").read_text()
     triggers = workflow[workflow.index("\non:\n") : workflow.index("\njobs:\n")]
-    semantic = workflow[workflow.index("\n  semantic-release:") :]
-    wait_index = semantic.index("- name: Wait for exact-head Test and Build workflows")
-    head_index = semantic.index("- name: Require dispatched head to remain current protected main")
-    release_index = semantic.index("- name: Python Semantic Release")
+    tagger = workflow[workflow.index("\n  create-release-tag:") :]
+    evidence_index = tagger.index("- name: Require the exact reviewed candidate")
+    token_index = tagger.index("- name: Mint the release App token")
+    tag_index = tagger.index("- name: Create only the exact candidate tag")
 
-    assert "  push:" not in triggers
+    assert "  push:" in triggers
+    assert '      - "v*"' in triggers
     assert "  workflow_dispatch:" in triggers
-    assert "operation:" in triggers
-    assert "- semantic-release" in triggers
-    assert "- publish-existing-ref" in triggers
-    assert "github.ref == 'refs/heads/main'" in semantic
-    assert wait_index < head_index < release_index
+    assert "version:" in triggers
+    assert "github.ref == 'refs/heads/main'" in tagger
+    assert evidence_index < token_index < tag_index
     for workflow_name in ("test.yml", "build.yml"):
-        assert workflow_name in semantic
-    assert '--raw-field head_sha="${GITHUB_SHA}"' in semantic
-    assert "refs/remotes/origin/main" in semantic
-    assert "Refusing stale release dispatch" in semantic
+        assert workflow_name in tagger
+    assert '--raw-field head_sha="${GITHUB_SHA}"' in tagger
+    assert "refs/remotes/origin/main" in tagger
+    assert 'git tag -a "${ENGINE_TAG}" "${ENGINE_COMMIT}"' in tagger
+    assert 'push origin "refs/tags/${ENGINE_TAG}:refs/tags/${ENGINE_TAG}"' in tagger
+    assert "GIT_CONFIG_KEY_0=http.https://github.com/.extraheader" in tagger
+    assert 'GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${app_basic}"' in tagger
+    assert "APP_TOKEN: ${{ steps.release_app.outputs.token }}" in tagger
+    assert "refs/heads/main:refs/heads/main" not in tagger
+    assert "semantic-release" not in tagger
 
 
-def test_release_recovery_ref_is_main_contained_and_exact_ci_green() -> None:
+def test_release_recovery_is_an_exact_tag_rerun() -> None:
     workflow = (ROOT / ".github/workflows/release.yml").read_text()
-    recovery = workflow[workflow.index("\n  publish-existing-ref:") :]
-    build_index = recovery.index("- name: Build and validate exact recovery artifacts")
-    publish_index = recovery.index("- name: Publish to PyPI")
+    publication = workflow[workflow.index("\n  publish-tagged-engine:") :]
 
-    assert "inputs.operation == 'publish-existing-ref'" in recovery
-    assert "github.ref == 'refs/heads/main'" in recovery
-    assert "git merge-base --is-ancestor" in recovery
-    assert 'head_sha="${TARGET_SHA}"' in recovery
-    for workflow_name in ("test.yml", "build.yml"):
-        assert workflow_name in recovery
-    assert "guard/scripts/verify_build_artifact.py python-distribution --root target" in recovery
-    assert "packages-dir: target/dist/" in recovery
-    assert build_index < publish_index
+    assert "publish-existing-ref" not in workflow
+    assert "github.event_name == 'push'" in publication
+    assert "^refs/tags/v[0-9]+" in publication
+    assert 'git merge-base --is-ancestor "${GITHUB_SHA}" refs/remotes/origin/main' in publication
+    assert "skip-existing: true" in publication
+    assert "--verify-tag" in publication
+    assert "--target" not in publication
+    assert "Mint the release App token for GitHub publication" in publication
+    assert "GH_TOKEN: ${{ steps.release_app.outputs.token }}" in publication
 
 
 def test_candidate_release_notes_describe_the_bundled_flow_runtime() -> None:

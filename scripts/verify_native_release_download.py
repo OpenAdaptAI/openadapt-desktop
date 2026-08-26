@@ -221,11 +221,21 @@ def validate_channel(
     ):
         raise ValueError("release channel prior binding is invalid")
     promotion = data.get("promotion")
-    workflow_ref = f"{repository}/{NATIVE_RELEASE_WORKFLOW}@refs/heads/main"
+    tag_ref = f"{repository}/{NATIVE_RELEASE_WORKFLOW}@refs/tags/{native_tag}"
+    main_ref = f"{repository}/{NATIVE_RELEASE_WORKFLOW}@refs/heads/main"
+    if isinstance(promotion, dict) and promotion.get("workflow_ref") == tag_ref:
+        workflow_ref = tag_ref
+        event = "push"
+    elif isinstance(promotion, dict) and promotion.get("workflow_ref") == main_ref:
+        # Keep already-published reviewed-main descriptors verifiable.
+        workflow_ref = main_ref
+        event = "workflow_dispatch"
+    else:
+        raise ValueError("release channel promotion workflow ref differs")
     expected_promotion = {
         "workflow_path": NATIVE_RELEASE_WORKFLOW,
         "workflow_ref": workflow_ref,
-        "event": "workflow_dispatch",
+        "event": event,
         "runner_environment": "github-hosted",
     }
     if not isinstance(promotion, dict) or set(promotion) != {
@@ -383,8 +393,11 @@ def verify_authenticated_channel(
 ) -> int:
     """Authenticate one channel selection and verify its complete asset set."""
 
+    candidate_bytes = _read_regular_bytes(channel_path, label=channel_path.name)
+    candidate = validate_channel(channel_path, repository=repository, raw=candidate_bytes)
+    identity_ref = candidate["promotion"]["workflow_ref"].rsplit("@", 1)[1]
     _, channel_bytes = _verify_github_attestation(
-        channel_path, repository=repository, identity_ref="refs/heads/main"
+        channel_path, repository=repository, identity_ref=identity_ref
     )
     channel = validate_channel(channel_path, repository=repository, raw=channel_bytes)
     if minimum_version is not None and _version_tuple(channel["native_version"]) < _version_tuple(
@@ -405,13 +418,13 @@ def verify_authenticated_channel(
         if _version_tuple(channel["native_version"]) <= _version_tuple(previous["native_version"]):
             raise ValueError("release channel does not advance the accepted version")
 
-    # One reviewed-main workflow dispatch attests the native bytes, verified
-    # index, and channel. Every certificate therefore carries the same protected
-    # main workflow identity.
+    # One exact workflow run attests the native bytes, verified index, and
+    # channel. Every certificate carries the same protected tag identity for
+    # new releases. Historical reviewed-main receipts remain verifiable.
     index_digest, index_bytes = _verify_github_attestation(
         index_path,
         repository=repository,
-        identity_ref="refs/heads/main",
+        identity_ref=identity_ref,
     )
     if index_digest != channel["verified_index"]["sha256"]:
         raise ValueError("verified release index digest differs from the authenticated channel")
@@ -433,7 +446,7 @@ def verify_authenticated_channel(
     checksum_digest, checksum_bytes = _verify_github_attestation(
         checksums,
         repository=repository,
-        identity_ref="refs/heads/main",
+        identity_ref=identity_ref,
     )
     if checksum_digest != channel["checksums"]["sha256"]:
         raise ValueError("SHA256SUMS digest differs from the authenticated channel")

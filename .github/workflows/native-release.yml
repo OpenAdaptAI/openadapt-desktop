@@ -11,6 +11,9 @@ on:
         description: "Reviewed main native version to publish (X.Y.Z)"
         required: true
         type: string
+  push:
+    tags:
+      - "desktop-v*"
 
 permissions:
   contents: read
@@ -22,9 +25,170 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  create-native-tag:
+    name: Create the reviewed native release tag
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main'
+    runs-on: ubuntu-22.04
+    environment: release-identity
+    permissions:
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Require current reviewed main and the signed engine receipt
+        id: release
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" != "workflow_dispatch" ] || \
+             [ "${GITHUB_REF}" != "refs/heads/main" ]; then
+            echo "error: native tag creation requires a main workflow_dispatch" >&2
+            exit 1
+          fi
+          if [ "${GITHUB_REPOSITORY}" != "OpenAdaptAI/openadapt-desktop" ]; then
+            echo "error: native tag creation requires OpenAdaptAI/openadapt-desktop" >&2
+            exit 1
+          fi
+          git fetch --force origin main:refs/remotes/origin/main --tags
+          current_main="$(git rev-parse --verify refs/remotes/origin/main)"
+          if [ "${current_main}" != "${GITHUB_SHA}" ]; then
+            echo "error: dispatch source ${GITHUB_SHA} is not current main ${current_main}" >&2
+            exit 1
+          fi
+          version="$(python scripts/native_release.py version)"
+          if [ "${REQUESTED_VERSION}" != "${version}" ]; then
+            echo "error: requested version ${REQUESTED_VERSION} is not reviewed main version ${version}" >&2
+            exit 1
+          fi
+          python scripts/check_release_consistency.py
+          escaped_version="${version//./\\.}"
+          if ! grep -Eq "^## v${escaped_version} \\([0-9]{4}-[0-9]{2}-[0-9]{2}\\)$" CHANGELOG.md; then
+            echo "error: reviewed candidate has no dated changelog entry" >&2
+            exit 1
+          fi
+          native_tag="desktop-v${version}"
+          python scripts/native_release.py validate-tag "${native_tag}"
+          engine_tag="v${version}"
+          engine_commit="$(git rev-parse --verify "${engine_tag}^{commit}")" || {
+            echo "error: matching engine tag ${engine_tag} does not exist" >&2
+            exit 1
+          }
+          if [ "$(git cat-file -t "refs/tags/${engine_tag}")" != "tag" ]; then
+            echo "error: matching engine release does not use an annotated tag" >&2
+            exit 1
+          fi
+          if [ "${engine_commit}" != "${GITHUB_SHA}" ]; then
+            echo "error: ${engine_tag} is not the exact reviewed native candidate" >&2
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/${native_tag}" >/dev/null; then
+            echo "error: immutable native tag ${native_tag} already exists" >&2
+            exit 1
+          fi
+          git ls-remote --tags origin > remote-native-tags.txt
+          python scripts/native_release.py validate-release-order \
+            --candidate-tag "${native_tag}" \
+            --tags remote-native-tags.txt
+
+          gh release view "${engine_tag}" \
+            --json databaseId,isDraft,isPrerelease,publishedAt,tagName,url \
+            > engine-release.json
+          mkdir engine-assets
+          gh release download "${engine_tag}" --dir engine-assets \
+            --pattern '*.whl' \
+            --pattern '*.tar.gz' \
+            --pattern 'openadapt-desktop-engine-release-provenance.json'
+          receipt=engine-assets/openadapt-desktop-engine-release-provenance.json
+          python scripts/native_release.py validate-engine-provenance \
+            --file "${receipt}" \
+            --directory engine-assets \
+            --release engine-release.json \
+            --repository "${GITHUB_REPOSITORY}" \
+            --engine-tag "${engine_tag}" \
+            --engine-commit "${engine_commit}"
+          identity="https://github.com/$(jq -r '.workflow_ref' "${receipt}")"
+          gh attestation verify "${receipt}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --cert-identity "${identity}" \
+            --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --deny-self-hosted-runners
+          receipt_commit="$(jq -r '.workflow_commit' "${receipt}")"
+          if [ "${receipt_commit}" != "${engine_commit}" ]; then
+            echo "error: engine receipt does not bind the reviewed engine tag" >&2
+            exit 1
+          fi
+
+          echo "native_tag=${native_tag}" >> "${GITHUB_OUTPUT}"
+
+      - name: Mint the release App token for this repository
+        id: release_app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.OPENADAPT_RELEASE_APP_ID }}
+          private-key: ${{ secrets.OPENADAPT_RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-metadata: read
+
+      - name: Bind Git only to the repository-scoped release App token
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          token: ${{ steps.release_app.outputs.token }}
+
+      - name: Create only the exact native candidate tag
+        env:
+          APP_TOKEN: ${{ steps.release_app.outputs.token }}
+          NATIVE_TAG: ${{ steps.release.outputs.native_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          current_main="$(git ls-remote origin refs/heads/main | cut -f1)"
+          if [ "${current_main}" != "${GITHUB_SHA}" ]; then
+            echo "error: main changed before native tag creation" >&2
+            exit 1
+          fi
+          git config user.name "openadapt-release[bot]"
+          git config user.email "openadapt-release[bot]@users.noreply.github.com"
+          git tag --annotate "${NATIVE_TAG}" "${GITHUB_SHA}" \
+            --message "OpenAdapt Desktop native ${NATIVE_TAG#desktop-v}"
+          app_basic="$(printf 'x-access-token:%s' "${APP_TOKEN}" | base64 | tr -d '\r\n')"
+          printf '::add-mask::%s\n' "${app_basic}"
+          GIT_TERMINAL_PROMPT=0 \
+          GIT_CONFIG_COUNT=1 \
+          GIT_CONFIG_KEY_0=http.https://github.com/.extraheader \
+          GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${app_basic}" \
+            git push origin "refs/tags/${NATIVE_TAG}:refs/tags/${NATIVE_TAG}"
+          unset app_basic
+          local_object="$(git rev-parse "refs/tags/${NATIVE_TAG}")"
+          remote_object="$(git ls-remote --refs origin "refs/tags/${NATIVE_TAG}" | cut -f1)"
+          remote_commit="$(git ls-remote origin "refs/tags/${NATIVE_TAG}^{}" | cut -f1)"
+          if [ "${remote_object}" != "${local_object}" ] || \
+             [ "${remote_commit}" != "${GITHUB_SHA}" ]; then
+            echo "error: created annotated native tag differs from the reviewed candidate" >&2
+            exit 1
+          fi
+
   validate:
-    name: Validate reviewed main release source
-    if: github.ref == 'refs/heads/main'
+    name: Validate the exact tagged native source
+    if: >-
+      github.event_name == 'push' &&
+      startsWith(github.ref, 'refs/tags/desktop-v')
     runs-on: ubuntu-22.04
     permissions:
       contents: read
@@ -44,63 +208,72 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Require current reviewed main and the signed engine receipt
+      - name: Bind the event, ref, version, tag, and signed engine receipt
         id: release
-        env:
-          REQUESTED_VERSION: ${{ inputs.version }}
         shell: bash
         run: |
           set -euo pipefail
-          git fetch --force origin main:refs/remotes/origin/main --tags
-          current_main="$(git rev-parse --verify refs/remotes/origin/main)"
-          if [ "${current_main}" != "${GITHUB_SHA}" ]; then
-            echo "error: dispatch source ${GITHUB_SHA} is not current main ${current_main}" >&2
+          if [ "${GITHUB_EVENT_NAME}" != "push" ] || \
+             ! printf '%s' "${GITHUB_REF}" | grep -Eq '^refs/tags/desktop-v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "error: native publication requires an exact desktop-vX.Y.Z push" >&2
             exit 1
           fi
-          version="$(python scripts/native_release.py version)"
-          if [ "${REQUESTED_VERSION}" != "${version}" ]; then
-            echo "error: requested version ${REQUESTED_VERSION} is not reviewed main version ${version}" >&2
+          if [ "${GITHUB_ACTOR}" != "openadapt-release[bot]" ] || \
+             [ "${GITHUB_REPOSITORY}" != "OpenAdaptAI/openadapt-desktop" ]; then
+            echo "error: native publication requires the repository release App" >&2
             exit 1
           fi
-          native_tag="desktop-v${version}"
+          native_tag="${GITHUB_REF_NAME}"
+          version="${native_tag#desktop-v}"
+          if [ "${GITHUB_REF}" != "refs/tags/desktop-v${version}" ]; then
+            echo "error: native ref and version differ" >&2
+            exit 1
+          fi
+          if [ "$(git cat-file -t "refs/tags/${native_tag}")" != "tag" ]; then
+            echo "error: native publication requires an annotated tag" >&2
+            exit 1
+          fi
           python scripts/native_release.py validate-tag "${native_tag}"
+          reviewed_version="$(python scripts/native_release.py version)"
+          if [ "${version}" != "${reviewed_version}" ]; then
+            echo "error: native tag ${version} differs from reviewed metadata ${reviewed_version}" >&2
+            exit 1
+          fi
+          tag_commit="$(git rev-parse --verify "${native_tag}^{commit}")"
+          if [ "${tag_commit}" != "${GITHUB_SHA}" ]; then
+            echo "error: native workflow SHA differs from its tag" >&2
+            exit 1
+          fi
+          git fetch --force origin main:refs/remotes/origin/main --tags
+          if ! git merge-base --is-ancestor "${GITHUB_SHA}" refs/remotes/origin/main; then
+            echo "error: native tag is not contained in protected main" >&2
+            exit 1
+          fi
           engine_tag="v${version}"
           engine_commit="$(git rev-parse --verify "${engine_tag}^{commit}")" || {
             echo "error: matching engine tag ${engine_tag} does not exist" >&2
             exit 1
           }
-          if ! git merge-base --is-ancestor "${engine_commit}" "${GITHUB_SHA}"; then
-            echo "error: ${engine_tag} is not an ancestor of reviewed main" >&2
+          if [ "$(git cat-file -t "refs/tags/${engine_tag}")" != "tag" ]; then
+            echo "error: matching engine release does not use an annotated tag" >&2
             exit 1
           fi
-          python scripts/native_release.py validate-version-transform \
-            --base-ref "${engine_commit}" \
-            --candidate-ref "${GITHUB_SHA}" \
-            --version "${version}"
-          if git ls-remote --exit-code --tags origin "refs/tags/${native_tag}" >/dev/null; then
-            echo "error: immutable native tag ${native_tag} already exists" >&2
+          if [ "${engine_commit}" != "${GITHUB_SHA}" ]; then
+            echo "error: native and engine tags do not bind the same reviewed commit" >&2
             exit 1
           fi
           git ls-remote --tags origin > remote-native-tags.txt
           python scripts/native_release.py validate-release-order \
             --candidate-tag "${native_tag}" \
             --tags remote-native-tags.txt
-
           gh release view "${engine_tag}" \
             --json databaseId,isDraft,isPrerelease,publishedAt,tagName,url \
             > engine-release.json
           mkdir engine-assets
           gh release download "${engine_tag}" --dir engine-assets \
-            --pattern '*.whl' \
-            --pattern '*.tar.gz' \
+            --pattern '*.whl' --pattern '*.tar.gz' \
             --pattern 'openadapt-desktop-engine-release-provenance.json'
           receipt=engine-assets/openadapt-desktop-engine-release-provenance.json
-          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/heads/main"
-          gh attestation verify "${receipt}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --cert-identity "${identity}" \
-            --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
-            --deny-self-hosted-runners
           python scripts/native_release.py validate-engine-provenance \
             --file "${receipt}" \
             --directory engine-assets \
@@ -108,13 +281,17 @@ jobs:
             --repository "${GITHUB_REPOSITORY}" \
             --engine-tag "${engine_tag}" \
             --engine-commit "${engine_commit}"
-          receipt_parent="$(jq -r '.workflow_commit' "${receipt}")"
-          observed_parent="$(git rev-parse --verify "${engine_commit}^")"
-          if [ "${receipt_parent}" != "${observed_parent}" ]; then
-            echo "error: engine receipt does not bind the semantic release parent" >&2
+          identity="https://github.com/$(jq -r '.workflow_ref' "${receipt}")"
+          gh attestation verify "${receipt}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --cert-identity "${identity}" \
+            --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --deny-self-hosted-runners
+          receipt_commit="$(jq -r '.workflow_commit' "${receipt}")"
+          if [ "${receipt_commit}" != "${engine_commit}" ]; then
+            echo "error: engine receipt does not bind the reviewed engine tag" >&2
             exit 1
           fi
-
           {
             echo "native_tag=${native_tag}"
             echo "source_commit=${GITHUB_SHA}"
@@ -668,12 +845,6 @@ jobs:
             --pattern '*.tar.gz' \
             --pattern 'openadapt-desktop-engine-release-provenance.json'
           receipt=engine-assets/openadapt-desktop-engine-release-provenance.json
-          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/heads/main"
-          gh attestation verify "${receipt}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --cert-identity "${identity}" \
-            --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
-            --deny-self-hosted-runners
           python scripts/native_release.py validate-engine-provenance \
             --file "${receipt}" \
             --directory engine-assets \
@@ -681,10 +852,15 @@ jobs:
             --repository "${GITHUB_REPOSITORY}" \
             --engine-tag "${ENGINE_TAG}" \
             --engine-commit "${ENGINE_COMMIT}"
-          receipt_parent="$(jq -r '.workflow_commit' "${receipt}")"
-          observed_parent="$(git rev-parse --verify "${ENGINE_COMMIT}^")"
-          if [ "${receipt_parent}" != "${observed_parent}" ]; then
-            echo "error: engine receipt does not bind the semantic release parent" >&2
+          identity="https://github.com/$(jq -r '.workflow_ref' "${receipt}")"
+          gh attestation verify "${receipt}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --cert-identity "${identity}" \
+            --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --deny-self-hosted-runners
+          receipt_commit="$(jq -r '.workflow_commit' "${receipt}")"
+          if [ "${receipt_commit}" != "${ENGINE_COMMIT}" ]; then
+            echo "error: engine receipt does not bind the reviewed engine tag" >&2
             exit 1
           fi
 
@@ -747,7 +923,7 @@ jobs:
         run: |
           set -euo pipefail
           provenance=release-assets/openadapt-desktop-native-release-provenance.json
-          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/native-release.yml@refs/heads/main"
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/native-release.yml@refs/tags/${NATIVE_TAG}"
           gh attestation verify "${provenance}" \
             --repo "${GITHUB_REPOSITORY}" \
             --cert-identity "${identity}" \
@@ -779,9 +955,8 @@ jobs:
     name: Publish the verified candidate prerelease
     needs: [validate, attest]
     runs-on: ubuntu-22.04
-    # This is the irreversible boundary. One environment approval authorizes
-    # the exact reviewed-main transaction. The job refuses an existing tag or
-    # release and never replaces published bytes.
+    # This is the irreversible boundary. The protected environment admits only
+    # the exact tag run and this job never replaces published bytes.
     environment: native-release
     permissions:
       contents: write
@@ -808,7 +983,7 @@ jobs:
         run: |
           set -euo pipefail
           provenance=release-assets/openadapt-desktop-native-release-provenance.json
-          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/native-release.yml@refs/heads/main"
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/native-release.yml@refs/tags/${NATIVE_TAG}"
           python scripts/native_release.py verify-checksums \
             --directory release-assets \
             --manifest release-assets/SHA256SUMS
@@ -832,25 +1007,38 @@ jobs:
             --tag "${NATIVE_TAG}" \
             --source-commit "${SOURCE_COMMIT}"
 
+      - name: Mint the release App token for GitHub publication
+        id: release_app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.OPENADAPT_RELEASE_APP_ID }}
+          private-key: ${{ secrets.OPENADAPT_RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-metadata: read
+
       - name: Create or safely resume the immutable public prerelease
+        env:
+          GH_TOKEN: ${{ steps.release_app.outputs.token }}
         shell: bash
         run: |
           set -euo pipefail
           git fetch --force origin main:refs/remotes/origin/main --tags
           current_main="$(git rev-parse --verify refs/remotes/origin/main)"
-          if [ "${current_main}" != "${SOURCE_COMMIT}" ]; then
-            echo "error: main advanced to ${current_main}; refusing stale publication" >&2
+          if ! git merge-base --is-ancestor "${SOURCE_COMMIT}" "${current_main}"; then
+            echo "error: native source is not contained in protected main" >&2
             exit 1
           fi
-          tag_exists=false
-          if git ls-remote --exit-code --tags origin "refs/tags/${NATIVE_TAG}" >/dev/null; then
-            tag_exists=true
-            git fetch --force origin "refs/tags/${NATIVE_TAG}:refs/tags/${NATIVE_TAG}"
-            observed="$(git rev-parse --verify "${NATIVE_TAG}^{commit}")"
-            if [ "${observed}" != "${SOURCE_COMMIT}" ]; then
-              echo "error: immutable ${NATIVE_TAG} resolves to ${observed}" >&2
-              exit 1
-            fi
+          if ! git ls-remote --exit-code --tags origin "refs/tags/${NATIVE_TAG}" >/dev/null; then
+            echo "error: release App did not create ${NATIVE_TAG}" >&2
+            exit 1
+          fi
+          git fetch --force origin "refs/tags/${NATIVE_TAG}:refs/tags/${NATIVE_TAG}"
+          observed="$(git rev-parse --verify "${NATIVE_TAG}^{commit}")"
+          if [ "${observed}" != "${SOURCE_COMMIT}" ]; then
+            echo "error: immutable ${NATIVE_TAG} resolves to ${observed}" >&2
+            exit 1
           fi
           git ls-remote --tags origin > remote-native-tags.txt
           python scripts/native_release.py validate-release-order \
@@ -888,12 +1076,8 @@ jobs:
               fi
             done
           else
-            create_ref=(--target "${SOURCE_COMMIT}")
-            if [ "${tag_exists}" = true ]; then
-              create_ref=(--verify-tag)
-            fi
             gh release create "${NATIVE_TAG}" \
-              "${create_ref[@]}" \
+              --verify-tag \
               --prerelease \
               --title "${title}" \
               --notes-file docs/RELEASE_CANDIDATE_INSTALLERS.md \
@@ -965,7 +1149,7 @@ jobs:
         run: |
           set -euo pipefail
           provenance=release-assets/openadapt-desktop-native-release-provenance.json
-          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/native-release.yml@refs/heads/main"
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/native-release.yml@refs/tags/${NATIVE_TAG}"
           python scripts/native_release.py verify-checksums \
             --directory release-assets \
             --manifest release-assets/SHA256SUMS
@@ -1015,12 +1199,6 @@ jobs:
             --pattern '*.tar.gz' \
             --pattern 'openadapt-desktop-engine-release-provenance.json'
           receipt=engine-assets/openadapt-desktop-engine-release-provenance.json
-          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/heads/main"
-          gh attestation verify "${receipt}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --cert-identity "${identity}" \
-            --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
-            --deny-self-hosted-runners
           python scripts/native_release.py validate-engine-provenance \
             --file "${receipt}" \
             --directory engine-assets \
@@ -1028,10 +1206,15 @@ jobs:
             --repository "${GITHUB_REPOSITORY}" \
             --engine-tag "${ENGINE_TAG}" \
             --engine-commit "${ENGINE_COMMIT}"
-          receipt_parent="$(jq -r '.workflow_commit' "${receipt}")"
-          observed_parent="$(git rev-parse --verify "${ENGINE_COMMIT}^")"
-          if [ "${receipt_parent}" != "${observed_parent}" ]; then
-            echo "error: engine receipt does not bind the semantic release parent" >&2
+          identity="https://github.com/$(jq -r '.workflow_ref' "${receipt}")"
+          gh attestation verify "${receipt}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --cert-identity "${identity}" \
+            --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --deny-self-hosted-runners
+          receipt_commit="$(jq -r '.workflow_commit' "${receipt}")"
+          if [ "${receipt_commit}" != "${ENGINE_COMMIT}" ]; then
+            echo "error: engine receipt does not bind the reviewed engine tag" >&2
             exit 1
           fi
 
@@ -1059,6 +1242,7 @@ jobs:
     # select from.
     needs: [verify-published-release, mirror-installers-to-engine-release]
     runs-on: ubuntu-22.04
+    environment: native-release
     permissions:
       contents: write
     env:
@@ -1160,6 +1344,7 @@ jobs:
     # download+upload minutes in this one job, not storage spend.
     needs: verify-published-release
     runs-on: ubuntu-22.04
+    environment: native-release
     permissions:
       actions: read
       attestations: write
@@ -1283,7 +1468,7 @@ jobs:
             --engine-tag "${ENGINE_TAG}" \
             --engine-commit "${ENGINE_COMMIT}" \
             --provenance mirror/openadapt-desktop-native-release-provenance.json
-          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/native-release.yml@refs/heads/main"
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/native-release.yml@refs/tags/${NATIVE_TAG}"
           gh attestation verify openadapt-desktop-verified-release.json \
             --repo "${GITHUB_REPOSITORY}" \
             --cert-identity "${identity}" \
@@ -1325,14 +1510,15 @@ jobs:
             mkdir prior-channel
             gh release download "${channel_tag}" --dir prior-channel \
               --pattern 'openadapt-desktop-channel.json'
-            identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/native-release.yml@refs/heads/main"
+            python scripts/native_release.py validate-release-channel \
+              --file prior-channel/openadapt-desktop-channel.json
+            identity="https://github.com/$(jq -r '.promotion.workflow_ref' \
+              prior-channel/openadapt-desktop-channel.json)"
             gh attestation verify prior-channel/openadapt-desktop-channel.json \
               --repo "${GITHUB_REPOSITORY}" \
               --cert-identity "${identity}" \
               --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
               --deny-self-hosted-runners
-            python scripts/native_release.py validate-release-channel \
-              --file prior-channel/openadapt-desktop-channel.json
             prior_tag="$(jq -r '.native_tag' prior-channel/openadapt-desktop-channel.json)"
             if [ "${prior_tag}" = "${NATIVE_TAG}" ]; then
               expected_index="$(jq -r '.verified_index.sha256' \
@@ -1378,7 +1564,7 @@ jobs:
         run: |
           set -euo pipefail
           channel_tag=desktop-channel
-          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/native-release.yml@refs/heads/main"
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/native-release.yml@refs/tags/${NATIVE_TAG}"
           gh attestation verify openadapt-desktop-channel.json \
             --repo "${GITHUB_REPOSITORY}" \
             --cert-identity "${identity}" \
@@ -1411,6 +1597,7 @@ jobs:
     name: Mark every lower native prerelease superseded
     needs: [verify-published-release, mirror-installers-to-engine-release]
     runs-on: ubuntu-22.04
+    environment: native-release
     permissions:
       contents: write
     env:

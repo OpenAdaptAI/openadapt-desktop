@@ -10,8 +10,9 @@
     "29514474536). Each left an immutable public tag promising installers that",
     "were never published, and native-release.yml has no failure notifier at",
     "all -- nor could one see `cancelled` or `skipped`.",
-    "The target-state native workflow does not create a tag until the signed",
-    "bytes pass and the native-release environment approves publication.",
+    "The target-state workflows create only an annotated tag from the exact",
+    "reviewed main candidate. Publication then runs from that protected tag.",
+    "A failed publication resumes only by rerunning the exact tag workflow.",
     "The historical failures remain detector fixtures."
   ],
   "repository": "OpenAdaptAI/openadapt-desktop",
@@ -28,7 +29,7 @@
       "unreleased_grace_hours": 4,
       "tag_without_release_grace_hours": 1,
       "pypi_lag_grace_minutes": 30,
-      "remediation": "gh workflow run release.yml --repo OpenAdaptAI/openadapt-desktop --ref main -f operation=semantic-release"
+      "remediation": "# Prepare and merge the complete reviewed candidate first.\ngh workflow run release.yml --repo OpenAdaptAI/openadapt-desktop --ref main -f version=X.Y.Z\n# Approve release-identity for tag creation and pypi for the exact tag run."
     },
     {
       "id": "native",
@@ -37,7 +38,7 @@
       "release_workflows": ["native-release.yml"],
       "tracks_main": false,
       "tag_without_release_grace_hours": 6,
-      "remediation": "# After the exact native-version pull request merges, dispatch the reviewed-main transaction.\n# Approve the native-release environment when publish-native requests it.\ngh workflow run native-release.yml --repo OpenAdaptAI/openadapt-desktop --ref main -f version=X.Y.Z"
+      "remediation": "# After the complete candidate merges and vX.Y.Z publishes, create its native tag.\ngh workflow run native-release.yml --repo OpenAdaptAI/openadapt-desktop --ref main -f version=X.Y.Z\n# Approve release-identity for tag creation and native-release for the exact tag run."
     }
   ]
 }

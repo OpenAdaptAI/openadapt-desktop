@@ -8,6 +8,9 @@ on:
         required: true
         default: false
         type: boolean
+  push:
+    tags:
+      - "ffmpeg-runtime-v*"
 
 permissions:
   contents: read
@@ -16,14 +19,162 @@ env:
   FFMPEG_VERSION: "8.1.2"
   RUNTIME_REVISION: "r2"
   SOURCE_SHA256: "464beb5e7bf0c311e68b45ae2f04e9cc2af88851abb4082231742a74d97b524c"
+  SOURCE_SIGNATURE_SHA256: "0a0963fccd70597838073f3e31b20f4a4d8cc2b5e577472c9a5a1f22624246f8"
+  SIGNING_KEY_SHA256: "397b3becedcd5a98769967ff1ff8501ddc89f8368b8f766e4701377d7dbaabe5" # gitleaks:allow
   SIGNING_KEY_FINGERPRINT: "FCF986EA15E6E293A5644F10B4322F04D67658D8"
 
 jobs:
+  create-runtime-tag:
+    name: Create the reviewed managed-runtime tag
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main' &&
+      inputs.publish
+    needs: [source, build]
+    runs-on: ubuntu-22.04
+    environment: release-identity
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Bind the expected tag to current protected main
+        id: runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" != "workflow_dispatch" ] || \
+             [ "${GITHUB_REF}" != "refs/heads/main" ]; then
+            echo "error: managed-runtime tag creation requires a main dispatch" >&2
+            exit 1
+          fi
+          if [ "${GITHUB_REPOSITORY}" != "OpenAdaptAI/openadapt-desktop" ]; then
+            echo "error: managed-runtime tag creation requires OpenAdaptAI/openadapt-desktop" >&2
+            exit 1
+          fi
+          git fetch --force origin main:refs/remotes/origin/main --tags
+          current_main="$(git rev-parse --verify refs/remotes/origin/main)"
+          if [ "${GITHUB_SHA}" != "${current_main}" ]; then
+            echo "error: dispatched runtime candidate is not current main" >&2
+            exit 1
+          fi
+          tag="ffmpeg-runtime-v${FFMPEG_VERSION}-${RUNTIME_REVISION}"
+          if ! printf '%s' "${tag}" | grep -Eq '^ffmpeg-runtime-v[0-9]+\.[0-9]+\.[0-9]+-r[0-9]+$'; then
+            echo "error: managed-runtime version or revision is not canonical" >&2
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null; then
+            echo "error: immutable managed-runtime tag ${tag} already exists" >&2
+            exit 1
+          fi
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+
+      - name: Mint the release App token for this repository
+        id: release_app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.OPENADAPT_RELEASE_APP_ID }}
+          private-key: ${{ secrets.OPENADAPT_RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-metadata: read
+
+      - name: Bind Git only to the repository-scoped release App token
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          token: ${{ steps.release_app.outputs.token }}
+
+      - name: Create only the exact managed-runtime tag
+        env:
+          APP_TOKEN: ${{ steps.release_app.outputs.token }}
+          RUNTIME_TAG: ${{ steps.runtime.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          current_main="$(git ls-remote origin refs/heads/main | cut -f1)"
+          if [ "${current_main}" != "${GITHUB_SHA}" ]; then
+            echo "error: main changed before managed-runtime tag creation" >&2
+            exit 1
+          fi
+          git config user.name "openadapt-release[bot]"
+          git config user.email "openadapt-release[bot]@users.noreply.github.com"
+          git tag --annotate "${RUNTIME_TAG}" "${GITHUB_SHA}" \
+            --message "OpenAdapt managed FFmpeg ${FFMPEG_VERSION} ${RUNTIME_REVISION}"
+          app_basic="$(printf 'x-access-token:%s' "${APP_TOKEN}" | base64 | tr -d '\r\n')"
+          printf '::add-mask::%s\n' "${app_basic}"
+          GIT_TERMINAL_PROMPT=0 \
+          GIT_CONFIG_COUNT=1 \
+          GIT_CONFIG_KEY_0=http.https://github.com/.extraheader \
+          GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${app_basic}" \
+            git push origin "refs/tags/${RUNTIME_TAG}:refs/tags/${RUNTIME_TAG}"
+          unset app_basic
+          local_object="$(git rev-parse "refs/tags/${RUNTIME_TAG}")"
+          remote_object="$(git ls-remote --refs origin "refs/tags/${RUNTIME_TAG}" | cut -f1)"
+          remote_commit="$(git ls-remote origin "refs/tags/${RUNTIME_TAG}^{}" | cut -f1)"
+          if [ "${remote_object}" != "${local_object}" ] || \
+             [ "${remote_commit}" != "${GITHUB_SHA}" ]; then
+            echo "error: annotated managed-runtime tag differs from the reviewed candidate" >&2
+            exit 1
+          fi
+
   source:
     name: Verify official source
+    if: >-
+      (github.event_name == 'workflow_dispatch' &&
+       github.ref == 'refs/heads/main') ||
+      (github.event_name == 'push' &&
+       startsWith(github.ref, 'refs/tags/ffmpeg-runtime-v'))
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Refuse an unbound event, ref, tag, or source commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_tag="ffmpeg-runtime-v${FFMPEG_VERSION}-${RUNTIME_REVISION}"
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            if [ "${GITHUB_REF}" != "refs/heads/main" ]; then
+              echo "error: managed-runtime validation requires a main dispatch" >&2
+              exit 1
+            fi
+          elif [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            if [ "${GITHUB_ACTOR}" != "openadapt-release[bot]" ] || \
+               [ "${GITHUB_REPOSITORY}" != "OpenAdaptAI/openadapt-desktop" ]; then
+              echo "error: managed-runtime publication requires the repository release App" >&2
+              exit 1
+            fi
+            if [ "${GITHUB_REF}" != "refs/tags/${expected_tag}" ] || \
+               [ "${GITHUB_REF_NAME}" != "${expected_tag}" ]; then
+              echo "error: managed-runtime publication tag differs from reviewed constants" >&2
+              exit 1
+            fi
+            if [ "$(git cat-file -t "refs/tags/${expected_tag}")" != "tag" ]; then
+              echo "error: managed-runtime publication requires an annotated tag" >&2
+              exit 1
+            fi
+            tag_commit="$(git rev-parse --verify "${expected_tag}^{commit}")"
+            if [ "${tag_commit}" != "${GITHUB_SHA}" ]; then
+              echo "error: managed-runtime workflow SHA differs from its tag" >&2
+              exit 1
+            fi
+            git fetch --force origin main:refs/remotes/origin/main
+            if ! git merge-base --is-ancestor "${GITHUB_SHA}" refs/remotes/origin/main; then
+              echo "error: managed-runtime tag is not contained in protected main" >&2
+              exit 1
+            fi
+          else
+            echo "error: unsupported managed-runtime event" >&2
+            exit 1
+          fi
 
       - name: Download source, detached signature, and release key
         shell: bash
@@ -49,17 +200,19 @@ jobs:
           set -euo pipefail
           source_archive="dist/ffmpeg-source/ffmpeg-${FFMPEG_VERSION}.tar.xz"
           test "$(sha256sum "${source_archive}" | cut -d' ' -f1)" = "${SOURCE_SHA256}"
+          signature="${source_archive}.asc"
+          key=dist/ffmpeg-source/ffmpeg-devel.asc
+          test "$(sha256sum "${signature}" | cut -d' ' -f1)" = "${SOURCE_SIGNATURE_SHA256}"
+          test "$(sha256sum "${key}" | cut -d' ' -f1)" = "${SIGNING_KEY_SHA256}"
           export GNUPGHOME="${RUNNER_TEMP}/ffmpeg-gnupg"
           mkdir -m 700 "${GNUPGHOME}"
-          gpg --batch --import dist/ffmpeg-source/ffmpeg-devel.asc
+          gpg --batch --import "${key}"
           fingerprint="$(
             gpg --batch --with-colons --fingerprint \
               | awk -F: '$1 == "fpr" { print $10; exit }'
           )"
           test "${fingerprint}" = "${SIGNING_KEY_FINGERPRINT}"
-          gpg --batch --verify \
-            "dist/ffmpeg-source/ffmpeg-${FFMPEG_VERSION}.tar.xz.asc" \
-            "${source_archive}"
+          gpg --batch --verify "${signature}" "${source_archive}"
 
       - name: Upload verified source inputs
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -180,7 +333,9 @@ jobs:
 
   publish:
     name: Attest and publish runtime assets
-    if: inputs.publish
+    if: >-
+      github.event_name == 'push' &&
+      startsWith(github.ref, 'refs/tags/ffmpeg-runtime-v')
     needs: [source, build]
     runs-on: ubuntu-22.04
     environment: native-release
@@ -217,15 +372,63 @@ jobs:
             release-assets/ffmpeg-8.1.2.tar.xz.asc
             release-assets/SHA256SUMS
 
+      - name: Mint the release App token for GitHub publication
+        id: release_app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.OPENADAPT_RELEASE_APP_ID }}
+          private-key: ${{ secrets.OPENADAPT_RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-metadata: read
+
       - name: Publish separately licensed runtime prerelease
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.release_app.outputs.token }}
         run: |
           set -euo pipefail
           tag="ffmpeg-runtime-v${FFMPEG_VERSION}-${RUNTIME_REVISION}"
-          gh release create "${tag}" release-assets/* \
-            --target "${GITHUB_SHA}" \
-            --title "OpenAdapt managed FFmpeg ${FFMPEG_VERSION} ${RUNTIME_REVISION}" \
-            --notes "Separately licensed, process-isolated FFmpeg and ffprobe runtime assets for OpenAdapt Desktop. Built from the official signed FFmpeg source with GPL, nonfree, and version3 features disabled. The Desktop installer and Python sidecar do not embed these files." \
-            --prerelease
+          if [ "${GITHUB_REF}" != "refs/tags/${tag}" ] || \
+             [ "${GITHUB_REF_NAME}" != "${tag}" ]; then
+            echo "error: publication ref differs from the managed-runtime tag" >&2
+            exit 1
+          fi
+          if gh release view "${tag}" --json assets,isDraft,isPrerelease,tagName \
+            > release.json 2>/dev/null; then
+            if ! jq -e --arg tag "${tag}" \
+              '.tagName == $tag and .isDraft == false and .isPrerelease == true' \
+              release.json >/dev/null; then
+              echo "error: existing managed-runtime release has the wrong identity" >&2
+              exit 1
+            fi
+            mkdir existing-assets
+            jq -r '.assets[].name' release.json > existing-assets.txt
+            while IFS= read -r name; do
+              [ -n "${name}" ] || continue
+              if [ "$(basename "${name}")" != "${name}" ] || \
+                 [ ! -f "release-assets/${name}" ]; then
+                echo "error: existing managed-runtime release has an unexpected asset ${name}" >&2
+                exit 1
+              fi
+              gh release download "${tag}" --dir existing-assets --pattern "${name}"
+              cmp "release-assets/${name}" "existing-assets/${name}"
+            done < existing-assets.txt
+            for path in release-assets/*; do
+              name="$(basename "${path}")"
+              if ! grep -qxF "${name}" existing-assets.txt; then
+                gh release upload "${tag}" "${path}"
+              fi
+            done
+          else
+            gh release create "${tag}" release-assets/* \
+              --verify-tag \
+              --title "OpenAdapt managed FFmpeg ${FFMPEG_VERSION} ${RUNTIME_REVISION}" \
+              --notes "Separately licensed, process-isolated FFmpeg and ffprobe runtime assets for OpenAdapt Desktop. Built from the official signed FFmpeg source with GPL, nonfree, and version3 features disabled. The Desktop installer and Python sidecar do not embed these files." \
+              --prerelease
+          fi
+          mkdir published-assets
+          gh release download "${tag}" --dir published-assets --pattern '*'
+          cmp release-assets/SHA256SUMS published-assets/SHA256SUMS
+          (cd published-assets && sha256sum --check SHA256SUMS)

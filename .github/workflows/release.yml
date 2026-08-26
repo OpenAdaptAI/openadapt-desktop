@@ -1,366 +1,502 @@
 name: Release and PyPI Publish
 
-# Two explicit paths, both dispatched from protected main:
-#   semantic-release     -> coalesce reviewed commits into one version, tag,
-#                           PyPI package, and GitHub Release.
-#   publish-existing-ref -> rebuild and publish an existing main-contained ref
-#                           to PyPI (recovery when its tag exists but publish
-#                           failed).
-#
-# Ordinary merges run Test and Build artifacts only. Publication is a separate,
-# deliberate operation after the release train's exact main commit is green.
-# Publication creates an unadmitted release candidate. It never changes the
-# admission-driven Production channel.
-#
-# Requires ADMIN_TOKEN (GitHub PAT with repo scope) to push the release commit
-# and tag through branch protection. PyPI publication uses Trusted Publishing.
+# A reviewed pull request prepares one complete release candidate on main. The
+# dispatch job can create only the matching vX.Y.Z tag through the release App.
+# Publication then runs from that immutable tag in the protected pypi
+# environment. An exact-tag rerun is the only recovery path.
+# The release is an unadmitted release candidate. Only production-channel.yml
+# can cache an active central OpenAdaptAI/.github admission.
 
 on:
   workflow_dispatch:
     inputs:
-      operation:
-        description: "Release operation"
-        type: choice
+      version:
+        description: "Reviewed main version to tag and publish (X.Y.Z)"
         required: true
-        default: semantic-release
-        options:
-          - semantic-release
-          - publish-existing-ref
-      ref:
-        description: "Existing tag or ref to rebuild and publish to PyPI (for example v0.9.0)"
-        required: false
-        default: main
+        type: string
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
 
 concurrency:
-  group: release
+  group: engine-release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  semantic-release:
-    name: Version, tag, and publish the green main release train
+  create-release-tag:
+    name: Create the reviewed engine release tag
     if: >-
       github.event_name == 'workflow_dispatch' &&
-      inputs.operation == 'semantic-release' &&
       github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
+    environment: release-identity
     permissions:
       actions: read
-      id-token: write
-      contents: write
+      contents: read
     outputs:
-      released: ${{ steps.release.outputs.released }}
-      engine_tag: ${{ steps.release.outputs.tag }}
-      engine_commit: ${{ steps.release.outputs.commit_sha }}
-
+      engine_tag: ${{ steps.candidate.outputs.engine_tag }}
+      engine_commit: ${{ steps.candidate.outputs.engine_commit }}
     steps:
-      - name: Checkout protected main at the dispatched commit
+      - name: Checkout the dispatched main candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-          token: ${{ secrets.ADMIN_TOKEN }}
+          persist-credentials: false
 
-      - name: Refuse a release commit replay
-        id: check_skip
-        shell: bash
-        run: |
-          set -euo pipefail
-          author="$(git log -1 --pretty=format:'%an')"
-          subject="$(git log -1 --pretty=format:'%s')"
-          if [ "${author}" = "semantic-release" ] || printf '%s' "${subject}" | grep -q '^chore: release'; then
-            echo "skip=true" >> "${GITHUB_OUTPUT}"
-          fi
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
 
-      - name: Wait for exact-head Test and Build workflows
-        if: steps.check_skip.outputs.skip != 'true'
+      - name: Require the exact reviewed candidate and release evidence
+        id: candidate
         env:
+          REQUESTED_VERSION: ${{ inputs.version }}
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          deadline=$((SECONDS + 2700))
-          workflows=(test.yml build.yml)
-          while [ "${SECONDS}" -lt "${deadline}" ]; do
-            all_green=true
-            for workflow in "${workflows[@]}"; do
-              response="$(
-                gh api --method GET \
-                  "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/runs" \
-                  --raw-field head_sha="${GITHUB_SHA}" \
-                  --raw-field event=push \
-                  --raw-field per_page=20
-              )"
-              status="$(
-                printf '%s' "${response}" |
-                  jq -r --arg sha "${GITHUB_SHA}" \
-                    '[.workflow_runs[] | select(.head_sha == $sha)]
-                     | sort_by(.created_at) | last | .status // "missing"'
-              )"
-              conclusion="$(
-                printf '%s' "${response}" |
-                  jq -r --arg sha "${GITHUB_SHA}" \
-                    '[.workflow_runs[] | select(.head_sha == $sha)]
-                     | sort_by(.created_at) | last | .conclusion // "pending"'
-              )"
-              echo "${workflow} for ${GITHUB_SHA}: ${status}/${conclusion}"
-              if [ "${status}" = "completed" ] && [ "${conclusion}" != "success" ]; then
-                echo "Refusing to publish because ${workflow} concluded ${conclusion}."
-                exit 1
-              fi
-              if [ "${status}" != "completed" ] || [ "${conclusion}" != "success" ]; then
-                all_green=false
-              fi
-            done
-            if [ "${all_green}" = true ]; then
-              exit 0
-            fi
-            sleep 10
-          done
-          echo "Refusing to publish: exact-head Test and Build did not both succeed within 45 minutes."
-          exit 1
+          if [ "${GITHUB_EVENT_NAME}" != "workflow_dispatch" ] || \
+             [ "${GITHUB_REF}" != "refs/heads/main" ]; then
+            echo "error: engine tag creation requires a main workflow_dispatch" >&2
+            exit 1
+          fi
+          if [ "${GITHUB_REPOSITORY}" != "OpenAdaptAI/openadapt-desktop" ]; then
+            echo "error: engine tag creation requires OpenAdaptAI/openadapt-desktop" >&2
+            exit 1
+          fi
+          if ! printf '%s' "${REQUESTED_VERSION}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "error: requested version must be an exact stable X.Y.Z version" >&2
+            exit 1
+          fi
+          git fetch --force origin main:refs/remotes/origin/main --tags
+          current_main="$(git rev-parse --verify refs/remotes/origin/main)"
+          if [ "${GITHUB_SHA}" != "${current_main}" ]; then
+            echo "error: dispatched ${GITHUB_SHA} is not current main ${current_main}" >&2
+            exit 1
+          fi
+          python scripts/check_release_consistency.py
+          python scripts/verify_release_lock.py
+          engine_version="$(python - <<'PY'
+          from scripts.check_release_consistency import release_versions
+          values = set(release_versions().values())
+          if len(values) != 1:
+              raise SystemExit("release versions are not synchronized")
+          print(values.pop())
+          PY
+          )"
+          native_version="$(python scripts/native_release.py version)"
+          if [ "${REQUESTED_VERSION}" != "${engine_version}" ] || \
+             [ "${REQUESTED_VERSION}" != "${native_version}" ]; then
+            echo "error: requested, engine, lock, and native versions must match" >&2
+            exit 1
+          fi
+          escaped_version="${REQUESTED_VERSION//./\\.}"
+          if ! grep -Eq "^## v${escaped_version} \\([0-9]{4}-[0-9]{2}-[0-9]{2}\\)$" CHANGELOG.md; then
+            echo "error: CHANGELOG.md has no dated v${REQUESTED_VERSION} release entry" >&2
+            exit 1
+          fi
+          engine_tag="v${REQUESTED_VERSION}"
+          if git ls-remote --exit-code --tags origin "refs/tags/${engine_tag}" >/dev/null; then
+            echo "error: immutable engine tag ${engine_tag} already exists" >&2
+            exit 1
+          fi
+          python - "${REQUESTED_VERSION}" <<'PY'
+          import re
+          import subprocess
+          import sys
 
-      - name: Require dispatched head to remain current protected main
-        if: steps.check_skip.outputs.skip != 'true'
+          candidate = tuple(int(part) for part in sys.argv[1].split("."))
+          output = subprocess.check_output(
+              ["git", "tag", "--list", "v[0-9]*.[0-9]*.[0-9]*"], text=True
+          )
+          versions = []
+          for tag in output.splitlines():
+              match = re.fullmatch(r"v([0-9]+)\.([0-9]+)\.([0-9]+)", tag)
+              if match:
+                  versions.append(tuple(int(part) for part in match.groups()))
+          if versions and candidate <= max(versions):
+              raise SystemExit(
+                  f"candidate {sys.argv[1]} does not advance newest tag "
+                  + ".".join(str(part) for part in max(versions))
+              )
+          PY
+          for workflow in test.yml build.yml; do
+            response="$(
+              gh api --method GET \
+                "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/runs" \
+                --raw-field head_sha="${GITHUB_SHA}" \
+                --raw-field event=push \
+                --raw-field per_page=20
+            )"
+            status="$(printf '%s' "${response}" | jq -r --arg sha "${GITHUB_SHA}" \
+              '[.workflow_runs[] | select(.head_sha == $sha)] | sort_by(.created_at) | last | .status // "missing"')"
+            conclusion="$(printf '%s' "${response}" | jq -r --arg sha "${GITHUB_SHA}" \
+              '[.workflow_runs[] | select(.head_sha == $sha)] | sort_by(.created_at) | last | .conclusion // "missing"')"
+            if [ "${status}" != "completed" ] || [ "${conclusion}" != "success" ]; then
+              echo "error: ${workflow} is not successful for ${GITHUB_SHA}: ${status}/${conclusion}" >&2
+              exit 1
+            fi
+          done
+          git diff --exit-code
+          {
+            echo "engine_tag=${engine_tag}"
+            echo "engine_commit=${GITHUB_SHA}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Mint the release App token for this repository
+        id: release_app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.OPENADAPT_RELEASE_APP_ID }}
+          private-key: ${{ secrets.OPENADAPT_RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-metadata: read
+
+      - name: Bind Git only to the repository-scoped release App token
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          token: ${{ steps.release_app.outputs.token }}
+
+      - name: Create only the exact candidate tag
+        env:
+          APP_TOKEN: ${{ steps.release_app.outputs.token }}
+          ENGINE_TAG: ${{ steps.candidate.outputs.engine_tag }}
+          ENGINE_COMMIT: ${{ steps.candidate.outputs.engine_commit }}
         shell: bash
         run: |
           set -euo pipefail
-          git fetch origin main:refs/remotes/origin/main
-          current_main="$(git rev-parse refs/remotes/origin/main)"
-          if [ "${current_main}" != "${GITHUB_SHA}" ]; then
-            echo "Refusing stale release dispatch: main is ${current_main}, dispatched head is ${GITHUB_SHA}."
+          current_main="$(git ls-remote origin refs/heads/main | cut -f1)"
+          if [ "${current_main}" != "${ENGINE_COMMIT}" ]; then
+            echo "error: main changed before tag creation" >&2
+            exit 1
+          fi
+          git config user.name "openadapt-release[bot]"
+          git config user.email "openadapt-release[bot]@users.noreply.github.com"
+          git tag -a "${ENGINE_TAG}" "${ENGINE_COMMIT}" \
+            -m "OpenAdapt Desktop ${ENGINE_TAG#v}"
+          app_basic="$(printf 'x-access-token:%s' "${APP_TOKEN}" | base64 | tr -d '\r\n')"
+          printf '::add-mask::%s\n' "${app_basic}"
+          GIT_TERMINAL_PROMPT=0 \
+          GIT_CONFIG_COUNT=1 \
+          GIT_CONFIG_KEY_0=http.https://github.com/.extraheader \
+          GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${app_basic}" \
+            git push origin "refs/tags/${ENGINE_TAG}:refs/tags/${ENGINE_TAG}"
+          unset app_basic
+          local_object="$(git rev-parse "refs/tags/${ENGINE_TAG}")"
+          remote_object="$(git ls-remote --refs origin "refs/tags/${ENGINE_TAG}" | cut -f1)"
+          remote_commit="$(git ls-remote origin "refs/tags/${ENGINE_TAG}^{}" | cut -f1)"
+          if [ "${remote_object}" != "${local_object}" ] || \
+             [ "${remote_commit}" != "${ENGINE_COMMIT}" ]; then
+            echo "error: created annotated tag differs from the reviewed candidate" >&2
             exit 1
           fi
 
-      - name: Set up Python
-        if: steps.check_skip.outputs.skip != 'true'
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.12"
+  authorize-release-tag:
+    name: Require the release App tag event
+    if: >-
+      github.event_name == 'push' &&
+      startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-22.04
+    permissions: {}
+    steps:
+      - name: Refuse a tag outside the release App identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_ACTOR}" != "openadapt-release[bot]" ]; then
+            echo "error: engine publication requires the openadapt-release App" >&2
+            exit 1
+          fi
+          if [ "${GITHUB_REPOSITORY}" != "OpenAdaptAI/openadapt-desktop" ] || \
+             [ "${GITHUB_REF_TYPE}" != "tag" ] || \
+             ! printf '%s' "${GITHUB_REF}" | grep -Eq '^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "error: engine publication event identity is invalid" >&2
+            exit 1
+          fi
 
-      # Semantic Release synchronizes the editable-root lock entry and builds
-      # the wheel/sdist before it creates the release commit and tag.
-      - name: Python Semantic Release
-        if: steps.check_skip.outputs.skip != 'true'
-        id: release
-        uses: python-semantic-release/python-semantic-release@39dd2052f2ce8282a5d932c31d58a2ca06d2550e # v10.6.1
-        with:
-          github_token: ${{ secrets.ADMIN_TOKEN }}
-
-      - name: Publish to PyPI
-        if: steps.check_skip.outputs.skip != 'true' && steps.release.outputs.released == 'true'
-        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
-
-      - name: Publish to GitHub Releases
-        if: steps.check_skip.outputs.skip != 'true' && steps.release.outputs.released == 'true'
-        uses: python-semantic-release/publish-action@5a5718ce47b892ef699f2972dae122297771d641 # v10.6.1
-        with:
-          github_token: ${{ secrets.ADMIN_TOKEN }}
-
-
-  attest-engine-release:
-    name: Attest the published engine release receipt
-    needs: semantic-release
-    if: needs.semantic-release.outputs.released == 'true'
-    runs-on: ubuntu-latest
+  publish-tagged-engine:
+    name: Publish the exact tagged engine release
+    needs: authorize-release-tag
+    if: >-
+      github.event_name == 'push' &&
+      startsWith(github.ref, 'refs/tags/v') &&
+      needs.authorize-release-tag.result == 'success' &&
+      github.actor == 'openadapt-release[bot]'
+    runs-on: ubuntu-22.04
+    environment: pypi
     permissions:
+      actions: read
       attestations: write
       contents: write
       id-token: write
-    env:
-      ENGINE_TAG: ${{ needs.semantic-release.outputs.engine_tag }}
-      ENGINE_COMMIT: ${{ needs.semantic-release.outputs.engine_commit }}
-      WORKFLOW_REF: ${{ github.workflow_ref }}
-      GH_TOKEN: ${{ github.token }}
     steps:
-      - name: Checkout the published engine commit
+      - name: Checkout the exact engine tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.semantic-release.outputs.engine_commit }}
           fetch-depth: 0
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
 
-      - name: Write the protected-main engine release receipt
+      - name: Refuse a noncanonical tag, version, source, or event
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          if ! printf '%s' "${ENGINE_TAG}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "error: semantic-release returned an invalid tag: ${ENGINE_TAG}" >&2
+          if [ "${GITHUB_EVENT_NAME}" != "push" ] || \
+             ! printf '%s' "${GITHUB_REF}" | grep -Eq '^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "error: engine publication requires an exact stable vX.Y.Z push" >&2
             exit 1
           fi
-          git fetch --force origin main "refs/tags/${ENGINE_TAG}:refs/tags/${ENGINE_TAG}"
-          tag_commit="$(git rev-parse --verify "${ENGINE_TAG}^{commit}")"
-          current_main="$(git rev-parse --verify origin/main)"
-          if [ "${tag_commit}" != "${ENGINE_COMMIT}" ] || \
-             [ "${ENGINE_COMMIT}" != "${current_main}" ]; then
-            echo "error: engine tag, semantic-release output, and current main differ" >&2
+          if [ "${GITHUB_ACTOR}" != "openadapt-release[bot]" ] || \
+             [ "${GITHUB_REPOSITORY}" != "OpenAdaptAI/openadapt-desktop" ]; then
+            echo "error: engine publication requires the repository release App" >&2
             exit 1
           fi
-          parent_commit="$(git rev-parse --verify "${ENGINE_COMMIT}^")"
-          if [ "${parent_commit}" != "${GITHUB_SHA}" ]; then
-            echo "error: release parent ${parent_commit} is not dispatched main ${GITHUB_SHA}" >&2
+          version="${GITHUB_REF_NAME#v}"
+          if [ "${GITHUB_REF}" != "refs/tags/v${version}" ]; then
+            echo "error: ref and version differ" >&2
             exit 1
           fi
-          gh release view "${ENGINE_TAG}" \
+          if [ "$(git cat-file -t "refs/tags/${GITHUB_REF_NAME}")" != "tag" ]; then
+            echo "error: engine release requires an annotated tag" >&2
+            exit 1
+          fi
+          tag_commit="$(git rev-parse --verify "${GITHUB_REF_NAME}^{commit}")"
+          if [ "${tag_commit}" != "${GITHUB_SHA}" ]; then
+            echo "error: workflow SHA differs from the immutable tag" >&2
+            exit 1
+          fi
+          git fetch --force origin main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "${GITHUB_SHA}" refs/remotes/origin/main; then
+            echo "error: tagged candidate is not contained in protected main" >&2
+            exit 1
+          fi
+          python scripts/check_release_consistency.py
+          python scripts/verify_release_lock.py
+          engine_version="$(python - <<'PY'
+          from scripts.check_release_consistency import release_versions
+          values = set(release_versions().values())
+          if len(values) != 1:
+              raise SystemExit("release versions are not synchronized")
+          print(values.pop())
+          PY
+          )"
+          native_version="$(python scripts/native_release.py version)"
+          if [ "${version}" != "${engine_version}" ] || [ "${version}" != "${native_version}" ]; then
+            echo "error: tag, engine, lock, and native versions differ" >&2
+            exit 1
+          fi
+          escaped_version="${version//./\\.}"
+          if ! grep -Eq "^## v${escaped_version} \\([0-9]{4}-[0-9]{2}-[0-9]{2}\\)$" CHANGELOG.md; then
+            echo "error: tagged candidate has no dated changelog entry" >&2
+            exit 1
+          fi
+          for workflow in test.yml build.yml; do
+            response="$(
+              gh api --method GET \
+                "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/runs" \
+                --raw-field head_sha="${GITHUB_SHA}" \
+                --raw-field event=push \
+                --raw-field per_page=20
+            )"
+            conclusion="$(printf '%s' "${response}" | jq -r --arg sha "${GITHUB_SHA}" \
+              '[.workflow_runs[] | select(.head_sha == $sha and .status == "completed")] | sort_by(.created_at) | last | .conclusion // "missing"')"
+            if [ "${conclusion}" != "success" ]; then
+              echo "error: ${workflow} is not successful for ${GITHUB_SHA}" >&2
+              exit 1
+            fi
+          done
+
+      - name: Build and verify exact publication artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check uv==0.11.29
+          uv build --wheel --sdist
+          python scripts/check_release_consistency.py --require-dist
+          python scripts/check_source_boundary.py --require-dist
+          python scripts/verify_build_artifact.py python-distribution
+
+      - name: Publish to PyPI with Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          skip-existing: true
+          print-hash: true
+
+      - name: Verify the exact public PyPI distributions
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          published=false
+          for attempt in $(seq 1 30); do
+            if curl --fail --show-error --silent --location \
+              --connect-timeout 10 --max-time 30 \
+              "https://pypi.org/pypi/openadapt-desktop/${version}/json" \
+              --output pypi-release.json; then
+              published=true
+              break
+            fi
+            echo "PyPI has not exposed ${version} yet (attempt ${attempt}/30)."
+            sleep 10
+          done
+          if [ "${published}" != true ]; then
+            echo "error: PyPI did not expose ${version} after publication" >&2
+            exit 1
+          fi
+          python scripts/verify_pypi_release.py \
+            --metadata pypi-release.json \
+            --directory dist \
+            --version "${version}"
+
+      - name: Mint the release App token for GitHub publication
+        id: release_app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.OPENADAPT_RELEASE_APP_ID }}
+          private-key: ${{ secrets.OPENADAPT_RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-metadata: read
+
+      - name: Create or resume the exact GitHub Release
+        env:
+          GH_TOKEN: ${{ steps.release_app.outputs.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          title="OpenAdapt Desktop ${tag#v}"
+          if gh release view "${tag}" --json assets,isDraft,isPrerelease,tagName \
+            > release.json 2>/dev/null; then
+            if ! jq -e --arg tag "${tag}" \
+              '.tagName == $tag and .isDraft == false and .isPrerelease == false' \
+              release.json >/dev/null; then
+              echo "error: existing GitHub Release has the wrong identity" >&2
+              exit 1
+            fi
+            mkdir -p existing-assets
+            jq -r '.assets[].name' release.json > existing-assets.txt
+            while IFS= read -r name; do
+              [ -n "${name}" ] || continue
+              if [ "${name}" = "openadapt-desktop-engine-release-provenance.json" ]; then
+                continue
+              fi
+              if [ "$(basename "${name}")" != "${name}" ] || [ ! -f "dist/${name}" ]; then
+                echo "error: existing release has an unexpected asset ${name}" >&2
+                exit 1
+              fi
+              gh release download "${tag}" --dir existing-assets --pattern "${name}"
+              cmp "dist/${name}" "existing-assets/${name}"
+            done < existing-assets.txt
+            for path in dist/*.whl dist/*.tar.gz; do
+              name="$(basename "${path}")"
+              if ! grep -qxF "${name}" existing-assets.txt; then
+                gh release upload "${tag}" "${path}"
+              fi
+            done
+          else
+            gh release create "${tag}" dist/*.whl dist/*.tar.gz \
+              --verify-tag \
+              --title "${title}" \
+              --generate-notes
+          fi
+          mkdir -p published-assets
+          gh release download "${tag}" --dir published-assets \
+            --pattern '*.whl' --pattern '*.tar.gz'
+          for path in dist/*.whl dist/*.tar.gz; do
+            cmp "${path}" "published-assets/$(basename "${path}")"
+          done
+
+      - name: Resolve the exact release receipt state
+        id: receipt
+        env:
+          GH_TOKEN: ${{ steps.release_app.outputs.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          engine_tag="${GITHUB_REF_NAME}"
+          gh release view "${engine_tag}" \
             --json databaseId,isDraft,isPrerelease,publishedAt,tagName,url \
             > engine-release.json
           mkdir engine-assets
-          gh release download "${ENGINE_TAG}" --dir engine-assets \
-            --pattern '*.whl' \
-            --pattern '*.tar.gz'
+          gh release download "${engine_tag}" --dir engine-assets \
+            --pattern '*.whl' --pattern '*.tar.gz'
+          gh release view "${engine_tag}" --json assets --jq '.assets[].name' \
+            > engine-release-assets.txt
+          receipt=openadapt-desktop-engine-release-provenance.json
+          if grep -qxF "${receipt}" engine-release-assets.txt; then
+            mkdir existing-receipt
+            gh release download "${engine_tag}" --dir existing-receipt --pattern "${receipt}"
+            echo "exists=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "exists=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Write the exact-tag engine release receipt
+        if: steps.receipt.outputs.exists == 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+          engine_tag="${GITHUB_REF_NAME}"
           python scripts/native_release.py write-engine-provenance \
             --output openadapt-desktop-engine-release-provenance.json \
             --directory engine-assets \
             --release engine-release.json \
             --repository "${GITHUB_REPOSITORY}" \
-            --engine-tag "${ENGINE_TAG}" \
-            --engine-commit "${ENGINE_COMMIT}" \
-            --workflow-ref "${WORKFLOW_REF}" \
-            --workflow-commit "${GITHUB_SHA}" \
+            --engine-tag "${engine_tag}" \
+            --engine-commit "${GITHUB_SHA}" \
+            --workflow-ref "${GITHUB_WORKFLOW_REF}" \
+            --workflow-commit "${GITHUB_WORKFLOW_SHA}" \
             --run-id "${GITHUB_RUN_ID}" \
             --run-attempt "${GITHUB_RUN_ATTEMPT}" \
             --runner-environment "${RUNNER_ENVIRONMENT}"
 
       - name: Attest the engine release receipt
+        if: steps.receipt.outputs.exists == 'false'
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-path: openadapt-desktop-engine-release-provenance.json
 
       - name: Publish and reverify the engine release receipt
+        env:
+          GH_TOKEN: ${{ steps.release_app.outputs.token }}
         shell: bash
         run: |
           set -euo pipefail
+          engine_tag="${GITHUB_REF_NAME}"
           receipt=openadapt-desktop-engine-release-provenance.json
-          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/heads/main"
-          gh attestation verify "${receipt}" \
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/tags/${engine_tag}"
+          if [ "${{ steps.receipt.outputs.exists }}" = "true" ]; then
+            subject="existing-receipt/${receipt}"
+          else
+            subject="${receipt}"
+            gh release upload "${engine_tag}" "${subject}"
+          fi
+          gh attestation verify "${subject}" \
             --repo "${GITHUB_REPOSITORY}" \
             --cert-identity "${identity}" \
             --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
             --deny-self-hosted-runners
           mkdir remote-engine
-          gh release view "${ENGINE_TAG}" --json assets --jq '.assets[].name' \
-            > engine-release-assets.txt
-          if grep -qxF "${receipt}" engine-release-assets.txt; then
-            gh release download "${ENGINE_TAG}" --dir remote-engine \
-              --pattern '*.whl' \
-              --pattern '*.tar.gz' \
-              --pattern 'openadapt-desktop-engine-release-provenance.json'
-          else
-            gh release upload "${ENGINE_TAG}" "${receipt}"
-            gh release download "${ENGINE_TAG}" --dir remote-engine \
-              --pattern '*.whl' \
-              --pattern '*.tar.gz' \
-              --pattern 'openadapt-desktop-engine-release-provenance.json'
-            cmp "${receipt}" "remote-engine/${receipt}"
-          fi
-          gh attestation verify "remote-engine/${receipt}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --cert-identity "${identity}" \
-            --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
-            --deny-self-hosted-runners
+          gh release download "${engine_tag}" --dir remote-engine \
+            --pattern '*.whl' --pattern '*.tar.gz' --pattern "${receipt}"
+          cmp "${subject}" "remote-engine/${receipt}"
           python scripts/native_release.py validate-engine-provenance \
             --file "remote-engine/${receipt}" \
             --directory remote-engine \
             --release engine-release.json \
             --repository "${GITHUB_REPOSITORY}" \
-            --engine-tag "${ENGINE_TAG}" \
-            --engine-commit "${ENGINE_COMMIT}"
-
-  publish-existing-ref:
-    name: Recover PyPI publication for an existing green ref
-    if: >-
-      github.event_name == 'workflow_dispatch' &&
-      inputs.operation == 'publish-existing-ref' &&
-      github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    permissions:
-      actions: read
-      contents: read
-      id-token: write
-
-    steps:
-      - name: Checkout requested publication ref
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.ref }}
-          fetch-depth: 0
-          path: target
-
-      - name: Checkout current protected-main release guard
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.sha }}
-          path: guard
-
-      - name: Resolve and authorize requested ref
-        id: target
-        working-directory: target
-        shell: bash
-        run: |
-          set -euo pipefail
-          target_sha="$(git rev-parse HEAD)"
-          git fetch origin main:refs/remotes/origin/main
-          if ! git merge-base --is-ancestor "${target_sha}" origin/main; then
-            echo "Refusing to publish a ref that is not contained in protected main."
-            exit 1
-          fi
-          echo "sha=${target_sha}" >> "${GITHUB_OUTPUT}"
-
-      - name: Require successful exact-target Test and Build workflows
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TARGET_SHA: ${{ steps.target.outputs.sha }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          for workflow in test.yml build.yml; do
-            response="$(
-              gh api --method GET \
-                "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/runs" \
-                --raw-field head_sha="${TARGET_SHA}" \
-                --raw-field event=push \
-                --raw-field per_page=20
-            )"
-            status="$(
-              printf '%s' "${response}" |
-                jq -r --arg sha "${TARGET_SHA}" \
-                  '[.workflow_runs[] | select(.head_sha == $sha)]
-                   | sort_by(.created_at) | last | .status // "missing"'
-            )"
-            conclusion="$(
-              printf '%s' "${response}" |
-                jq -r --arg sha "${TARGET_SHA}" \
-                  '[.workflow_runs[] | select(.head_sha == $sha)]
-                   | sort_by(.created_at) | last | .conclusion // "pending"'
-            )"
-            if [ "${status}" != "completed" ] || [ "${conclusion}" != "success" ]; then
-              echo "Refusing to publish ${TARGET_SHA}: ${workflow} is ${status}/${conclusion}."
-              exit 1
-            fi
-          done
-
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.12"
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@ae62891fec2bb8e7d6c99fc78c9fec3a63790f8d # v10.0.0
-
-      - name: Build and validate exact recovery artifacts
-        working-directory: target
-        run: |
-          rm -rf dist
-          uv build --wheel --sdist
-          python scripts/check_release_consistency.py --require-dist
-
-      - name: Independently validate recovery artifacts with the current main guard
-        run: |
-          python guard/scripts/verify_build_artifact.py python-distribution --root target
-          python guard/scripts/check_source_boundary.py --root target --require-dist
-
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
-        with:
-          packages-dir: target/dist/
+            --engine-tag "${engine_tag}" \
+            --engine-commit "${GITHUB_SHA}"

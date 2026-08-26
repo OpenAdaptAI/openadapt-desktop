@@ -140,8 +140,36 @@ def test_runtime_workflow_is_pinned_attested_and_separate_from_installers() -> N
     assert all(re.fullmatch(r"[0-9a-f]{40}", revision) for revision in revisions)
     assert SOURCE_SHA256 in workflow
     assert SIGNING_KEY_FINGERPRINT in workflow
+    assert (
+        'SOURCE_SIGNATURE_SHA256: '
+        '"0a0963fccd70597838073f3e31b20f4a4d8cc2b5e577472c9a5a1f22624246f8"'
+        in workflow
+    )
+    assert (
+        'SIGNING_KEY_SHA256: '
+        '"397b3becedcd5a98769967ff1ff8501ddc89f8368b8f766e4701377d7dbaabe5"'
+        in workflow
+    )
     assert "actions/attest-build-provenance@" in workflow
+    assert "actions/create-github-app-token@" in workflow
+    assert "permission-metadata: read" in workflow
+    assert "persist-credentials: false" in workflow
+    assert "token: ${{ steps.release_app.outputs.token }}" in workflow
+    assert "GH_TOKEN: ${{ steps.release_app.outputs.token }}" in workflow
+    assert "environment: release-identity" in workflow
     assert "environment: native-release" in workflow
+    assert 'tags:\n      - "ffmpeg-runtime-v*"' in workflow
+    assert 'git tag --annotate "${RUNTIME_TAG}" "${GITHUB_SHA}"' in workflow
+    assert 'push origin "refs/tags/${RUNTIME_TAG}:refs/tags/${RUNTIME_TAG}"' in workflow
+    assert "GIT_CONFIG_KEY_0=http.https://github.com/.extraheader" in workflow
+    assert 'GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${app_basic}"' in workflow
+    assert "APP_TOKEN: ${{ steps.release_app.outputs.token }}" in workflow
+    assert "refs/heads/main:refs/heads/main" not in workflow
+    assert "--verify-tag" in workflow
+    assert "--target" not in workflow
+    assert 'cmp "release-assets/${name}" "existing-assets/${name}"' in workflow
+    assert "--clobber" not in workflow
+    assert "ADMIN_TOKEN" not in workflow
     assert "--prerelease" in workflow
     assert "src-tauri/binaries" not in workflow
     for target in (
