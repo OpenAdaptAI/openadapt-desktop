@@ -159,8 +159,8 @@ jobs:
           gh release download "${engine_tag}" --dir engine-files \
             --pattern '*.whl' \
             --pattern '*.tar.gz'
-          native_identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/native-release.yml@refs/heads/main"
-          engine_identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/heads/main"
+          native_identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/native-release.yml@refs/tags/desktop-v${VERSION}"
+          engine_identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/tags/v${VERSION}"
           gh attestation verify candidate/openadapt-desktop-verified-release.json \
             --repo "${GITHUB_REPOSITORY}" \
             --cert-identity "${native_identity}" \
