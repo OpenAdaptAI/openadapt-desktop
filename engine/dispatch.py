@@ -223,6 +223,7 @@ class EngineDispatcher:
         # tray's pause/resume-sync commands and the frontend sync banner.
         self._sync_paused = False
         self._flow_recording: _ActiveFlowRecording | None = None
+        self._pending_run_memory: dict[tuple[str, str], tuple[Path, str, bool]] = {}
         self._handlers: dict[str, Callable[..., dict | None]] = {}
         self._register()
 
@@ -239,6 +240,8 @@ class EngineDispatcher:
             "get_status": self.get_status,
             # library / captures / workflows
             "get_workflows": self.get_workflows,
+            "get_first_workflow_state": self.get_first_workflow_state,
+            "set_first_workflow_stage": self.set_first_workflow_stage,
             "get_captures": self.get_captures,
             "get_storage_usage": self.get_storage_usage,
             "get_presentation_export_status": self.get_presentation_export_status,
@@ -246,6 +249,7 @@ class EngineDispatcher:
             # the loop: compile -> replay/run -> teach
             "compile_recording": self.compile_recording,
             "replay_workflow": self.replay_workflow,
+            "replay_first_workflow": self.replay_first_workflow,
             "run_workflow": self.run_workflow,
             "get_run_report": self.get_run_report,
             "retry_run_persistence": self.retry_run_persistence,
@@ -351,6 +355,8 @@ class EngineDispatcher:
         if controller.is_recording:
             return self._status_dict(controller)
 
+        first_workflow = params.get("first_workflow") is True
+        task = str(params.get("purpose") or params.get("task") or params.get("name") or "")
         target = None
         if params.get("target") is not None:
             try:
@@ -375,7 +381,15 @@ class EngineDispatcher:
                 self.emit("recording_error", {"error": message})
                 raise ValueError(message) from None
 
-        task = str(params.get("purpose") or params.get("task") or params.get("name") or "")
+        if first_workflow and (target is None or (target.backend == "web" and not target.url)):
+            message = "Choose a real application target before recording the first workflow"
+            self.emit("recording_error", {"error": message})
+            raise ValueError(message)
+        if first_workflow and not task.strip():
+            message = "Describe the first workflow task before recording"
+            self.emit("recording_error", {"error": message})
+            raise ValueError(message)
+
         recording_metadata: dict[str, object] | None = None
         if task == "teach_fix":
             workflow_id = str(params.get("workflow_id") or "")
@@ -452,6 +466,12 @@ class EngineDispatcher:
                     redactions=(),
                     task=task,
                 )
+                self._remember_first_workflow_recording(
+                    params=params,
+                    capture_id=capture_id,
+                    target=target,
+                    task=task,
+                )
                 self.services.audit.log("recording_started", capture_id=capture_id)
                 self.emit("recording_started", {"capture_id": capture_id})
                 try:
@@ -497,6 +517,12 @@ class EngineDispatcher:
                 redactions=prepared.redactions,
                 task=task,
             )
+            self._remember_first_workflow_recording(
+                params=params,
+                capture_id=capture_id,
+                target=target,
+                task=task,
+            )
             self.services.audit.log("recording_started", capture_id=capture_id)
             self.emit("recording_started", {"capture_id": capture_id})
             self.emit("status_update", self._status_dict(controller))
@@ -506,10 +532,37 @@ class EngineDispatcher:
             task_description=str(task),
             metadata=recording_metadata,
         )
+        self._remember_first_workflow_recording(
+            params=params,
+            capture_id=capture_id,
+            target=target,
+            task=task,
+        )
         self.services.audit.log("recording_started", capture_id=capture_id)
         self.emit("recording_started", {"capture_id": capture_id})
         self.emit("status_update", self._status_dict(controller))
         return {"capture_id": capture_id, "recording": True}
+
+    def _remember_first_workflow_recording(
+        self,
+        *,
+        params: dict[str, Any],
+        capture_id: str,
+        target: Any | None,
+        task: str,
+    ) -> None:
+        if params.get("first_workflow") is not True:
+            return
+        self.services.db.set_first_workflow_state(
+            stage="record",
+            capture_id=capture_id,
+            target=(
+                target.model_dump(mode="json", exclude_none=True)
+                if target is not None
+                else None
+            ),
+            task=task,
+        )
 
     def stop_recording(self, **params: Any) -> dict:
         """Stop the active recording, retain it, and compile it automatically."""
@@ -650,6 +703,45 @@ class EngineDispatcher:
         }
 
     # ------------------------------------------------------- library
+
+    def get_first_workflow_state(self, **params: Any) -> dict:
+        """Return the durable local stage for the first workflow journey."""
+
+        state = self.services.db.get_first_workflow_state()
+        return {"ok": True, "state": state}
+
+    def set_first_workflow_stage(self, **params: Any) -> dict:
+        """Move the first workflow between explicit operator-facing stages."""
+
+        stage = str(params.get("stage") or "")
+        if stage not in {"record", "qualification", "complete"}:
+            raise ValueError("Invalid first workflow stage")
+        if stage == "record":
+            self.services.db.set_first_workflow_state(stage="record")
+            return {"ok": True, "state": self.services.db.get_first_workflow_state()}
+
+        current = self.services.db.get_first_workflow_state()
+        workflow_id = str(params.get("workflow_id") or "")
+        current_workflow_id = str((current or {}).get("workflow_id") or "")
+        same_workflow = bool(workflow_id and workflow_id == current_workflow_id)
+        qualification_version = False
+        if current is not None and stage == "qualification" and not same_workflow:
+            candidate = self.services.db.get_bundle(workflow_id)
+            qualification_version = bool(
+                current.get("stage") == "qualification"
+                and candidate
+                and candidate.get("capture_id") == current.get("capture_id")
+            )
+        if current is None or (not same_workflow and not qualification_version):
+            raise ValueError("The first workflow stage does not match this workflow")
+        self.services.db.set_first_workflow_state(
+            stage=stage,
+            capture_id=current.get("capture_id"),
+            workflow_id=workflow_id,
+            target=current.get("target"),
+            task=str(current.get("task") or ""),
+        )
+        return {"ok": True, "state": self.services.db.get_first_workflow_state()}
 
     def get_workflows(self, **params: Any) -> list:
         """Return the local workflow library as a list of ``Workflow`` dicts.
@@ -798,6 +890,19 @@ class EngineDispatcher:
                 "workflow_id": "",
                 "recording_retained": recording_retained,
             }
+        first_state = self.services.db.get_first_workflow_state()
+        if (
+            first_state
+            and first_state.get("stage") == "record"
+            and first_state.get("capture_id") == capture_id
+        ):
+            self.services.db.set_first_workflow_state(
+                stage="review",
+                capture_id=capture_id,
+                workflow_id=str(compiled["bundle_id"]),
+                target=first_state.get("target"),
+                task=str(first_state.get("task") or ""),
+            )
         self.emit(
             "compile_progress",
             {
@@ -818,15 +923,59 @@ class EngineDispatcher:
         """Replay a bundle locally and return a ``RunReport``-shaped dict."""
         return self._replay_or_run(params, run=False)
 
+    def replay_first_workflow(self, **params: Any) -> dict:
+        """Replay one exact reviewed read-only bundle under supervision."""
+
+        return self._replay_or_run(params, run=False, first_supervised=True)
+
     def run_workflow(self, **params: Any) -> dict:
         """Run a bundle under the deployment config; return a ``RunReport`` dict."""
         return self._replay_or_run(params, run=True)
 
-    def _replay_or_run(self, params: dict, *, run: bool) -> dict:
+    def _replay_or_run(
+        self,
+        params: dict,
+        *,
+        run: bool,
+        first_supervised: bool = False,
+    ) -> dict:
         workflow_id = params.get("workflow_id")
         bundle = self._bundle_dir(workflow_id)
         if bundle is None:
             return self._pre_action_refusal(f"Unknown workflow {workflow_id}")
+        if first_supervised:
+            admission = params.get("admission")
+            if not isinstance(admission, dict):
+                return self._pre_action_refusal(
+                    "Open the current workflow review before the first supervised run."
+                )
+            if admission.get("workflow_id") != workflow_id:
+                return self._pre_action_refusal(
+                    "The workflow changed after review. Open the current review before running it."
+                )
+            try:
+                from engine.qualification import (
+                    QualificationError,
+                    admit_first_supervised_replay,
+                )
+
+                admit_first_supervised_replay(
+                    bundle,
+                    workflow_id=str(workflow_id),
+                    expected_project_revision=admission.get("project_revision"),
+                    expected_bundle_content_digest=admission.get(
+                        "bundle_content_digest"
+                    ),
+                    bundle_key=self._qualification_bundle_key(str(workflow_id)),
+                )
+            except QualificationError as exc:
+                return self._pre_action_refusal(str(exc))
+            except Exception:
+                logger.exception("Could not validate the first supervised replay")
+                return self._pre_action_refusal(
+                    "Desktop could not verify the current workflow review. "
+                    "Open it again before running."
+                )
         try:
             target, deployment_config = self._execution_target(params)
         except ValueError as exc:
@@ -1007,7 +1156,10 @@ class EngineDispatcher:
             run_dir=run_dir,
             workflow_id=str(workflow_id),
             outcome=outcome,
+            first_supervised=first_supervised,
         )
+        if first_supervised and persistence["state"] == "persisted":
+            self._mark_first_workflow_result(str(workflow_id), outcome)
         report = self._run_report(
             run_dir,
             workflow_id,
@@ -1074,15 +1226,24 @@ class EngineDispatcher:
         run_dir: Path,
         workflow_id: str,
         outcome: str,
+        first_supervised: bool = False,
     ) -> dict:
         """Persist one local run or leave a bounded recovery marker."""
 
+        pending_key = (workflow_id, run_id)
+        if first_supervised:
+            self._pending_run_memory[pending_key] = (
+                run_dir,
+                outcome,
+                first_supervised,
+            )
         marker = self._persistence_marker_path(run_dir)
         payload = {
             "schema": "openadapt.desktop-run-persistence/v1",
             "run_id": run_id,
             "workflow_id": workflow_id,
             "outcome": outcome,
+            "first_supervised": first_supervised,
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
         staging = marker.with_name(f"{marker.name}.{uuid.uuid4().hex}.tmp")
@@ -1091,13 +1252,23 @@ class EngineDispatcher:
             staging.replace(marker)
         except Exception:
             staging.unlink(missing_ok=True)
+            if not first_supervised:
+                return {
+                    "state": "failed",
+                    "retryable": False,
+                    "message": (
+                        "The run report is available for this session, but Desktop "
+                        "could not create a local history recovery record. Preserve "
+                        "the run evidence before closing Desktop."
+                    ),
+                }
             return {
                 "state": "failed",
-                "retryable": False,
+                "retryable": True,
                 "message": (
                     "The run report is available for this session, but Desktop "
-                    "could not create a local history recovery record. Preserve "
-                    "the run evidence before closing Desktop."
+                    "could not create a local history recovery record. Retry the "
+                    "save before you leave this page."
                 ),
             }
 
@@ -1115,6 +1286,7 @@ class EngineDispatcher:
             marker.unlink(missing_ok=True)
         except OSError:
             logger.warning("Could not remove reconciled run persistence marker")
+        self._pending_run_memory.pop(pending_key, None)
         return {
             "state": "persisted",
             "retryable": False,
@@ -1183,6 +1355,12 @@ class EngineDispatcher:
         if not workflow_id or not run_id:
             return {"ok": False, "error": "workflow_id and run_id are required"}
 
+        pending = self._pending_run(workflow_id, run_id=run_id)
+        in_memory = self._pending_run_memory.get((workflow_id, run_id))
+        first_supervised = bool(
+            (pending is not None and pending[1].get("first_supervised") is True)
+            or (in_memory is not None and in_memory[2])
+        )
         existing = self.services.db.get_run(run_id)
         if existing is not None:
             if existing.get("bundle_id") != workflow_id:
@@ -1199,15 +1377,24 @@ class EngineDispatcher:
                     "retryable": False,
                     "message": "The report is saved in local history.",
                 }
+                self._pending_run_memory.pop((workflow_id, run_id), None)
+                if first_supervised:
+                    self._mark_first_workflow_result(
+                        workflow_id,
+                        str(existing["status"]),
+                    )
                 return {"ok": True, "report": report}
 
-        pending = self._pending_run(workflow_id, run_id=run_id)
         if pending is None:
-            return {
-                "ok": False,
-                "error": "No retryable local history record was found for this run",
-            }
-        run_dir, payload = pending
+            if in_memory is None:
+                return {
+                    "ok": False,
+                    "error": "No retryable local history record was found for this run",
+                }
+            run_dir, remembered_outcome, _remembered_first_supervised = in_memory
+            payload = {"outcome": remembered_outcome}
+        else:
+            run_dir, payload = pending
         try:
             if existing is None:
                 self.services.db.insert_run(
@@ -1232,6 +1419,9 @@ class EngineDispatcher:
             self._persistence_marker_path(run_dir).unlink(missing_ok=True)
         except OSError:
             logger.warning("Could not remove reconciled run persistence marker")
+        self._pending_run_memory.pop((workflow_id, run_id), None)
+        if first_supervised:
+            self._mark_first_workflow_result(workflow_id, str(payload["outcome"]))
         report = self._run_report(
             run_dir,
             workflow_id,
@@ -1244,6 +1434,24 @@ class EngineDispatcher:
             "message": "The report is saved in local history.",
         }
         return {"ok": True, "report": report}
+
+    def _mark_first_workflow_result(self, workflow_id: str, outcome: str) -> None:
+        if outcome not in {"VERIFIED", "COMPLETED_UNVERIFIED", "success"}:
+            return
+        state = self.services.db.get_first_workflow_state()
+        if (
+            state is None
+            or state.get("stage") != "review"
+            or state.get("workflow_id") != workflow_id
+        ):
+            return
+        self.services.db.set_first_workflow_state(
+            stage="result",
+            capture_id=state.get("capture_id"),
+            workflow_id=workflow_id,
+            target=state.get("target"),
+            task=str(state.get("task") or ""),
+        )
 
     @staticmethod
     def _pre_action_refusal(error: str) -> dict:

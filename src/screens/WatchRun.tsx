@@ -78,36 +78,82 @@ function reviewRisk(
   project: QualificationProject,
   actionId: string,
 ): string {
-  return (
-    project.controls.actions[actionId]?.classification?.classification ||
-    "not reviewed"
-  ).replaceAll("_", " ");
+  const classification =
+    project.controls.actions[actionId]?.classification;
+  if (!classification || classification.classification === "unknown") {
+    return "not reviewed";
+  }
+  const label = classification.classification.replaceAll("_", " ");
+  return classification.operator_confirmed
+    ? label
+    : `${label}, not reviewed`;
 }
 
 function riskTone(risk: string): "neutral" | "warn" | "crit" {
-  if (risk === "irreversible") return "crit";
-  if (risk === "consequential" || risk === "state changing") return "warn";
+  if (risk.startsWith("irreversible")) return "crit";
+  if (
+    risk.startsWith("consequential") ||
+    risk.startsWith("state changing") ||
+    risk === "not reviewed"
+  ) {
+    return "warn";
+  }
   return "neutral";
+}
+
+function firstReplayActionIsSafe(
+  project: QualificationProject,
+  actionId: string,
+): boolean {
+  const classification =
+    project.controls.actions[actionId]?.classification;
+  return Boolean(
+    classification?.operator_confirmed &&
+      classification.classification === "read_only",
+  );
+}
+
+function reviewAuthority(
+  project: QualificationProject | null,
+  workflowId: string,
+): string | null {
+  const revision = project?.project?.revision;
+  const digest = project?.graph.bundle.provenance.content_digest;
+  if (
+    project?.workflow_id !== workflowId ||
+    typeof revision !== "number" ||
+    !Number.isInteger(revision) ||
+    revision < 1 ||
+    typeof digest !== "string" ||
+    !/^[a-f0-9]{64}$/.test(digest)
+  ) {
+    return null;
+  }
+  return `${workflowId}:${revision}:${digest}`;
 }
 
 export function WatchRun({
   workflowId,
   initialTarget,
   firstWorkflow = false,
+  firstRunComplete = false,
+  onPersistencePendingChange,
   onQualify,
   onTeach,
 }: {
   workflowId: string;
   initialTarget?: ExecutionTarget;
   firstWorkflow?: boolean;
+  firstRunComplete?: boolean;
+  onPersistencePendingChange?: (pending: boolean) => void;
   onQualify: (id: string) => void;
   onTeach: (id: string) => void;
 }) {
   const [report, setReport] = useState<RunReport | null>(null);
   const [review, setReview] = useState<QualificationProject | null>(null);
   const [reviewLoaded, setReviewLoaded] = useState(false);
-  const [reviewed, setReviewed] = useState(false);
-  const [completedFirstRun, setCompletedFirstRun] = useState(false);
+  const [reviewedAuthority, setReviewedAuthority] = useState<string | null>(null);
+  const [completedFirstRun, setCompletedFirstRun] = useState(firstRunComplete);
   const [running, setRunning] = useState(false);
   const [runtime, setRuntime] = useState<BrowserRuntimeStatus | null>(null);
   const [runIssue, setRunIssue] = useState<RunIssue | null>(null);
@@ -119,6 +165,7 @@ export function WatchRun({
   const [deploymentConfig, setDeploymentConfig] = useState("");
   const stepsRef = useRef<RunStep[]>([]);
   const reportGenerationRef = useRef(0);
+  const reviewGenerationRef = useRef(0);
   const fieldPrefix = useId();
 
   async function load(generation: number) {
@@ -136,12 +183,16 @@ export function WatchRun({
   }
 
   async function loadReview() {
+    const generation = ++reviewGenerationRef.current;
+    setReview(null);
     setReviewLoaded(false);
+    setReviewedAuthority(null);
     const next = await engineTry<QualificationResponse | null>(
       CMD.GET_QUALIFICATION,
       { workflow_id: workflowId },
       null,
     );
+    if (generation !== reviewGenerationRef.current) return;
     if (next && next.ok && "graph" in next) {
       setReview(next);
     }
@@ -149,6 +200,7 @@ export function WatchRun({
   }
 
   useEffect(() => {
+    setCompletedFirstRun(firstRunComplete);
     const generation = ++reportGenerationRef.current;
     void load(generation);
     void loadReview();
@@ -175,10 +227,11 @@ export function WatchRun({
     ];
     return () => {
       reportGenerationRef.current += 1;
+      reviewGenerationRef.current += 1;
       unsubs.forEach((promise) => promise.then((u) => u()).catch(() => {}));
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workflowId]);
+  }, [workflowId, firstRunComplete]);
 
   async function execute(mode: ExecuteMode) {
     reportGenerationRef.current += 1;
@@ -201,11 +254,26 @@ export function WatchRun({
         : current,
     );
     try {
+      const currentReviewAuthority = reviewAuthority(review, workflowId);
+      const firstAdmission =
+        firstWorkflow && mode === "replay" && currentReviewAuthority
+          ? {
+              workflow_id: workflowId,
+              project_revision: review?.project?.revision,
+              bundle_content_digest:
+                review?.graph.bundle.provenance.content_digest,
+            }
+          : null;
       const response = await engineInvoke<ExecutionResponse>(
-        mode === "run" ? CMD.RUN_WORKFLOW : CMD.REPLAY_WORKFLOW,
+        mode === "run"
+          ? CMD.RUN_WORKFLOW
+          : firstWorkflow
+            ? CMD.REPLAY_FIRST_WORKFLOW
+            : CMD.REPLAY_WORKFLOW,
         {
           workflow_id: workflowId,
           target,
+          ...(firstAdmission ? { admission: firstAdmission } : {}),
           ...(deploymentConfig.trim()
             ? { deployment_config: deploymentConfig.trim() }
             : {}),
@@ -263,16 +331,41 @@ export function WatchRun({
 
   const total = report?.total_steps ?? 0;
   const steps = report?.steps ?? [];
+  const currentReview = review?.workflow_id === workflowId ? review : null;
+  const currentReviewAuthority = reviewAuthority(currentReview, workflowId);
   const reviewActions =
-    review?.graph.nodes.filter((node) => node.kind === "action") || [];
-  const reviewParameters = review?.controls.parameters || [];
-  const reviewReady = Boolean(review && reviewActions.length > 0);
+    currentReview?.graph.nodes.filter((node) => node.kind === "action") || [];
+  const reviewParameters = currentReview?.controls.parameters || [];
+  const reviewReady = Boolean(currentReview && reviewActions.length > 0);
+  const blockedFirstReplayActions = currentReview
+    ? reviewActions.filter(
+        (action) => !firstReplayActionIsSafe(currentReview, action.id),
+      )
+    : [];
+  const firstReplaySafe =
+    reviewReady &&
+    currentReviewAuthority !== null &&
+    blockedFirstReplayActions.length === 0;
+  const reviewed =
+    currentReviewAuthority !== null &&
+    reviewedAuthority === currentReviewAuthority;
   const firstRunFinished =
     completedFirstRun &&
     report &&
+    report.persistence?.state === "persisted" &&
     (report.outcome === "VERIFIED" ||
       report.outcome === "COMPLETED_UNVERIFIED" ||
       report.outcome === "success");
+  const firstRunPersistencePending = Boolean(
+    firstWorkflow &&
+      completedFirstRun &&
+      (!report || report.persistence?.state !== "persisted"),
+  );
+
+  useEffect(() => {
+    onPersistencePendingChange?.(firstRunPersistencePending);
+    return () => onPersistencePendingChange?.(false);
+  }, [firstRunPersistencePending, onPersistencePendingChange]);
 
   return (
     <div className="content">
@@ -310,7 +403,7 @@ export function WatchRun({
             title="Check the compiled workflow"
             sub="Read the steps and inputs before OpenAdapt touches the app."
           />
-          {reviewReady && review ? (
+          {reviewReady && currentReview ? (
             <>
               <div className="metrics">
                 <div className="metric">
@@ -330,7 +423,7 @@ export function WatchRun({
               <h3 style={{ marginTop: "var(--space-5)" }}>Compiled steps</h3>
               <ol className="first-workflow-steps">
                 {reviewActions.map((action) => {
-                  const risk = reviewRisk(review, action.id);
+                  const risk = reviewRisk(currentReview, action.id);
                   return (
                     <li key={action.id}>
                       <span>{action.title}</span>
@@ -359,16 +452,41 @@ export function WatchRun({
                 </p>
               )}
 
-              <label className="check-row first-workflow-confirmation">
-                <input
-                  type="checkbox"
-                  checked={reviewed}
-                  onChange={(event) => setReviewed(event.target.checked)}
-                />
-                <span>
-                  I reviewed these steps and will keep the target app in view.
-                </span>
-              </label>
+              {firstReplaySafe ? (
+                <label className="check-row first-workflow-confirmation">
+                  <input
+                    type="checkbox"
+                    checked={reviewed}
+                    onChange={(event) =>
+                      setReviewedAuthority(
+                        event.target.checked ? currentReviewAuthority : null,
+                      )
+                    }
+                  />
+                  <span>
+                    I reviewed these steps. The task uses test data, and I will
+                    keep the target app in view.
+                  </span>
+                </label>
+              ) : (
+                <Callout
+                  tone="warn"
+                  title="Review these actions before the first run"
+                >
+                  One or more actions still need risk review or can cause a
+                  consequential change. Open the qualification review before
+                  OpenAdapt acts.
+                  <div style={{ marginTop: "var(--space-3)" }}>
+                    <Button
+                      size="sm"
+                      variant="primary"
+                      onClick={() => onQualify(workflowId)}
+                    >
+                      Review before running
+                    </Button>
+                  </div>
+                </Callout>
+              )}
             </>
           ) : !reviewLoaded ? (
             <Callout tone="info" title="Loading the compiled review">
@@ -434,14 +552,14 @@ export function WatchRun({
             </p>
           </div>
         </details>
-        {firstWorkflow && (
+        {firstWorkflow && firstReplaySafe && (
           <div style={{ marginTop: "var(--space-5)" }}>
             <p className="page-sub">
               Keep the target app visible and watch each step.
             </p>
             <Button
               variant="primary"
-              disabled={running || !reviewReady || !reviewed}
+              disabled={running || !reviewed}
               onClick={() => execute("replay")}
             >
               {running ? "Running…" : "Run once while I watch"}
@@ -513,7 +631,13 @@ export function WatchRun({
               : ""}
           </Callout>
           <div className="row" style={{ marginTop: "var(--space-4)" }}>
-            <Button variant="primary" onClick={() => onTeach(workflowId)}>
+            <Button
+              variant="primary"
+              disabled={
+                firstWorkflow && report.persistence?.state !== "persisted"
+              }
+              onClick={() => onTeach(workflowId)}
+            >
               Teach the fix
             </Button>
           </div>

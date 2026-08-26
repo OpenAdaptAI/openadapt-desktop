@@ -12,6 +12,8 @@ import {
 import type {
   AuthStatus,
   ExecutionTarget,
+  FirstWorkflowState,
+  FirstWorkflowStateResponse,
   NeedsAttention,
   SyncState,
   Workflow,
@@ -36,13 +38,19 @@ import {
 
 type Route =
   | { name: "library" }
-  | { name: "record"; firstWorkflow?: boolean }
-  | { name: "qualify"; id: string }
+  | {
+      name: "record";
+      firstWorkflow?: boolean;
+      target?: ExecutionTarget;
+      task?: string;
+    }
+  | { name: "qualify"; id: string; firstWorkflow?: boolean }
   | {
       name: "watch";
       id: string;
       target?: ExecutionTarget;
       firstWorkflow?: boolean;
+      firstRunComplete?: boolean;
     }
   | { name: "teach"; id: string }
   | { name: "runner" }
@@ -61,6 +69,36 @@ const NAV: { route: Route["name"]; label: string; glyph: string }[] = [
   { route: "portal", label: "Phone", glyph: "▯" },
   { route: "settings", label: "Settings", glyph: "⚙" },
 ];
+
+export function routeForFirstWorkflow(
+  state: FirstWorkflowState | null,
+): Route | null {
+  if (!state || state.stage === "complete") return null;
+  if (state.stage === "record") {
+    return {
+      name: "record",
+      firstWorkflow: true,
+      target: state.target ?? undefined,
+      task: state.task || undefined,
+    };
+  }
+  if (state.stage === "qualification" && state.workflow_id) {
+    return { name: "qualify", id: state.workflow_id, firstWorkflow: true };
+  }
+  if (
+    (state.stage === "review" || state.stage === "result") &&
+    state.workflow_id
+  ) {
+    return {
+      name: "watch",
+      id: state.workflow_id,
+      target: state.target ?? undefined,
+      firstWorkflow: true,
+      firstRunComplete: state.stage === "result",
+    };
+  }
+  return null;
+}
 
 function DesktopBrand({ onOpen }: { onOpen?: () => void }) {
   const content = (
@@ -110,6 +148,29 @@ export default function App() {
   const [sync, setSync] = useState<SyncState>({ state: "synced", queued: 0 });
   const [breaks, setBreaks] = useState(0);
   const [pairing, setPairing] = useState<PairingState | null>(null);
+  const [firstRunPersistencePending, setFirstRunPersistencePending] =
+    useState(false);
+  const [firstWorkflowStageError, setFirstWorkflowStageError] = useState("");
+
+  async function saveFirstWorkflowStage(
+    stage: "record" | "qualification" | "complete",
+    workflowId?: string,
+  ): Promise<boolean> {
+    setFirstWorkflowStageError("");
+    const result = await engineTry<{ ok: boolean }>(
+      CMD.SET_FIRST_WORKFLOW_STAGE,
+      {
+        stage,
+        ...(workflowId ? { workflow_id: workflowId } : {}),
+      },
+      { ok: false },
+    );
+    if (result.ok) return true;
+    setFirstWorkflowStageError(
+      "Desktop couldn't save your place in setup. Check the local engine, then try again.",
+    );
+    return false;
+  }
 
   // Bootstrap: auth status, sidecar liveness, and the status channels.
   useEffect(() => {
@@ -121,9 +182,17 @@ export default function App() {
         { authenticated: false },
       );
       setAuth(a);
-      setCheckedAuth(true);
-      const wf = await engineTry<Workflow[]>(CMD.GET_WORKFLOWS, {}, []);
-      setOnboarded(wf.length > 0);
+      const [wf, firstWorkflow] = await Promise.all([
+        engineTry<Workflow[]>(CMD.GET_WORKFLOWS, {}, []),
+        engineTry<FirstWorkflowStateResponse>(
+          CMD.GET_FIRST_WORKFLOW_STATE,
+          {},
+          { ok: true, state: null },
+        ),
+      ]);
+      const resumedRoute = routeForFirstWorkflow(firstWorkflow.state);
+      setOnboarded(wf.length > 0 || resumedRoute !== null);
+      if (resumedRoute) setRoute(resumedRoute);
       const na = await engineTry<NeedsAttention>(
         CMD.GET_NEEDS_ATTENTION,
         {},
@@ -132,6 +201,7 @@ export default function App() {
       setBreaks(na.count);
       const ss = await engineTry<SyncState>(CMD.GET_SYNC_STATE, {}, sync);
       setSync(ss);
+      setCheckedAuth(true);
     })();
 
     const unsubs = [
@@ -194,11 +264,24 @@ export default function App() {
       )}
     </div>
   ) : null;
+  const firstWorkflowStageNotice = firstWorkflowStageError ? (
+    <div className="pairing-notice error" role="alert">
+      <span>{firstWorkflowStageError}</span>
+      <button
+        type="button"
+        aria-label="Dismiss setup notice"
+        onClick={() => setFirstWorkflowStageError("")}
+      >
+        ×
+      </button>
+    </div>
+  ) : null;
 
   if (!checkedAuth) {
     return (
       <>
         {pairingNotice}
+        {firstWorkflowStageNotice}
         <DesktopEntryShell>
           <div className="center-stage"><span className="page-sub">Loading…</span></div>
         </DesktopEntryShell>
@@ -210,6 +293,7 @@ export default function App() {
     return (
       <>
         {pairingNotice}
+        {firstWorkflowStageNotice}
         <DesktopEntryShell>
           <Login
             onLocal={() => {
@@ -229,9 +313,11 @@ export default function App() {
     return (
       <>
         {pairingNotice}
+        {firstWorkflowStageNotice}
         <DesktopEntryShell>
           <Onboarding
-            onStart={() => {
+            onStart={async () => {
+              if (!(await saveFirstWorkflowStage("record"))) return;
               setOnboarded(true);
               setRoute({ name: "record", firstWorkflow: true });
             }}
@@ -253,16 +339,29 @@ export default function App() {
   return (
     <>
       {pairingNotice}
+      {firstWorkflowStageNotice}
       <div className="app">
         <header className="desktop-shell">
           <div className="desktop-shell-inner">
-            <DesktopBrand onOpen={() => setRoute({ name: "library" })} />
+            <DesktopBrand
+              onOpen={
+                firstRunPersistencePending
+                  ? undefined
+                  : () => setRoute({ name: "library" })
+              }
+            />
 
             <nav className="desktop-nav" aria-label="Desktop navigation">
               {NAV.map((n) => (
                 <button
                   aria-current={route.name === n.route ? "page" : undefined}
                   className={`nav-item ${route.name === n.route ? "active" : ""}`}
+                  disabled={firstRunPersistencePending}
+                  title={
+                    firstRunPersistencePending
+                      ? "Save this first run before you leave the result."
+                      : undefined
+                  }
                   key={n.route}
                   onClick={() => setRoute({ name: n.route } as Route)}
                   type="button"
@@ -310,13 +409,33 @@ export default function App() {
         {route.name === "qualify" && (
           <Qualification
             workflowId={route.id}
-            onBack={() => setRoute({ name: "library" })}
-            onOpenWorkflow={(id) => setRoute({ name: "qualify", id })}
+            onBack={async () => {
+              if (route.firstWorkflow) {
+                if (!(await saveFirstWorkflowStage("complete", route.id))) {
+                  return;
+                }
+              }
+              setRoute({ name: "library" });
+            }}
+            onOpenWorkflow={async (id) => {
+              if (route.firstWorkflow) {
+                if (!(await saveFirstWorkflowStage("qualification", id))) {
+                  return;
+                }
+              }
+              setRoute({
+                name: "qualify",
+                id,
+                firstWorkflow: route.firstWorkflow,
+              });
+            }}
           />
         )}
         {route.name === "record" && (
           <RecordReview
             firstWorkflow={route.firstWorkflow}
+            initialTarget={route.target}
+            initialTask={route.task}
             onCompiled={(id, target) =>
               setRoute({
                 name: "watch",
@@ -332,7 +451,20 @@ export default function App() {
             workflowId={route.id}
             initialTarget={route.target}
             firstWorkflow={route.firstWorkflow}
-            onQualify={(id) => setRoute({ name: "qualify", id })}
+            firstRunComplete={route.firstRunComplete}
+            onPersistencePendingChange={setFirstRunPersistencePending}
+            onQualify={async (id) => {
+              if (route.firstWorkflow) {
+                if (!(await saveFirstWorkflowStage("qualification", id))) {
+                  return;
+                }
+              }
+              setRoute({
+                name: "qualify",
+                id,
+                firstWorkflow: route.firstWorkflow,
+              });
+            }}
             onTeach={(id) => setRoute({ name: "teach", id })}
           />
         )}

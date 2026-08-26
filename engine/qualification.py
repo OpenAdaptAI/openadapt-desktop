@@ -787,6 +787,86 @@ def inspect_bundle(
     }
 
 
+def admit_first_supervised_replay(
+    bundle_dir: Path,
+    *,
+    workflow_id: str,
+    expected_project_revision: int,
+    expected_bundle_content_digest: str,
+    bundle_key: str | None = None,
+) -> dict[str, Any]:
+    """Admit one exact reviewed read-only bundle for supervised replay.
+
+    The frontend supplies only the revision and digest that the operator
+    reviewed. The engine reloads the sealed bundle and makes the action-risk
+    decision from Flow's canonical qualification project. This check does not
+    grant authority to a state-changing action.
+    """
+
+    if (
+        isinstance(expected_project_revision, bool)
+        or not isinstance(expected_project_revision, int)
+        or expected_project_revision < 1
+    ):
+        raise QualificationError(
+            "The reviewed workflow revision is invalid. Open the current review before running it."
+        )
+    if (
+        not isinstance(expected_bundle_content_digest, str)
+        or len(expected_bundle_content_digest) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in expected_bundle_content_digest
+        )
+    ):
+        raise QualificationError(
+            "The reviewed workflow digest is invalid. Open the current review before running it."
+        )
+
+    api = _flow_api()
+    workflow = _load(bundle_dir, key=bundle_key)
+    project = workflow.qualification
+    manifest = workflow.manifest
+    if project is None or manifest is None or not manifest.content_digest:
+        raise QualificationError(
+            "This workflow needs qualification before its first supervised run."
+        )
+    if (
+        project.revision != expected_project_revision
+        or manifest.content_digest != expected_bundle_content_digest
+    ):
+        raise QualificationError(
+            "The workflow changed after review. Open the current review before running it."
+        )
+
+    steps = list(api["iter_workflow_steps"](workflow))
+    if not steps:
+        raise QualificationError("This workflow has no reviewed actions to run.")
+    required_actions, _required_identity = api["qualification_action_requirements"](
+        workflow
+    )
+    if required_actions:
+        raise QualificationError(
+            "Qualification is required before the first run can change application state."
+        )
+    for step in steps:
+        classification = project.action_classifications.get(step.id)
+        if (
+            classification is None
+            or not classification.operator_confirmed
+            or classification.classification.value != "read_only"
+        ):
+            raise QualificationError(
+                "Qualification is required before the first run can change application state."
+            )
+
+    return {
+        "workflow_id": workflow_id,
+        "project_revision": project.revision,
+        "bundle_content_digest": manifest.content_digest,
+    }
+
+
 def initialize_qualification(
     bundle_dir: Path,
     *,

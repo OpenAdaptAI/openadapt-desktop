@@ -59,6 +59,11 @@ function preciseReport(
       external_network_calls: verified ? "none" : "observed",
       compensation_actions: verified ? 0 : 1,
     },
+    persistence: {
+      state: "persisted",
+      retryable: false,
+      message: "The report is saved in local history.",
+    },
   };
 }
 
@@ -162,10 +167,15 @@ it("keeps a report visible while local history is retried", async () => {
   expect(screen.getByText("Outcome evidence")).toBeTruthy();
 });
 
-function firstWorkflowReview(): QualificationProject {
+function firstWorkflowReview(
+  workflowId = "workflow-1",
+  revision = 4,
+  digest = "a".repeat(64),
+): QualificationProject {
   return {
     ok: true,
-    workflow_id: "workflow-1",
+    workflow_id: workflowId,
+    project: { revision },
     graph: {
       bundle: {
         name: "Save a test note",
@@ -175,7 +185,7 @@ function firstWorkflowReview(): QualificationProject {
         identity_unarmed_count: 1,
         effect_count: 0,
         encrypted: false,
-        provenance: {},
+        provenance: { content_digest: digest },
       },
       nodes: [
         {
@@ -218,9 +228,9 @@ function firstWorkflowReview(): QualificationProject {
           execution_paths: ["gui"],
           classification: {
             step_id: "step-1",
-            classification: "state_changing",
-            explanation: "The action changes a field.",
-            operator_confirmed: false,
+            classification: "read_only",
+            explanation: "The action only reads the test page.",
+            operator_confirmed: true,
           },
           identity: { can_arm: false, armed: false, sources: [] },
           effects: [],
@@ -230,9 +240,9 @@ function firstWorkflowReview(): QualificationProject {
           execution_paths: ["gui"],
           classification: {
             step_id: "step-2",
-            classification: "consequential",
-            explanation: "The action saves the note.",
-            operator_confirmed: false,
+            classification: "read_only",
+            explanation: "The action only reads the test page.",
+            operator_confirmed: true,
           },
           identity: { can_arm: false, armed: false, sources: [] },
           effects: [],
@@ -275,8 +285,7 @@ it("requires the first user to review the compiled workflow before a supervised 
   expect(await screen.findByText("Enter the test note")).toBeTruthy();
   expect(screen.getByText("Save the note")).toBeTruthy();
   expect(screen.getByText("note_text")).toBeTruthy();
-  expect(screen.getByText("state changing")).toBeTruthy();
-  expect(screen.getByText("consequential")).toBeTruthy();
+  expect(screen.getAllByText("read only")).toHaveLength(2);
 
   const runButton = screen.getByRole("button", {
     name: "Run once while I watch",
@@ -285,16 +294,21 @@ it("requires the first user to review the compiled workflow before a supervised 
 
   fireEvent.click(
     screen.getByRole("checkbox", {
-      name: "I reviewed these steps and will keep the target app in view.",
+      name: "I reviewed these steps. The task uses test data, and I will keep the target app in view.",
     }),
   );
   expect(runButton.disabled).toBe(false);
   fireEvent.click(runButton);
 
   await waitFor(() =>
-    expect(engineInvoke).toHaveBeenCalledWith("replay_workflow", {
+    expect(engineInvoke).toHaveBeenCalledWith("replay_first_workflow", {
       workflow_id: "workflow-1",
       target: { backend: "web", url: "https://example.test" },
+      admission: {
+        workflow_id: "workflow-1",
+        project_revision: 4,
+        bundle_content_digest: "a".repeat(64),
+      },
     }),
   );
   fireEvent.click(
@@ -303,4 +317,131 @@ it("requires the first user to review the compiled workflow before a supervised 
     }),
   );
   expect(onQualify).toHaveBeenCalledWith("workflow-1");
+});
+
+it("routes an unreviewed or state-changing first action to qualification without replay", async () => {
+  const qualification = firstWorkflowReview();
+  qualification.controls.actions["step-2"].classification = {
+    step_id: "step-2",
+    classification: "state_changing",
+    explanation: "The action changes application state.",
+    operator_confirmed: true,
+  };
+  vi.mocked(engineTry).mockImplementation(async (command) =>
+    command === CMD.GET_QUALIFICATION ? qualification : null,
+  );
+  const onQualify = vi.fn();
+
+  render(
+    <WatchRun
+      workflowId="workflow-1"
+      firstWorkflow
+      onQualify={onQualify}
+      onTeach={() => {}}
+    />,
+  );
+
+  expect(await screen.findByText("state changing")).toBeTruthy();
+  expect(
+    screen.queryByRole("button", { name: "Run once while I watch" }),
+  ).toBeNull();
+  fireEvent.click(
+    screen.getByRole("button", { name: "Review before running" }),
+  );
+  expect(onQualify).toHaveBeenCalledWith("workflow-1");
+  expect(engineInvoke).not.toHaveBeenCalled();
+});
+
+it("clears the review acknowledgement when the workflow revision changes", async () => {
+  const reviews = {
+    "workflow-1": firstWorkflowReview("workflow-1", 4, "a".repeat(64)),
+    "workflow-2": firstWorkflowReview("workflow-2", 5, "b".repeat(64)),
+  };
+  vi.mocked(engineTry).mockImplementation(async (command, params) => {
+    if (command !== CMD.GET_QUALIFICATION) return null;
+    return reviews[params.workflow_id as keyof typeof reviews];
+  });
+  const view = render(
+    <WatchRun
+      workflowId="workflow-1"
+      firstWorkflow
+      onQualify={() => {}}
+      onTeach={() => {}}
+    />,
+  );
+
+  const firstCheckbox = await screen.findByRole("checkbox");
+  fireEvent.click(firstCheckbox);
+  expect((firstCheckbox as HTMLInputElement).checked).toBe(true);
+
+  view.rerender(
+    <WatchRun
+      workflowId="workflow-2"
+      firstWorkflow
+      onQualify={() => {}}
+      onTeach={() => {}}
+    />,
+  );
+
+  const nextCheckbox = await screen.findByRole("checkbox");
+  expect((nextCheckbox as HTMLInputElement).checked).toBe(false);
+  expect(
+    (screen.getByRole("button", {
+      name: "Run once while I watch",
+    }) as HTMLButtonElement).disabled,
+  ).toBe(true);
+});
+
+it("keeps an unsaved first result on screen until local history succeeds", async () => {
+  const qualification = firstWorkflowReview();
+  const degraded = {
+    ...preciseReport("VERIFIED"),
+    persistence: {
+      state: "degraded" as const,
+      retryable: true,
+      message: "The report is visible, but local history is not saved.",
+    },
+  };
+  const persisted = preciseReport("VERIFIED");
+  vi.mocked(engineTry).mockImplementation(async (command) =>
+    command === CMD.GET_QUALIFICATION ? qualification : null,
+  );
+  vi.mocked(engineInvoke)
+    .mockResolvedValueOnce(degraded)
+    .mockResolvedValueOnce({ ok: true, report: persisted });
+  const onPersistencePendingChange = vi.fn();
+
+  render(
+    <WatchRun
+      workflowId="workflow-1"
+      firstWorkflow
+      onPersistencePendingChange={onPersistencePendingChange}
+      onQualify={() => {}}
+      onTeach={() => {}}
+    />,
+  );
+
+  fireEvent.click(await screen.findByRole("checkbox"));
+  fireEvent.click(
+    screen.getByRole("button", { name: "Run once while I watch" }),
+  );
+  expect(
+    await screen.findByText("Local run history needs attention"),
+  ).toBeTruthy();
+  expect(
+    screen.queryByRole("button", {
+      name: "Review identity, effects, and policy",
+    }),
+  ).toBeNull();
+  expect(onPersistencePendingChange).toHaveBeenLastCalledWith(true);
+
+  fireEvent.click(
+    screen.getByRole("button", { name: "Retry local history save" }),
+  );
+  expect(
+    await screen.findByRole("button", {
+      name: "Review identity, effects, and policy",
+    }),
+  ).toBeTruthy();
+  expect(onPersistencePendingChange).toHaveBeenLastCalledWith(false);
 });

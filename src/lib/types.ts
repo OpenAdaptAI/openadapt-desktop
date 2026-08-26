@@ -97,6 +97,20 @@ export interface Workflow {
   synced?: boolean;
 }
 
+export interface FirstWorkflowState {
+  stage: "record" | "review" | "result" | "qualification" | "complete";
+  capture_id?: string | null;
+  workflow_id?: string | null;
+  target?: ExecutionTarget | null;
+  task?: string;
+  updated_at: string;
+}
+
+export interface FirstWorkflowStateResponse {
+  ok: true;
+  state: FirstWorkflowState | null;
+}
+
 export type QualificationRisk =
   | "read_only"
   | "state_changing"

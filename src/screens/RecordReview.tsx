@@ -5,6 +5,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import { CMD, engineInvoke, engineTry, onEngineEvent, EVT } from "../lib/engine";
 import type {
   BrowserRuntimeStatus,
+  CapabilityReport,
   EngineStatus,
   ExecutionTarget,
   PresentationExportResult,
@@ -46,9 +47,17 @@ interface CompileProgress {
 function firstTargetIssue(target: ExecutionTarget): string | null {
   switch (target.backend) {
     case "web":
-      return target.url?.trim()
-        ? null
-        : "Enter the page URL for the app you want to record.";
+      if (!target.url?.trim()) {
+        return "Enter the page URL for the app you want to record.";
+      }
+      try {
+        const url = new URL(target.url);
+        return url.protocol === "http:" || url.protocol === "https:"
+          ? null
+          : "Enter a complete HTTP or HTTPS page URL.";
+      } catch {
+        return "Enter a complete HTTP or HTTPS page URL.";
+      }
     case "windows":
       return target.agent_url?.trim()
         ? null
@@ -75,12 +84,33 @@ function firstTargetIssue(target: ExecutionTarget): string | null {
   }
 }
 
+function firstCapabilityIssue(
+  target: ExecutionTarget,
+  capabilities: CapabilityReport | null,
+  loaded: boolean,
+): string | null {
+  if (!loaded) return "Checking whether this app is ready to record.";
+  const capability = capabilities?.surfaces?.[target.backend];
+  if (!capability) {
+    return "Desktop couldn't check this app. Check the local engine, then try again.";
+  }
+  if (capability.state === "available") return null;
+  return (
+    [capability.detail, capability.remediation].filter(Boolean).join(" ") ||
+    "This app isn't ready to record on this computer."
+  );
+}
+
 export function RecordReview({
   onCompiled,
   firstWorkflow = false,
+  initialTarget,
+  initialTask = "",
 }: {
   onCompiled: (id: string, target: ExecutionTarget) => void;
   firstWorkflow?: boolean;
+  initialTarget?: ExecutionTarget;
+  initialTask?: string;
 }) {
   const [status, setStatus] = useState<EngineStatus>({
     recording: false,
@@ -93,8 +123,13 @@ export function RecordReview({
   const [phase, setPhase] = useState<CompilePhase>("idle");
   const [compileError, setCompileError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [target, setTarget] = useState<ExecutionTarget>({ backend: "web" });
-  const [task, setTask] = useState("");
+  const [target, setTarget] = useState<ExecutionTarget>(
+    initialTarget ?? { backend: "web" },
+  );
+  const [task, setTask] = useState(initialTask);
+  const [capabilities, setCapabilities] = useState<CapabilityReport | null>(null);
+  const [capabilitiesLoaded, setCapabilitiesLoaded] = useState(!firstWorkflow);
+  const [recordingError, setRecordingError] = useState<string | null>(null);
   const [runtime, setRuntime] = useState<BrowserRuntimeStatus | null>(null);
   const [presentationStatus, setPresentationStatus] =
     useState<PresentationExportStatus | null>(null);
@@ -106,6 +141,7 @@ export function RecordReview({
   const targetRef = useRef(target);
   const onCompiledRef = useRef(onCompiled);
   const openedWorkflowRef = useRef<string | null>(null);
+  const capabilityGenerationRef = useRef(0);
   targetRef.current = target;
   onCompiledRef.current = onCompiled;
 
@@ -119,6 +155,28 @@ export function RecordReview({
     const s = await engineTry<EngineStatus>(CMD.GET_STATUS, {}, status);
     setStatus(s);
   }
+
+  async function refreshCapabilities() {
+    const generation = ++capabilityGenerationRef.current;
+    setCapabilitiesLoaded(false);
+    const next = await engineTry<CapabilityReport | null>(
+      CMD.GET_CAPABILITIES,
+      {},
+      null,
+    );
+    if (generation !== capabilityGenerationRef.current) return;
+    setCapabilities(next);
+    setCapabilitiesLoaded(true);
+  }
+
+  useEffect(() => {
+    if (!firstWorkflow) return;
+    void refreshCapabilities();
+    return () => {
+      capabilityGenerationRef.current += 1;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [firstWorkflow]);
 
   useEffect(() => {
     void refresh();
@@ -149,6 +207,13 @@ export function RecordReview({
       onEngineEvent(EVT.BROWSER_RUNTIME, (next: BrowserRuntimeStatus) => {
         if (next.workflow_id === "recording") setRuntime(next);
       }),
+      onEngineEvent(EVT.RECORDING_ERROR, (next: { error?: string }) => {
+        setRecordingError(
+          next.error || "Desktop couldn't start this recording. Check the setup and try again.",
+        );
+        setBusy(false);
+        void refresh();
+      }),
     ];
     const t = setInterval(refresh, 1000);
     return () => {
@@ -174,6 +239,7 @@ export function RecordReview({
 
   async function start() {
     setBusy(true);
+    setRecordingError(null);
     setRuntime(null);
     setLastCapture(null);
     setCompileError(null);
@@ -182,9 +248,18 @@ export function RecordReview({
     try {
       const result = await engineInvoke<RecordingResult>(CMD.START_RECORDING, {
         target,
+        ...(firstWorkflow ? { first_workflow: true } : {}),
         ...(task.trim() ? { purpose: task.trim() } : {}),
       });
       applyCompileResult(result);
+    } catch (error) {
+      setRecordingError(
+        error instanceof Error
+          ? error.message
+          : typeof error === "string"
+            ? error
+            : "Desktop couldn't start this recording. Check the setup and try again.",
+      );
     } finally {
       setBusy(false);
     }
@@ -198,6 +273,14 @@ export function RecordReview({
       );
       if (r?.capture_id) setLastCapture(r.capture_id);
       applyCompileResult(r);
+    } catch (error) {
+      setRecordingError(
+        error instanceof Error
+          ? error.message
+          : typeof error === "string"
+            ? error
+            : "Desktop couldn't stop this recording cleanly. Try again before closing Desktop.",
+      );
     } finally {
       setBusy(false);
     }
@@ -262,8 +345,11 @@ export function RecordReview({
 
   const recording = status.recording;
   const targetIssue = firstWorkflow ? firstTargetIssue(target) : null;
+  const capabilityIssue = firstWorkflow
+    ? firstCapabilityIssue(target, capabilities, capabilitiesLoaded)
+    : null;
   const taskMissing = firstWorkflow && !task.trim();
-  const firstWorkflowReady = !taskMissing && !targetIssue;
+  const firstWorkflowReady = !taskMissing && !targetIssue && !capabilityIssue;
 
   return (
     <div className="content">
@@ -306,7 +392,17 @@ export function RecordReview({
           onChange={setTarget}
           idPrefix={`${fieldPrefix}-record-target`}
           disabled={recording || busy}
+          capabilities={firstWorkflow ? capabilities : undefined}
         />
+        {firstWorkflow && !targetIssue && capabilityIssue && (
+          <Button
+            size="sm"
+            disabled={!capabilitiesLoaded}
+            onClick={() => void refreshCapabilities()}
+          >
+            {capabilitiesLoaded ? "Check again" : "Checking…"}
+          </Button>
+        )}
         <Field
           label={firstWorkflow ? "Task to record" : "Task description"}
           hint={
@@ -326,17 +422,31 @@ export function RecordReview({
             onChange={(event) => setTask(event.target.value)}
             placeholder={
               firstWorkflow
-                ? "Copy a test value into a form and save it"
+                ? "Find a test record and check one value"
                 : undefined
             }
           />
         </Field>
-        {firstWorkflow && !firstWorkflowReady && (
+        {firstWorkflow && (taskMissing || targetIssue) && (
           <Callout tone="info" title="Finish the task setup">
             {taskMissing
               ? "Describe the task you want to record."
               : targetIssue}
           </Callout>
+        )}
+        {recordingError && (
+          <div role="alert">
+            <Callout tone="warn" title="Recording needs attention">
+              {recordingError}
+              {!recording && (
+                <div style={{ marginTop: "var(--space-3)" }}>
+                  <Button size="sm" onClick={() => void start()}>
+                    Try recording again
+                  </Button>
+                </div>
+              )}
+            </Callout>
+          </div>
         )}
         <p className="page-sub">
           Target selectors are handed to OpenAdapt Flow through a short-lived
