@@ -2946,9 +2946,28 @@ def test_production_workflow_keeps_normal_publication_unadmitted() -> None:
     assert promote["environment"] == "production-release"
     assert promote["permissions"] == {
         "attestations": "write",
-        "contents": "write",
+        "contents": "read",
         "id-token": "write",
     }
+    promote_steps = _job_steps(promote)
+    release_app = promote_steps["Mint the release App token for GitHub publication"]
+    assert release_app["uses"] == (
+        "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1"
+    )
+    assert release_app["with"] == {
+        "app-id": "${{ vars.OPENADAPT_RELEASE_APP_ID }}",
+        "private-key": "${{ secrets.OPENADAPT_RELEASE_APP_PRIVATE_KEY }}",
+        "owner": "${{ github.repository_owner }}",
+        "repositories": "${{ github.event.repository.name }}",
+        "permission-contents": "write",
+        "permission-metadata": "read",
+    }
+    publication = promote_steps["Publish once and verify the derived cache"]
+    assert publication["env"]["GH_TOKEN"] == "${{ steps.release_app.outputs.token }}"
+    publication_script = publication["run"]
+    assert 'gh release upload "${PRODUCTION_CHANNEL_TAG}" "${CACHE_PATH}"' in publication_script
+    assert 'gh release create "${PRODUCTION_CHANNEL_TAG}"' in publication_script
+    assert "github.token" not in publication_script
     production_text = (ROOT / ".github/workflows/production-channel.yml").read_text()
     assert "repository: OpenAdaptAI/.github" in production_text
     assert "ref: ${{ steps.refs.outputs.central_commit }}" in production_text
