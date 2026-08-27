@@ -39,6 +39,7 @@ from scripts.production_release_contract import (
     validate_tag_ref,
     validate_tag_ref_state,
     validate_tag_rulesets,
+    write_platform_verification,
 )
 
 VERSION = "1.2.3"
@@ -50,6 +51,65 @@ def _materialize_release(directory: Path) -> None:
     directory.mkdir()
     for index, spec in enumerate(artifact_specs(VERSION), start=1):
         (directory / spec.name).write_bytes(f"artifact-{index}".encode())
+    sbom = {
+        "bomFormat": "CycloneDX",
+        "specVersion": "1.6",
+        "version": 1,
+        "metadata": {"tools": [{"name": "fixture-sbom-generator", "version": "1.0.0"}]},
+        "components": [{"type": "application", "name": "openadapt-desktop", "version": VERSION}],
+    }
+    (directory / f"OpenAdapt-Desktop-v{VERSION}.cyclonedx.json").write_text(
+        json.dumps(sbom, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    profiles = (
+        ("linux", "x86_64", "verification-metadata-linux-x86-64"),
+        ("macos", "arm64", "verification-metadata-macos-arm64"),
+        ("macos", "x86_64", "verification-metadata-macos-x86-64"),
+        ("windows", "x86_64", "verification-metadata-windows-x86-64"),
+    )
+    specs = {item.kind: item for item in artifact_specs(VERSION)}
+    for platform, architecture, kind in profiles:
+        verification = _document(platform, architecture)["verification"]
+        if platform == "linux":
+            verification["subjects"] = [
+                {
+                    "name": spec.name,
+                    "sha256": "sha256:"
+                    + hashlib.sha256((directory / spec.name).read_bytes()).hexdigest(),
+                }
+                for spec in artifact_specs(VERSION)
+                if spec.kind.startswith("linux-") and f"-linux-{architecture}" in spec.name
+            ]
+        value = build_platform_verification(
+            directory,
+            version=VERSION,
+            source_commit=SOURCE_COMMIT,
+            platform=platform,
+            architecture=architecture,
+            workflow_commit=SOURCE_COMMIT,
+            run_id=123,
+            run_attempt=1,
+            embedded_flow_version="2.0.0",
+            verification=verification,
+        )
+        (directory / specs[kind].name).write_bytes(
+            json.dumps(
+                value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+            + b"\n"
+        )
+    checksum_names = sorted(expected_asset_names(VERSION) - {"SHA256SUMS"})
+    (directory / "SHA256SUMS").write_text(
+        "".join(
+            f"{hashlib.sha256((directory / name).read_bytes()).hexdigest()}  {name}\n"
+            for name in checksum_names
+        ),
+        encoding="utf-8",
+    )
 
 
 def _artifact(platform: str, architecture: str) -> list[dict[str, object]]:
@@ -359,6 +419,18 @@ def test_platform_verification_builder_hashes_exact_stable_artifacts(
     assert all(item["sha256"] != DIGEST for item in document["artifacts"])
     assert document["verification"] == expected["verification"]
 
+    output = tmp_path / "verification.json"
+    write_platform_verification(output, document, version=VERSION)
+    assert output.read_bytes() == (
+        json.dumps(
+            document,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        + b"\n"
+    )
+
 
 def test_platform_verification_rejects_unbound_or_false_evidence() -> None:
     macos = _document("macos", "arm64")
@@ -475,6 +547,7 @@ def test_publication_staging_binds_the_same_complete_app_draft(tmp_path: Path) -
         directory=release,
         version=VERSION,
         source_commit=SOURCE_COMMIT,
+        embedded_flow_version="2.0.0",
         immutable_releases={"enabled": True, "enforced_by_owner": False},
         tag_rulesets=rulesets,
         tag_ref_state=tag_state,
@@ -510,6 +583,7 @@ def test_publication_staging_rejects_a_changed_draft_or_tag(tmp_path: Path) -> N
             directory=release,
             version=VERSION,
             source_commit=SOURCE_COMMIT,
+            embedded_flow_version="2.0.0",
             immutable_releases={"enabled": True, "enforced_by_owner": True},
             tag_rulesets=rulesets,
             tag_ref_state={"ref": f"refs/tags/v{VERSION}", "exists": False},
@@ -522,10 +596,57 @@ def test_publication_staging_rejects_a_changed_draft_or_tag(tmp_path: Path) -> N
             directory=release,
             version=VERSION,
             source_commit=SOURCE_COMMIT,
+            embedded_flow_version="2.0.0",
             immutable_releases={"enabled": True, "enforced_by_owner": True},
             tag_rulesets=rulesets,
             tag_ref_state={"ref": f"refs/tags/v{VERSION}", "exists": True},
             observed_at="2026-08-27T12:00:00Z",
+        )
+
+
+def test_publication_staging_rejects_invalid_public_metadata(tmp_path: Path) -> None:
+    creation, immutability = _raw_rulesets()
+    rulesets = normalize_tag_rulesets(creation, immutability)
+    common = {
+        "version": VERSION,
+        "source_commit": SOURCE_COMMIT,
+        "embedded_flow_version": "2.0.0",
+        "immutable_releases": {"enabled": True, "enforced_by_owner": False},
+        "tag_rulesets": rulesets,
+        "tag_ref_state": {"ref": f"refs/tags/v{VERSION}", "exists": False},
+        "observed_at": "2026-08-27T12:00:00Z",
+    }
+
+    invalid_sbom = tmp_path / "invalid-sbom"
+    _materialize_release(invalid_sbom)
+    sbom_path = invalid_sbom / f"OpenAdapt-Desktop-v{VERSION}.cyclonedx.json"
+    sbom = json.loads(sbom_path.read_text(encoding="utf-8"))
+    sbom["components"] = []
+    sbom_path.write_text(json.dumps(sbom, sort_keys=True) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="SBOM identity or inventory"):
+        build_publication_staging(
+            _draft_api(invalid_sbom),
+            directory=invalid_sbom,
+            **common,
+        )
+
+    invalid_checksums = tmp_path / "invalid-checksums"
+    _materialize_release(invalid_checksums)
+    (invalid_checksums / "SHA256SUMS").write_text("0" * 64 + "  wrong\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="SHA256SUMS"):
+        build_publication_staging(
+            _draft_api(invalid_checksums),
+            directory=invalid_checksums,
+            **common,
+        )
+
+    wrong_flow = tmp_path / "wrong-flow"
+    _materialize_release(wrong_flow)
+    with pytest.raises(ValueError, match="release identity differs"):
+        build_publication_staging(
+            _draft_api(wrong_flow),
+            directory=wrong_flow,
+            **{**common, "embedded_flow_version": "2.0.1"},
         )
 
 
@@ -538,6 +659,7 @@ def test_central_staging_output_is_revalidated_and_rehashed(tmp_path: Path) -> N
         directory=release,
         version=VERSION,
         source_commit=SOURCE_COMMIT,
+        embedded_flow_version="2.0.0",
         immutable_releases={"enabled": True, "enforced_by_owner": False},
         tag_rulesets=normalize_tag_rulesets(creation, immutability),
         tag_ref_state={"ref": f"refs/tags/v{VERSION}", "exists": False},
@@ -591,6 +713,7 @@ def test_central_staging_rejects_unknown_fields_and_noncanonical_assets(
         directory=release,
         version=VERSION,
         source_commit=SOURCE_COMMIT,
+        embedded_flow_version="2.0.0",
         immutable_releases={"enabled": True, "enforced_by_owner": True},
         tag_rulesets=normalize_tag_rulesets(creation, immutability),
         tag_ref_state={"ref": f"refs/tags/v{VERSION}", "exists": False},
@@ -626,6 +749,7 @@ def test_platform_verification_asset_hashes_exact_bytes_before_parsing(
             directory=release,
             version=VERSION,
             source_commit=SOURCE_COMMIT,
+            embedded_flow_version="2.0.0",
             immutable_releases={"enabled": True, "enforced_by_owner": False},
             tag_rulesets=normalize_tag_rulesets(creation, immutability),
             tag_ref_state={"ref": f"refs/tags/v{VERSION}", "exists": False},
@@ -643,6 +767,7 @@ def test_bound_release_reuses_admitted_draft_id_and_exact_bytes(tmp_path: Path) 
         directory=release,
         version=VERSION,
         source_commit=SOURCE_COMMIT,
+        embedded_flow_version="2.0.0",
         immutable_releases={"enabled": True, "enforced_by_owner": False},
         tag_rulesets=normalize_tag_rulesets(creation, immutability),
         tag_ref_state={"ref": f"refs/tags/v{VERSION}", "exists": False},
@@ -654,6 +779,7 @@ def test_bound_release_reuses_admitted_draft_id_and_exact_bytes(tmp_path: Path) 
             draft,
             directory=release,
             version=VERSION,
+            embedded_flow_version="2.0.0",
             publication_staging=staging,
             phase="draft",
         )
@@ -668,6 +794,7 @@ def test_bound_release_reuses_admitted_draft_id_and_exact_bytes(tmp_path: Path) 
             published,
             directory=release,
             version=VERSION,
+            embedded_flow_version="2.0.0",
             publication_staging=staging,
             phase="published",
         )
@@ -681,6 +808,7 @@ def test_bound_release_reuses_admitted_draft_id_and_exact_bytes(tmp_path: Path) 
             replacement,
             directory=release,
             version=VERSION,
+            embedded_flow_version="2.0.0",
             publication_staging=staging,
             phase="draft",
         )

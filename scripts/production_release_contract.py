@@ -284,6 +284,102 @@ def artifact_inventory_digest(value: Any, *, version: str) -> str:
     )
 
 
+def _validate_release_checksums(directory: Path, *, version: str) -> None:
+    expected_names = expected_asset_names(version) - {"SHA256SUMS"}
+    expected = b"".join(
+        f"{_digest(directory / name).removeprefix('sha256:')}  {name}\n".encode("utf-8")
+        for name in sorted(expected_names)
+    )
+    actual = _regular_file(directory / "SHA256SUMS", "release checksums").read_bytes()
+    if actual != expected:
+        raise ValueError("Desktop SHA256SUMS does not bind the exact release bytes")
+
+
+def _validate_release_sbom(directory: Path, *, version: str) -> None:
+    path = _regular_file(
+        directory / f"OpenAdapt-Desktop-v{version}.cyclonedx.json",
+        "Desktop CycloneDX SBOM",
+    )
+    try:
+        value = json.loads(path.read_bytes())
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("Desktop CycloneDX SBOM is not UTF-8 JSON") from exc
+    if not isinstance(value, dict):
+        raise ValueError("Desktop CycloneDX SBOM must be an object")
+    metadata = value.get("metadata")
+    tools = metadata.get("tools") if isinstance(metadata, dict) else None
+    components = value.get("components")
+    if (
+        value.get("bomFormat") != "CycloneDX"
+        or not isinstance(value.get("specVersion"), str)
+        or re.fullmatch(r"1\.[4-9]", value["specVersion"]) is None
+        or value.get("version") != 1
+        or not isinstance(tools, (dict, list))
+        or not tools
+        or not isinstance(components, list)
+        or not components
+    ):
+        raise ValueError("Desktop CycloneDX SBOM identity or inventory is invalid")
+    if any(
+        not isinstance(component, dict)
+        or not isinstance(component.get("name"), str)
+        or not component["name"].strip()
+        for component in components
+    ):
+        raise ValueError("Desktop CycloneDX SBOM contains an unnamed component")
+
+
+def validate_release_asset_contents(
+    directory: Path,
+    *,
+    version: str,
+    source_commit: str,
+    embedded_flow_version: str,
+) -> None:
+    """Validate the public metadata files against the exact release bytes."""
+
+    if COMMIT.fullmatch(source_commit) is None:
+        raise ValueError("Desktop release source commit is invalid")
+    if VERSION.fullmatch(embedded_flow_version) is None:
+        raise ValueError("Desktop embedded Flow version is invalid")
+    specs = {item.kind: item for item in artifact_specs(version)}
+    profiles = (
+        ("linux", "x86_64", "verification-metadata-linux-x86-64"),
+        ("macos", "arm64", "verification-metadata-macos-arm64"),
+        ("macos", "x86_64", "verification-metadata-macos-x86-64"),
+        ("windows", "x86_64", "verification-metadata-windows-x86-64"),
+    )
+    for platform, architecture, kind in profiles:
+        path = _regular_file(directory / specs[kind].name, f"{platform} verification metadata")
+        raw = path.read_bytes()
+        try:
+            value = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"{platform} verification metadata is not UTF-8 JSON") from exc
+        document = validate_platform_verification(value, version=version)
+        if raw != _canonical(document) + b"\n":
+            raise ValueError(f"{platform} verification metadata is not canonical JSON plus LF")
+        if (
+            document["platform"] != platform
+            or document["architecture"] != architecture
+            or document["release"]["source_commit"] != source_commit
+            or document["build"]["embedded_flow_version"] != embedded_flow_version
+        ):
+            raise ValueError(f"{platform} verification metadata release identity differs")
+        for artifact in document["artifacts"]:
+            artifact_path = _regular_file(
+                directory / artifact["name"],
+                f"verified {platform} artifact {artifact['name']}",
+            )
+            if (
+                artifact_path.stat().st_size != artifact["size_bytes"]
+                or _digest(artifact_path) != artifact["sha256"]
+            ):
+                raise ValueError(f"{platform} verification metadata artifact bytes differ")
+    _validate_release_sbom(directory, version=version)
+    _validate_release_checksums(directory, version=version)
+
+
 def validate_immutable_releases_response(value: Any) -> dict[str, Any]:
     """Validate the exact GitHub immutable-releases API response."""
 
@@ -489,6 +585,7 @@ def build_publication_staging(
     directory: Path,
     version: str,
     source_commit: str,
+    embedded_flow_version: str,
     immutable_releases: Any,
     tag_rulesets: Any,
     tag_ref_state: Any,
@@ -539,6 +636,12 @@ def build_publication_staging(
                 "uploader_login": "openadapt-release[bot]",
             }
         )
+    validate_release_asset_contents(
+        directory,
+        version=version,
+        source_commit=source_commit,
+        embedded_flow_version=embedded_flow_version,
+    )
     staged_assets.sort(key=lambda item: (item["name"], item["asset_id"]))
     immutable = validate_immutable_releases_response(immutable_releases)
     rulesets = validate_tag_rulesets(tag_rulesets)
@@ -742,6 +845,7 @@ def validate_bound_release(
     *,
     directory: Path,
     version: str,
+    embedded_flow_version: str,
     publication_staging: Any,
     phase: str,
 ) -> dict[str, Any]:
@@ -801,6 +905,12 @@ def validate_bound_release(
             or remote_asset.get("size") != artifact["size_bytes"]
         ):
             raise ValueError("live release bytes differ from admitted staging")
+    validate_release_asset_contents(
+        directory,
+        version=version,
+        source_commit=staging["target_commitish"],
+        embedded_flow_version=embedded_flow_version,
+    )
     return release_api
 
 
@@ -1346,6 +1456,15 @@ def build_platform_verification(
     return validate_platform_verification(document, version=version)
 
 
+def write_platform_verification(path: Path, value: Any, *, version: str) -> Path:
+    document = validate_platform_verification(value, version=version)
+    if path.exists():
+        raise ValueError("platform verification output already exists")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(_canonical(document) + b"\n")
+    return path
+
+
 def _load(path: Path) -> Any:
     _regular_file(path, str(path))
     return json.loads(path.read_text(encoding="utf-8"))
@@ -1374,6 +1493,7 @@ def _parser() -> argparse.ArgumentParser:
     staging.add_argument("--directory", type=Path, required=True)
     staging.add_argument("--version", required=True)
     staging.add_argument("--source-commit", required=True)
+    staging.add_argument("--embedded-flow-version", required=True)
     staging.add_argument("--immutable-releases", type=Path, required=True)
     staging.add_argument("--tag-rulesets", type=Path, required=True)
     staging.add_argument("--tag-ref-state", type=Path, required=True)
@@ -1391,6 +1511,7 @@ def _parser() -> argparse.ArgumentParser:
     validate_release.add_argument("--directory", type=Path, required=True)
     validate_release.add_argument("--version", required=True)
     validate_release.add_argument("--source-commit", required=True)
+    validate_release.add_argument("--embedded-flow-version", required=True)
     validate_release.add_argument("--staging", type=Path, required=True)
     validate_release.add_argument("--staging-sha256", required=True)
     validate_release.add_argument("--draft-release-id", required=True)
@@ -1467,6 +1588,7 @@ def main() -> int:
                 directory=args.directory,
                 version=args.version,
                 source_commit=args.source_commit,
+                embedded_flow_version=args.embedded_flow_version,
                 immutable_releases=_load(args.immutable_releases),
                 tag_rulesets=_load(args.tag_rulesets),
                 tag_ref_state=_load(args.tag_ref_state),
@@ -1501,6 +1623,7 @@ def main() -> int:
                 _load(args.file),
                 directory=args.directory,
                 version=args.version,
+                embedded_flow_version=args.embedded_flow_version,
                 publication_staging=staging,
                 phase=args.phase,
             )
@@ -1553,7 +1676,7 @@ def main() -> int:
                 embedded_flow_version=args.embedded_flow_version,
                 verification=_load(args.verification),
             )
-            write_artifact_inventory(args.output, value)
+            write_platform_verification(args.output, value, version=args.version)
             print(args.output)
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         print(f"REFUSED: {exc}", file=sys.stderr)
