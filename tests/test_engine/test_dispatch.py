@@ -53,14 +53,20 @@ def _precise_report(
 
 
 def _first_supervised_bundle(path: Path, *, state_changing: bool) -> dict:
-    from openadapt_flow.ir import ActionKind, Step, Workflow
+    flow_ir = pytest.importorskip("openadapt_flow.ir")
 
     from engine.qualification import initialize_qualification
 
-    action = ActionKind.CLICK if state_changing else ActionKind.WAIT
-    Workflow(
+    action = flow_ir.ActionKind.CLICK if state_changing else flow_ir.ActionKind.WAIT
+    flow_ir.Workflow(
         name="first-supervised-test",
-        steps=[Step(id="step-1", intent="Inspect the test page", action=action)],
+        steps=[
+            flow_ir.Step(
+                id="step-1",
+                intent="Inspect the test page",
+                action=action,
+            )
+        ],
     ).save(path)
     return initialize_qualification(
         path,
