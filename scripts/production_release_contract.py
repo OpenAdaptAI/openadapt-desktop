@@ -542,7 +542,7 @@ def build_publication_staging(
     immutable = validate_immutable_releases_response(immutable_releases)
     rulesets = validate_tag_rulesets(tag_rulesets)
     state = validate_tag_ref_state(tag_ref_state, tag=tag)
-    return {
+    staging = {
         "schema_version": "openadapt.production-release-staging-evidence/v1",
         "repository": REPOSITORY,
         "repository_id": REPOSITORY_ID,
@@ -564,26 +564,25 @@ def build_publication_staging(
         "tag_ref_state_sha256": tag_ref_state_digest(state, tag=tag),
         "observed_at": _timestamp(observed_at),
     }
+    return validate_publication_staging(staging, version=version)
 
 
 def staging_digest(value: Mapping[str, Any]) -> str:
     return "sha256:" + hashlib.sha256(STAGING_DOMAIN + _canonical(value)).hexdigest()
 
 
-def validate_bound_release(
-    release_api: Any,
+def validate_publication_staging(
+    value: Any,
     *,
-    directory: Path,
     version: str,
-    publication_staging: Any,
-    phase: str,
+    expected_source_commit: str | None = None,
+    expected_draft_release_id: str | None = None,
+    expected_sha256: str | None = None,
 ) -> dict[str, Any]:
-    """Verify that a live draft or immutable release is the admitted release ID."""
+    """Validate the closed central staging output before a release effect."""
 
-    if phase not in {"draft", "published"}:
-        raise ValueError("bound release phase must be draft or published")
     staging = _closed(
-        publication_staging,
+        value,
         {
             "schema_version",
             "repository",
@@ -608,11 +607,17 @@ def validate_bound_release(
         },
         "publication staging",
     )
+    draft_release_id = staging["draft_release_id"]
+    source_commit = staging["target_commitish"]
     if (
         staging["schema_version"] != "openadapt.production-release-staging-evidence/v1"
         or staging["repository"] != REPOSITORY
         or staging["repository_id"] != REPOSITORY_ID
+        or not isinstance(draft_release_id, str)
+        or DECIMAL_ID.fullmatch(draft_release_id) is None
         or staging["tag"] != f"v{version}"
+        or not isinstance(source_commit, str)
+        or COMMIT.fullmatch(source_commit) is None
         or staging["draft"] is not True
         or staging["prerelease"] is not False
         or staging["release_app_id"] != "4730708"
@@ -621,6 +626,71 @@ def validate_bound_release(
         or staging["release_author_login"] != "openadapt-release[bot]"
     ):
         raise ValueError("publication staging identity differs")
+    if expected_source_commit is not None and source_commit != expected_source_commit:
+        raise ValueError("publication staging source commit differs")
+    if expected_draft_release_id is not None and draft_release_id != expected_draft_release_id:
+        raise ValueError("publication staging draft release id differs")
+
+    staged_assets = staging["assets"]
+    if not isinstance(staged_assets, list) or len(staged_assets) != 14:
+        raise ValueError("publication staging must contain exactly fourteen assets")
+    inventory_artifacts = []
+    asset_ids: set[str] = set()
+    for index, staged_value in enumerate(staged_assets):
+        staged = _closed(
+            staged_value,
+            {
+                "asset_id",
+                "name",
+                "kind",
+                "sha256",
+                "size_bytes",
+                "media_type",
+                "publish_destinations",
+                "uploader_id",
+                "uploader_login",
+            },
+            f"publication staging asset {index}",
+        )
+        asset_id = staged["asset_id"]
+        if (
+            not isinstance(asset_id, str)
+            or DECIMAL_ID.fullmatch(asset_id) is None
+            or asset_id in asset_ids
+            or staged["uploader_id"] != "321543906"
+            or staged["uploader_login"] != "openadapt-release[bot]"
+        ):
+            raise ValueError("publication staging asset identity differs")
+        asset_ids.add(asset_id)
+        inventory_artifacts.append(
+            {
+                key: staged[key]
+                for key in (
+                    "name",
+                    "kind",
+                    "sha256",
+                    "size_bytes",
+                    "media_type",
+                    "publish_destinations",
+                )
+            }
+        )
+    if staged_assets != sorted(
+        staged_assets,
+        key=lambda item: (item["name"], item["asset_id"]),
+    ):
+        raise ValueError("publication staging assets are not canonically sorted")
+    inventory_artifacts.sort(key=lambda item: (item["kind"], item["name"], item["sha256"]))
+    validate_artifact_inventory(
+        {
+            "schema_version": ARTIFACT_INVENTORY_SCHEMA,
+            "target": TARGET,
+            "claim_scope": CLAIM_SCOPE,
+            "artifacts": inventory_artifacts,
+        },
+        version=version,
+    )
+
     validate_immutable_releases_response(staging["immutable_releases"])
     if staging["immutable_releases_sha256"] != immutable_releases_digest(
         staging["immutable_releases"]
@@ -635,6 +705,50 @@ def validate_bound_release(
     ):
         raise ValueError("publication staging tag-ref digest differs")
     _timestamp(staging["observed_at"])
+    digest = staging_digest(staging)
+    if expected_sha256 is not None and digest != expected_sha256:
+        raise ValueError("publication staging digest differs")
+    return staging
+
+
+def validate_publication_staging_bytes(
+    raw: bytes,
+    *,
+    version: str,
+    expected_source_commit: str,
+    expected_draft_release_id: str,
+    expected_sha256: str,
+) -> dict[str, Any]:
+    """Require the reusable verifier's exact compact canonical staging JSON."""
+
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("publication staging output is not UTF-8 JSON") from exc
+    if raw != _canonical(value):
+        raise ValueError("publication staging output is not exact compact canonical JSON")
+    return validate_publication_staging(
+        value,
+        version=version,
+        expected_source_commit=expected_source_commit,
+        expected_draft_release_id=expected_draft_release_id,
+        expected_sha256=expected_sha256,
+    )
+
+
+def validate_bound_release(
+    release_api: Any,
+    *,
+    directory: Path,
+    version: str,
+    publication_staging: Any,
+    phase: str,
+) -> dict[str, Any]:
+    """Verify that a live draft or immutable release is the admitted release ID."""
+
+    if phase not in {"draft", "published"}:
+        raise ValueError("bound release phase must be draft or published")
+    staging = validate_publication_staging(publication_staging, version=version)
 
     if not isinstance(release_api, dict):
         raise ValueError("live release API response must be an object")
@@ -736,8 +850,10 @@ def validate_admission_reference(value: Any) -> dict[str, Any]:
         _valid_digest(reference[field], f"qualification-release {field}")
     if (
         not isinstance(reference["registry_revision"], int)
+        or isinstance(reference["registry_revision"], bool)
         or reference["registry_revision"] <= 0
         or not isinstance(reference["size_bytes"], int)
+        or isinstance(reference["size_bytes"], bool)
         or reference["size_bytes"] <= 0
     ):
         raise ValueError("qualification-release reference size or revision is invalid")
@@ -933,9 +1049,17 @@ def _validate_build(value: Any, *, source_commit: str) -> dict[str, Any]:
     }
     if any(build.get(key) != item for key, item in expected.items()):
         raise ValueError("platform verification build identity or result differs")
-    if not isinstance(build.get("run_id"), int) or build["run_id"] <= 0:
+    if (
+        not isinstance(build.get("run_id"), int)
+        or isinstance(build["run_id"], bool)
+        or build["run_id"] <= 0
+    ):
         raise ValueError("platform verification run_id is invalid")
-    if not isinstance(build.get("run_attempt"), int) or build["run_attempt"] <= 0:
+    if (
+        not isinstance(build.get("run_attempt"), int)
+        or isinstance(build["run_attempt"], bool)
+        or build["run_attempt"] <= 0
+    ):
         raise ValueError("platform verification run_attempt is invalid")
     flow_version = build.get("embedded_flow_version")
     if not isinstance(flow_version, str) or not flow_version:
@@ -972,6 +1096,7 @@ def _validate_artifact_bindings(
             or artifact.get("media_type") != spec.media_type
             or DIGEST.fullmatch(str(artifact.get("sha256") or "")) is None
             or not isinstance(artifact.get("size_bytes"), int)
+            or isinstance(artifact["size_bytes"], bool)
             or artifact["size_bytes"] <= 0
         ):
             raise ValueError("platform verification artifact binding is invalid")
@@ -1254,6 +1379,21 @@ def _parser() -> argparse.ArgumentParser:
     staging.add_argument("--observed-at", required=True)
     staging.add_argument("--output", type=Path, required=True)
     staging.add_argument("--github-output", type=Path)
+    validate_staging = commands.add_parser("validate-staging")
+    validate_staging.add_argument("--file", type=Path, required=True)
+    validate_staging.add_argument("--version", required=True)
+    validate_staging.add_argument("--source-commit", required=True)
+    validate_staging.add_argument("--draft-release-id", required=True)
+    validate_staging.add_argument("--expected-sha256", required=True)
+    validate_release = commands.add_parser("validate-bound-release")
+    validate_release.add_argument("--file", type=Path, required=True)
+    validate_release.add_argument("--directory", type=Path, required=True)
+    validate_release.add_argument("--version", required=True)
+    validate_release.add_argument("--source-commit", required=True)
+    validate_release.add_argument("--staging", type=Path, required=True)
+    validate_release.add_argument("--staging-sha256", required=True)
+    validate_release.add_argument("--draft-release-id", required=True)
+    validate_release.add_argument("--phase", choices=("draft", "published"), required=True)
     tag_binding = commands.add_parser("tag-binding")
     tag_binding.add_argument("--admission-reference", type=Path, required=True)
     tag_binding.add_argument("--artifact-inventory", type=Path, required=True)
@@ -1339,6 +1479,31 @@ def main() -> int:
                     output.write(f"publication_staging_sha256={digest}\n")
                     output.write(f"draft_release_id={value['draft_release_id']}\n")
             print(digest)
+        elif args.command == "validate-staging":
+            validate_publication_staging_bytes(
+                args.file.read_bytes(),
+                version=args.version,
+                expected_source_commit=args.source_commit,
+                expected_draft_release_id=args.draft_release_id,
+                expected_sha256=args.expected_sha256,
+            )
+            print(f"Validated {args.file}.")
+        elif args.command == "validate-bound-release":
+            staging = validate_publication_staging_bytes(
+                args.staging.read_bytes(),
+                version=args.version,
+                expected_source_commit=args.source_commit,
+                expected_draft_release_id=args.draft_release_id,
+                expected_sha256=args.staging_sha256,
+            )
+            release = validate_bound_release(
+                _load(args.file),
+                directory=args.directory,
+                version=args.version,
+                publication_staging=staging,
+                phase=args.phase,
+            )
+            print(f"Validated {args.phase} release {release['id']}.")
         elif args.command == "tag-binding":
             value = build_tag_binding(
                 _load(args.admission_reference),

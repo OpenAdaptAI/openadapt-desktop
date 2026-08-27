@@ -32,6 +32,8 @@ from scripts.production_release_contract import (
     validate_bound_release,
     validate_immutable_releases_response,
     validate_platform_verification,
+    validate_publication_staging,
+    validate_publication_staging_bytes,
     validate_tag_binding_bytes,
     validate_tag_object,
     validate_tag_ref,
@@ -376,6 +378,16 @@ def test_platform_verification_rejects_unbound_or_false_evidence() -> None:
     with pytest.raises(ValueError, match="provenance identity"):
         validate_platform_verification(linux, version=VERSION)
 
+    invalid_run = _document("linux", "x86_64")
+    invalid_run["build"]["run_id"] = True
+    with pytest.raises(ValueError, match="run_id"):
+        validate_platform_verification(invalid_run, version=VERSION)
+
+    invalid_size = _document("windows", "x86_64")
+    invalid_size["artifacts"][0]["size_bytes"] = True
+    with pytest.raises(ValueError, match="artifact binding"):
+        validate_platform_verification(invalid_size, version=VERSION)
+
 
 def test_platform_verification_is_closed() -> None:
     document = _document("macos", "arm64")
@@ -505,6 +517,84 @@ def test_publication_staging_rejects_a_changed_draft_or_tag(tmp_path: Path) -> N
             tag_ref_state={"ref": f"refs/tags/v{VERSION}", "exists": True},
             observed_at="2026-08-27T12:00:00Z",
         )
+
+
+def test_central_staging_output_is_revalidated_and_rehashed(tmp_path: Path) -> None:
+    release = tmp_path / "release"
+    _materialize_release(release)
+    creation, immutability = _raw_rulesets()
+    staging = build_publication_staging(
+        _draft_api(release),
+        directory=release,
+        version=VERSION,
+        source_commit=SOURCE_COMMIT,
+        immutable_releases={"enabled": True, "enforced_by_owner": False},
+        tag_rulesets=normalize_tag_rulesets(creation, immutability),
+        tag_ref_state={"ref": f"refs/tags/v{VERSION}", "exists": False},
+        observed_at="2026-08-27T12:00:00Z",
+    )
+    digest = staging_digest(staging)
+    raw = json.dumps(
+        staging,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+
+    assert (
+        validate_publication_staging_bytes(
+            raw,
+            version=VERSION,
+            expected_source_commit=SOURCE_COMMIT,
+            expected_draft_release_id="200",
+            expected_sha256=digest,
+        )
+        == staging
+    )
+
+    with pytest.raises(ValueError, match="compact canonical"):
+        validate_publication_staging_bytes(
+            raw + b"\n",
+            version=VERSION,
+            expected_source_commit=SOURCE_COMMIT,
+            expected_draft_release_id="200",
+            expected_sha256=digest,
+        )
+    with pytest.raises(ValueError, match="digest differs"):
+        validate_publication_staging_bytes(
+            raw,
+            version=VERSION,
+            expected_source_commit=SOURCE_COMMIT,
+            expected_draft_release_id="200",
+            expected_sha256="sha256:" + "0" * 64,
+        )
+
+
+def test_central_staging_rejects_unknown_fields_and_noncanonical_assets(
+    tmp_path: Path,
+) -> None:
+    release = tmp_path / "release"
+    _materialize_release(release)
+    creation, immutability = _raw_rulesets()
+    staging = build_publication_staging(
+        _draft_api(release),
+        directory=release,
+        version=VERSION,
+        source_commit=SOURCE_COMMIT,
+        immutable_releases={"enabled": True, "enforced_by_owner": True},
+        tag_rulesets=normalize_tag_rulesets(creation, immutability),
+        tag_ref_state={"ref": f"refs/tags/v{VERSION}", "exists": False},
+        observed_at="2026-08-27T12:00:00Z",
+    )
+
+    staging["unexpected"] = True
+    with pytest.raises(ValueError, match="contain exactly"):
+        validate_publication_staging(staging, version=VERSION)
+    staging.pop("unexpected")
+
+    staging["assets"].reverse()
+    with pytest.raises(ValueError, match="canonically sorted"):
+        validate_publication_staging(staging, version=VERSION)
 
 
 def test_platform_verification_asset_hashes_exact_bytes_before_parsing(
