@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -14,18 +15,23 @@ from scripts.production_release_contract import (
     PLATFORM_VERIFICATION_SCHEMA,
     REPOSITORY,
     REPOSITORY_ID,
+    admission_reference_digest,
     artifact_specs,
     build_artifact_inventory,
     build_platform_verification,
     build_publication_staging,
+    build_tag_binding,
     expected_asset_names,
     immutable_releases_digest,
     normalize_tag_rulesets,
     staging_digest,
+    tag_binding_bytes,
     tag_ref_state_digest,
     tag_rulesets_digest,
+    validate_bound_release,
     validate_immutable_releases_response,
     validate_platform_verification,
+    validate_tag_binding_bytes,
     validate_tag_ref_state,
     validate_tag_rulesets,
 )
@@ -181,6 +187,7 @@ def _draft_api(release: Path) -> dict:
         "target_commitish": SOURCE_COMMIT,
         "draft": True,
         "prerelease": False,
+        "immutable": False,
         "author": {"id": 321543906, "login": "openadapt-release[bot]"},
         "assets": [
             {
@@ -197,6 +204,53 @@ def _draft_api(release: Path) -> dict:
             for index, artifact in enumerate(inventory["artifacts"])
         ],
     }
+
+
+def _admission_reference() -> dict:
+    object_digest = "sha256:" + "c" * 64
+    value = {
+        "schema_version": "openadapt.production-evidence-object-reference/v2",
+        "repository": "OpenAdaptAI/.github",
+        "repository_id": "858454062",
+        "repository_owner_id": "132681217",
+        "registry_source_commit": "d" * 40,
+        "registry_revision": 10,
+        "registry_head_sha256": "sha256:" + "e" * 64,
+        "registry_entry_sha256": "",
+        "kind": "qualification-release",
+        "object_media_type": ("application/vnd.openadapt.qualification-release+json;version=1"),
+        "object_path": (
+            "production-evidence/objects/sha256/cc/" + "c" * 64 + ".qualification-release.json"
+        ),
+        "object_schema_version": "openadapt.qualification-release/v1",
+        "object_sha256": object_digest,
+        "semantic_identity_sha256": "sha256:" + "f" * 64,
+        "size_bytes": 100,
+        "subject_sha256": None,
+    }
+    entry = {
+        key: value[key]
+        for key in {
+            "kind",
+            "object_media_type",
+            "object_path",
+            "object_schema_version",
+            "object_sha256",
+            "semantic_identity_sha256",
+            "size_bytes",
+            "subject_sha256",
+        }
+    }
+    canonical = json.dumps(
+        entry, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode()
+    value["registry_entry_sha256"] = (
+        "sha256:"
+        + hashlib.sha256(
+            b"OpenAdapt production evidence registry entry v1\0" + canonical
+        ).hexdigest()
+    )
+    return value
 
 
 def test_exact_production_asset_profile_has_fourteen_stable_names() -> None:
@@ -474,6 +528,87 @@ def test_platform_verification_asset_hashes_exact_bytes_before_parsing(
             tag_ref_state={"ref": f"refs/tags/v{VERSION}", "exists": False},
             observed_at="2026-08-27T12:00:00Z",
         )
+
+
+def test_bound_release_reuses_admitted_draft_id_and_exact_bytes(tmp_path: Path) -> None:
+    release = tmp_path / "release"
+    _materialize_release(release)
+    creation, immutability = _raw_rulesets()
+    draft = _draft_api(release)
+    staging = build_publication_staging(
+        draft,
+        directory=release,
+        version=VERSION,
+        source_commit=SOURCE_COMMIT,
+        immutable_releases={"enabled": True, "enforced_by_owner": False},
+        tag_rulesets=normalize_tag_rulesets(creation, immutability),
+        tag_ref_state={"ref": f"refs/tags/v{VERSION}", "exists": False},
+        observed_at="2026-08-27T12:00:00Z",
+    )
+
+    assert (
+        validate_bound_release(
+            draft,
+            directory=release,
+            version=VERSION,
+            publication_staging=staging,
+            phase="draft",
+        )
+        == draft
+    )
+
+    published = json.loads(json.dumps(draft))
+    published["draft"] = False
+    published["immutable"] = True
+    assert (
+        validate_bound_release(
+            published,
+            directory=release,
+            version=VERSION,
+            publication_staging=staging,
+            phase="published",
+        )
+        == published
+    )
+
+    replacement = json.loads(json.dumps(draft))
+    replacement["id"] = 201
+    with pytest.raises(ValueError, match="identity differs"):
+        validate_bound_release(
+            replacement,
+            directory=release,
+            version=VERSION,
+            publication_staging=staging,
+            phase="draft",
+        )
+
+
+def test_annotated_tag_binding_is_exact_canonical_json_plus_one_lf() -> None:
+    reference = _admission_reference()
+    inventory_digest = "sha256:" + "1" * 64
+
+    binding = build_tag_binding(reference, artifact_inventory_sha256=inventory_digest)
+    raw = tag_binding_bytes(binding)
+
+    assert binding["schema_version"] == "openadapt.production-release-tag-binding/v1"
+    assert binding["admission_reference"] == reference
+    assert binding["admission_reference_sha256"] == admission_reference_digest(reference)
+    assert (
+        raw
+        == (
+            json.dumps(binding, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode()
+    )
+    assert validate_tag_binding_bytes(raw) == binding
+
+    for changed in (
+        b"prefix" + raw,
+        raw + b"\n",
+        raw.rstrip(b"\n"),
+        json.dumps(binding, indent=2, sort_keys=True).encode() + b"\n",
+    ):
+        with pytest.raises(ValueError):
+            validate_tag_binding_bytes(changed)
 
 
 def test_platform_verification_json_schema_is_present_and_closed() -> None:

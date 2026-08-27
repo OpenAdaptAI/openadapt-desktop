@@ -23,6 +23,8 @@ IMMUTABLE_RELEASES_DOMAIN = b"OpenAdapt production immutable releases response v
 TAG_REF_STATE_DOMAIN = b"OpenAdapt production release tag ref state v1\0"
 TAG_RULESETS_DOMAIN = b"OpenAdapt production release tag rulesets v1\0"
 STAGING_DOMAIN = b"OpenAdapt production release staging evidence v1\0"
+TAG_ADMISSION_REFERENCE_DOMAIN = b"OpenAdapt production release tag admission reference v1\0"
+EVIDENCE_REGISTRY_ENTRY_DOMAIN = b"OpenAdapt production evidence registry entry v1\0"
 PLATFORM_VERIFICATION_MEDIA_TYPE = (
     "application/vnd.openadapt.desktop-platform-verification+json;version=1"
 )
@@ -502,6 +504,262 @@ def staging_digest(value: Mapping[str, Any]) -> str:
     return "sha256:" + hashlib.sha256(STAGING_DOMAIN + _canonical(value)).hexdigest()
 
 
+def validate_bound_release(
+    release_api: Any,
+    *,
+    directory: Path,
+    version: str,
+    publication_staging: Any,
+    phase: str,
+) -> dict[str, Any]:
+    """Verify that a live draft or immutable release is the admitted release ID."""
+
+    if phase not in {"draft", "published"}:
+        raise ValueError("bound release phase must be draft or published")
+    staging = _closed(
+        publication_staging,
+        {
+            "schema_version",
+            "repository",
+            "repository_id",
+            "draft_release_id",
+            "tag",
+            "target_commitish",
+            "draft",
+            "prerelease",
+            "release_app_id",
+            "release_app_installation_id",
+            "release_app_bot_user_id",
+            "release_author_login",
+            "assets",
+            "immutable_releases",
+            "immutable_releases_sha256",
+            "tag_rulesets",
+            "tag_rulesets_sha256",
+            "tag_ref_state",
+            "tag_ref_state_sha256",
+            "observed_at",
+        },
+        "publication staging",
+    )
+    if (
+        staging["schema_version"] != "openadapt.production-release-staging-evidence/v1"
+        or staging["repository"] != REPOSITORY
+        or staging["repository_id"] != REPOSITORY_ID
+        or staging["tag"] != f"v{version}"
+        or staging["draft"] is not True
+        or staging["prerelease"] is not False
+        or staging["release_app_id"] != "4730708"
+        or staging["release_app_installation_id"] != "156835568"
+        or staging["release_app_bot_user_id"] != "321543906"
+        or staging["release_author_login"] != "openadapt-release[bot]"
+    ):
+        raise ValueError("publication staging identity differs")
+    validate_immutable_releases_response(staging["immutable_releases"])
+    if staging["immutable_releases_sha256"] != immutable_releases_digest(
+        staging["immutable_releases"]
+    ):
+        raise ValueError("publication staging immutable-releases digest differs")
+    validate_tag_rulesets(staging["tag_rulesets"])
+    if staging["tag_rulesets_sha256"] != tag_rulesets_digest(staging["tag_rulesets"]):
+        raise ValueError("publication staging tag-rulesets digest differs")
+    validate_tag_ref_state(staging["tag_ref_state"], tag=staging["tag"])
+    if staging["tag_ref_state_sha256"] != tag_ref_state_digest(
+        staging["tag_ref_state"], tag=staging["tag"]
+    ):
+        raise ValueError("publication staging tag-ref digest differs")
+    _timestamp(staging["observed_at"])
+
+    if not isinstance(release_api, dict):
+        raise ValueError("live release API response must be an object")
+    try:
+        author = release_api["author"]
+        release_id = str(release_api["id"])
+    except (KeyError, TypeError) as exc:
+        raise ValueError("live release API response is incomplete") from exc
+    if (
+        release_id != staging["draft_release_id"]
+        or release_api.get("tag_name") != staging["tag"]
+        or release_api.get("target_commitish") != staging["target_commitish"]
+        or release_api.get("prerelease") is not False
+        or not isinstance(author, dict)
+        or str(author.get("id")) != "321543906"
+        or author.get("login") != "openadapt-release[bot]"
+    ):
+        raise ValueError("live release identity differs from admitted staging")
+    if phase == "draft":
+        if release_api.get("draft") is not True or release_api.get("immutable") is not False:
+            raise ValueError("admitted release is not the same mutable draft")
+    elif release_api.get("draft") is not False or release_api.get("immutable") is not True:
+        raise ValueError("published release is not immutable")
+
+    inventory = build_artifact_inventory(directory, version=version)
+    inventory_by_name = {item["name"]: item for item in inventory["artifacts"]}
+    staged_assets = staging["assets"]
+    if not isinstance(staged_assets, list):
+        raise ValueError("publication staging assets must be a list")
+    staged_by_name = {item.get("name"): item for item in staged_assets if isinstance(item, dict)}
+    if len(staged_by_name) != len(staged_assets) or set(staged_by_name) != set(inventory_by_name):
+        raise ValueError("publication staging asset inventory differs")
+    remote_by_name = _release_api_asset_map(release_api.get("assets"))
+    if set(remote_by_name) != set(inventory_by_name):
+        raise ValueError("live release asset inventory differs")
+    for name, artifact in inventory_by_name.items():
+        staged_asset = staged_by_name[name]
+        remote_asset = remote_by_name[name]
+        expected_staged = {
+            "asset_id": str(remote_asset["id"]),
+            **artifact,
+            "uploader_id": "321543906",
+            "uploader_login": "openadapt-release[bot]",
+        }
+        if staged_asset != expected_staged:
+            raise ValueError("live release asset differs from admitted staging")
+        if (
+            remote_asset.get("digest") != artifact["sha256"]
+            or remote_asset.get("size") != artifact["size_bytes"]
+        ):
+            raise ValueError("live release bytes differ from admitted staging")
+    return release_api
+
+
+ADMISSION_REFERENCE_FIELDS = {
+    "schema_version",
+    "repository",
+    "repository_id",
+    "repository_owner_id",
+    "registry_source_commit",
+    "registry_revision",
+    "registry_head_sha256",
+    "registry_entry_sha256",
+    "kind",
+    "object_media_type",
+    "object_path",
+    "object_schema_version",
+    "object_sha256",
+    "semantic_identity_sha256",
+    "size_bytes",
+    "subject_sha256",
+}
+
+
+def validate_admission_reference(value: Any) -> dict[str, Any]:
+    """Validate the closed lexical identity used by the annotated tag binding."""
+
+    reference = _closed(value, ADMISSION_REFERENCE_FIELDS, "qualification-release reference")
+    if (
+        reference["schema_version"] != "openadapt.production-evidence-object-reference/v2"
+        or reference["repository"] != "OpenAdaptAI/.github"
+        or reference["repository_id"] != "858454062"
+        or reference["repository_owner_id"] != "132681217"
+        or reference["kind"] != "qualification-release"
+        or reference["object_schema_version"] != "openadapt.qualification-release/v1"
+        or reference["object_media_type"]
+        != "application/vnd.openadapt.qualification-release+json;version=1"
+        or reference["subject_sha256"] is not None
+    ):
+        raise ValueError("qualification-release reference identity differs")
+    if COMMIT.fullmatch(str(reference["registry_source_commit"])) is None:
+        raise ValueError("qualification-release registry commit is invalid")
+    for field in (
+        "registry_head_sha256",
+        "registry_entry_sha256",
+        "object_sha256",
+        "semantic_identity_sha256",
+    ):
+        _valid_digest(reference[field], f"qualification-release {field}")
+    if (
+        not isinstance(reference["registry_revision"], int)
+        or reference["registry_revision"] <= 0
+        or not isinstance(reference["size_bytes"], int)
+        or reference["size_bytes"] <= 0
+    ):
+        raise ValueError("qualification-release reference size or revision is invalid")
+    digest_hex = reference["object_sha256"].removeprefix("sha256:")
+    expected_path = (
+        f"production-evidence/objects/sha256/{digest_hex[:2]}/"
+        f"{digest_hex}.qualification-release.json"
+    )
+    if reference["object_path"] != expected_path:
+        raise ValueError("qualification-release object path is not content addressed")
+    entry_fields = {
+        "kind",
+        "object_media_type",
+        "object_path",
+        "object_schema_version",
+        "object_sha256",
+        "semantic_identity_sha256",
+        "size_bytes",
+        "subject_sha256",
+    }
+    entry = {field: reference[field] for field in entry_fields}
+    expected_entry_digest = (
+        "sha256:" + hashlib.sha256(EVIDENCE_REGISTRY_ENTRY_DOMAIN + _canonical(entry)).hexdigest()
+    )
+    if reference["registry_entry_sha256"] != expected_entry_digest:
+        raise ValueError("qualification-release registry entry digest differs")
+    return reference
+
+
+def admission_reference_digest(value: Any) -> str:
+    reference = validate_admission_reference(value)
+    return (
+        "sha256:"
+        + hashlib.sha256(TAG_ADMISSION_REFERENCE_DOMAIN + _canonical(reference)).hexdigest()
+    )
+
+
+def build_tag_binding(
+    admission_reference: Any, *, artifact_inventory_sha256: str
+) -> dict[str, Any]:
+    reference = validate_admission_reference(admission_reference)
+    _valid_digest(artifact_inventory_sha256, "tag binding artifact inventory")
+    return {
+        "schema_version": "openadapt.production-release-tag-binding/v1",
+        "admission_reference": reference,
+        "admission_reference_sha256": admission_reference_digest(reference),
+        "artifact_inventory_sha256": artifact_inventory_sha256,
+    }
+
+
+def tag_binding_bytes(value: Any) -> bytes:
+    binding = _closed(
+        value,
+        {
+            "schema_version",
+            "admission_reference",
+            "admission_reference_sha256",
+            "artifact_inventory_sha256",
+        },
+        "production release tag binding",
+    )
+    if binding["schema_version"] != "openadapt.production-release-tag-binding/v1":
+        raise ValueError("production release tag binding schema differs")
+    reference = validate_admission_reference(binding["admission_reference"])
+    if binding["admission_reference_sha256"] != admission_reference_digest(reference):
+        raise ValueError("production release tag admission-reference digest differs")
+    _valid_digest(
+        binding["artifact_inventory_sha256"],
+        "production release tag artifact inventory",
+    )
+    return _canonical(binding) + b"\n"
+
+
+def validate_tag_binding_bytes(raw: bytes) -> dict[str, Any]:
+    """Reject any annotated-tag message outside exact canonical JSON plus LF."""
+
+    if not raw or not raw.endswith(b"\n") or raw.endswith(b"\n\n"):
+        raise ValueError("production release tag binding must end with one LF")
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("production release tag binding is not UTF-8 JSON") from exc
+    expected = tag_binding_bytes(value)
+    if raw != expected:
+        raise ValueError("production release tag binding is not exact canonical JSON plus LF")
+    return value
+
+
 def _validate_release(value: Any, *, version: str) -> dict[str, Any]:
     release = _closed(
         value,
@@ -874,6 +1132,12 @@ def _parser() -> argparse.ArgumentParser:
     staging.add_argument("--observed-at", required=True)
     staging.add_argument("--output", type=Path, required=True)
     staging.add_argument("--github-output", type=Path)
+    tag_binding = commands.add_parser("tag-binding")
+    tag_binding.add_argument("--admission-reference", type=Path, required=True)
+    tag_binding.add_argument("--artifact-inventory-sha256", required=True)
+    tag_binding.add_argument("--output", type=Path, required=True)
+    validate_binding = commands.add_parser("validate-tag-binding")
+    validate_binding.add_argument("--file", type=Path, required=True)
     verification = commands.add_parser("validate-platform-verification")
     verification.add_argument("--file", type=Path, required=True)
     verification.add_argument("--version", required=True)
@@ -942,6 +1206,20 @@ def main() -> int:
                     output.write(f"publication_staging_sha256={digest}\n")
                     output.write(f"draft_release_id={value['draft_release_id']}\n")
             print(digest)
+        elif args.command == "tag-binding":
+            value = build_tag_binding(
+                _load(args.admission_reference),
+                artifact_inventory_sha256=args.artifact_inventory_sha256,
+            )
+            if args.output.exists():
+                raise ValueError("tag binding output already exists")
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_bytes(tag_binding_bytes(value))
+            print(args.output)
+        elif args.command == "validate-tag-binding":
+            _regular_file(args.file, "tag binding")
+            validate_tag_binding_bytes(args.file.read_bytes())
+            print(f"Validated {args.file}.")
         elif args.command == "validate-platform-verification":
             validate_platform_verification(_load(args.file), version=args.version)
             print(f"Validated {args.file}.")
