@@ -304,6 +304,8 @@ def test_support_release_binds_exact_archives_source_authority_and_draft(
     )
     assert staging_digest(staging, inventory=inventory).startswith("sha256:")
     binding = build_tag_binding(inventory, staging)
+    assert binding["artifact_inventory"] == inventory
+    assert binding["release_staging"] == staging
     raw = tag_binding_bytes(binding)
     assert raw.endswith(b"\n") and not raw.endswith(b"\n\n")
     assert (

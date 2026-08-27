@@ -737,7 +737,9 @@ def build_tag_binding(inventory: Any, staging: Any) -> dict[str, Any]:
         "support_artifact": SUPPORT_ARTIFACT,
         "source_commit": inventory["source_commit"],
         "tag": TAG,
+        "artifact_inventory": inventory,
         "artifact_inventory_sha256": inventory_sha256,
+        "release_staging": staging,
         "release_staging_sha256": staging_sha256,
         "source": {
             "url": SOURCE_URL,
@@ -761,12 +763,16 @@ def tag_binding_bytes(value: Any) -> bytes:
             "support_artifact",
             "source_commit",
             "tag",
+            "artifact_inventory",
             "artifact_inventory_sha256",
+            "release_staging",
             "release_staging_sha256",
             "source",
         },
         "managed FFmpeg Support tag binding",
     )
+    inventory = binding["artifact_inventory"]
+    staging = binding["release_staging"]
     if (
         binding["schema_version"] != TAG_BINDING_SCHEMA
         or binding["repository"] != REPOSITORY
@@ -775,8 +781,10 @@ def tag_binding_bytes(value: Any) -> bytes:
         or binding["support_artifact"] != SUPPORT_ARTIFACT
         or COMMIT.fullmatch(str(binding["source_commit"])) is None
         or binding["tag"] != TAG
-        or DIGEST.fullmatch(str(binding["artifact_inventory_sha256"])) is None
-        or DIGEST.fullmatch(str(binding["release_staging_sha256"])) is None
+        or binding["artifact_inventory_sha256"] != inventory_digest(inventory)
+        or binding["release_staging_sha256"] != staging_digest(staging, inventory=inventory)
+        or binding["source_commit"] != inventory["source_commit"]
+        or binding["source_commit"] != staging["source_commit"]
         or binding["source"]
         != {
             "url": SOURCE_URL,
