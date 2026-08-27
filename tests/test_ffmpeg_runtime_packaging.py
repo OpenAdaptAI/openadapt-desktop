@@ -446,6 +446,7 @@ def test_embedded_runtime_manifest_pins_complete_reviewed_release() -> None:
 def test_runtime_workflow_is_pinned_attested_and_separate_from_installers() -> None:
     root = Path(__file__).resolve().parents[1]
     workflow = (root / ".github" / "workflows" / "ffmpeg-runtime.yml").read_text()
+    workflow_data = yaml.safe_load(workflow)
     script = (root / "scripts" / "build_managed_ffmpeg_runtime.sh").read_text()
 
     revisions = re.findall(
@@ -467,34 +468,67 @@ def test_runtime_workflow_is_pinned_attested_and_separate_from_installers() -> N
     )
     assert "actions/attest-build-provenance@" in workflow
     assert "actions/create-github-app-token@" in workflow
+    assert "permission-administration: read" in workflow
+    assert "permission-contents: write" in workflow
     assert "permission-metadata: read" in workflow
     assert "persist-credentials: false" in workflow
-    assert "token: ${{ steps.release_app.outputs.token }}" in workflow
     assert "GH_TOKEN: ${{ steps.release_app.outputs.token }}" in workflow
     assert "environment: release-identity" in workflow
     assert "environment: native-release" in workflow
-    assert "group: ffmpeg-runtime-${{ github.ref }}" in workflow
+    assert "group: ffmpeg-support-release" in workflow
     assert "cancel-in-progress: false" in workflow
-    assert "authorize-runtime-dispatch" in workflow
-    assert "needs.authorize-runtime-dispatch.result == 'success'" in workflow
+    assert list(workflow_data["jobs"]) == [
+        "authorize-runtime-dispatch",
+        "source",
+        "build",
+        "assemble",
+        "publish",
+    ]
     assert '"${GITHUB_REF_TYPE}" != "branch"' in workflow
-    assert 'tags:\n      - "ffmpeg-runtime-v*"' in workflow
-    assert 'git tag --annotate "${RUNTIME_TAG}" "${GITHUB_SHA}"' in workflow
-    assert 'push origin "refs/tags/${RUNTIME_TAG}:refs/tags/${RUNTIME_TAG}"' in workflow
-    assert "GIT_CONFIG_KEY_0=http.https://github.com/.extraheader" in workflow
-    assert 'GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${app_basic}"' in workflow
-    assert "APP_TOKEN: ${{ steps.release_app.outputs.token }}" in workflow
+    assert re.search(r"^on:\n  workflow_dispatch:\n", workflow, flags=re.MULTILINE)
+    assert "push:" not in workflow
+    assert 'tags:\n      - "ffmpeg-runtime-v*"' not in workflow
+    assert "git tag" not in workflow
+    assert "git push" not in workflow
     assert "refs/heads/main:refs/heads/main" not in workflow
-    assert "--verify-tag" in workflow
-    assert "--target" not in workflow
-    assert 'cmp "release-assets/${name}" "existing-assets/${name}"' in workflow
+    assert "--verify-tag" not in workflow
+    assert "existing-release" not in workflow
+    assert "recovery" not in workflow.lower()
     assert '.author.login == "openadapt-release[bot]"' in workflow
-    assert '.author.id == "BOT_kgDOEype4g"' in workflow
-    assert "--json assets,author,isDraft,isPrerelease,tagName" in workflow
+    assert ".author.id == 321543906" in workflow
     assert "--clobber" not in workflow
     assert "ADMIN_TOKEN" not in workflow
-    assert "--prerelease" in workflow
+    assert "-F prerelease=false" in workflow
+    assert "-f make_latest=false" in workflow
     assert "src-tauri/binaries" not in workflow
+    assert 'RELEASE_APP_ID: "4730708"' in workflow
+    assert 'RELEASE_APP_ACTOR_ID: "321543906"' in workflow
+    assert 'RELEASE_APP_INSTALLATION_ID: "156835568"' in workflow
+    assert 'RELEASE_DISPATCH_ACTOR_ID: "774615"' in workflow
+    assert "repos/${GITHUB_REPOSITORY}/immutable-releases" in workflow
+    assert "OpenAdapt policy: FFmpeg runtime tag creation" in workflow
+    assert "OpenAdapt policy: immutable FFmpeg runtime tags" in workflow
+    assert "ffmpeg_support_release_contract.py inventory" in workflow
+    assert "ffmpeg_support_release_contract.py staging" in workflow
+    assert "ffmpeg_support_release_contract.py tag-binding" in workflow
+    assert "ffmpeg_support_release_contract.py validate-tag-object" in workflow
+    assert "ffmpeg_support_release_contract.py validate-tag-ref" in workflow
+    assert "ffmpeg_support_release_contract.py validate-bound-release" in workflow
+    assert "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/" in workflow
+    assert "remote-draft-assets" in workflow
+    assert "remote-published-assets" in workflow
+    assert (
+        "test \"$(find release-assets -maxdepth 1 -type f | wc -l | tr -d ' ')\" = 12" in workflow
+    )
+    draft = workflow.index("Create one App-authored draft before the tag exists")
+    upload = workflow.index("Upload each of the exact 12 assets once")
+    second_absence = workflow.index("Prove the second tag absence")
+    tag = workflow.index("Create and verify the canonical annotated Support tag")
+    publish = workflow.index("Publish the same draft and verify its immutable remote bytes")
+    assert draft < upload < second_absence < tag < publish
+    assert '"repos/${GITHUB_REPOSITORY}/git/tags"' in workflow
+    assert '"repos/${GITHUB_REPOSITORY}/git/refs"' in workflow
+    assert workflow.count("bash scripts/build_managed_ffmpeg_runtime.sh") == 2
     for target in (
         "aarch64-apple-darwin",
         "x86_64-apple-darwin",
@@ -529,19 +563,25 @@ def test_runtime_workflow_is_pinned_attested_and_separate_from_installers() -> N
         ("GITHUB_REPOSITORY", "OpenAdaptAI/fork"),
         ("GITHUB_REF", "refs/heads/release"),
         ("GITHUB_REF_TYPE", "tag"),
-        ("PUBLISH", "yes"),
+        ("EVENT_ACTOR_ID", "1"),
     ],
 )
 def test_ffmpeg_dispatch_guard_refuses_every_invalid_identity(field: str, value: str) -> None:
     root = Path(__file__).resolve().parents[1]
-    workflow = yaml.safe_load((root / ".github/workflows/ffmpeg-runtime.yml").read_text())
-    script = workflow["jobs"]["authorize-runtime-dispatch"]["steps"][0]["run"]
+    workflow = yaml.safe_load((root / ".github" / "workflows" / "ffmpeg-runtime.yml").read_text())
+    script = next(
+        step["run"]
+        for step in workflow["jobs"]["authorize-runtime-dispatch"]["steps"]
+        if step.get("name")
+        == "Require the exact repository, human actor, main ref, and source commit"
+    )
     env = os.environ | {
         "GITHUB_EVENT_NAME": "workflow_dispatch",
         "GITHUB_REPOSITORY": "OpenAdaptAI/openadapt-desktop",
         "GITHUB_REF": "refs/heads/main",
         "GITHUB_REF_TYPE": "branch",
-        "PUBLISH": "false",
+        "EVENT_ACTOR_ID": "774615",
+        "RELEASE_DISPATCH_ACTOR_ID": "774615",
         field: value,
     }
 
