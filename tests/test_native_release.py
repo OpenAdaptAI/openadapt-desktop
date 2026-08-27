@@ -585,13 +585,13 @@ def test_native_version_pr_guard_never_skips_and_judges_content() -> None:
     assert step["env"]["HEAD_REF"] == "${{ github.event.pull_request.head.ref }}"
     assert step["env"]["HEAD_REPOSITORY"] == "${{ github.event.pull_request.head.repo.full_name }}"
 
-    # An ordinary dependency or feature change to the same five files keeps the
+    # An ordinary dependency or feature change to these files keeps the
     # version, and must pass.
     assert 'if [ "${base_version}" = "${head_version}" ]' in script
     assert "version --ref" in script
     # A version change is reserved to this repository's automation branch.
     assert 'if [ "${HEAD_REPOSITORY}" != "${GITHUB_REPOSITORY}" ]' in script
-    assert "native-version/v*) ;;" in script
+    assert "release-version/v*) ;;" in script
     # One refusal for a fork head, one for an unreserved branch, one for a
     # stale base. No path through the step falls through to success.
     assert script.count("exit 1") == 3
@@ -637,7 +637,10 @@ def test_every_github_release_mutation_uses_only_the_scoped_release_app(
     """The workflow token stays read-only when a job mutates a GitHub Release."""
 
     workflow = _workflow(workflow_name)
-    mutation = re.compile(r"\bgh release (?:create|edit|upload|delete)\b")
+    mutation = re.compile(
+        r"\bgh release (?:create|edit|upload|delete)\b"
+        r"|\bgh api --method (?:POST|PATCH|DELETE)\b"
+    )
     found = 0
     for job in workflow["jobs"].values():
         mutating_steps = [
@@ -653,7 +656,7 @@ def test_every_github_release_mutation_uses_only_the_scoped_release_app(
         assert app["uses"] == (
             "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1"
         )
-        assert app["with"] == {
+        expected_app = {
             "app-id": "${{ vars.OPENADAPT_RELEASE_APP_ID }}",
             "private-key": "${{ secrets.OPENADAPT_RELEASE_APP_PRIVATE_KEY }}",
             "owner": "${{ github.repository_owner }}",
@@ -661,6 +664,9 @@ def test_every_github_release_mutation_uses_only_the_scoped_release_app(
             "permission-contents": "write",
             "permission-metadata": "read",
         }
+        if workflow_name == "ffmpeg-runtime.yml":
+            expected_app["permission-administration"] = "read"
+        assert app["with"] == expected_app
         app_index = job["steps"].index(app)
         identity_steps = [
             step
@@ -688,11 +694,15 @@ def test_every_release_app_token_binds_exact_app_actor_and_installation(
     workflow_name: str,
 ) -> None:
     workflow = _workflow(workflow_name)
-    assert workflow["env"] | {
-        "RELEASE_APP_ID": "4730708",
-        "RELEASE_APP_ACTOR_ID": "321543906",
-        "RELEASE_APP_INSTALLATION_ID": "156835568",
-    } == workflow["env"]
+    assert (
+        workflow["env"]
+        | {
+            "RELEASE_APP_ID": "4730708",
+            "RELEASE_APP_ACTOR_ID": "321543906",
+            "RELEASE_APP_INSTALLATION_ID": "156835568",
+        }
+        == workflow["env"]
+    )
 
     found = 0
     for job in workflow["jobs"].values():
@@ -708,30 +718,33 @@ def test_every_release_app_token_binds_exact_app_actor_and_installation(
                 for step in steps[app_index + 1 :]
                 if str(step.get("name", "")).startswith("Require the exact")
             )
-            assert identity["env"] == {
+            expected_identity = {
                 "CONFIGURED_RELEASE_APP_ID": "${{ vars.OPENADAPT_RELEASE_APP_ID }}",
                 "CONFIGURED_RELEASE_ACTOR_ID": "${{ vars.OPENADAPT_RELEASE_ACTOR_ID }}",
                 "CONFIGURED_RELEASE_APP_INSTALLATION_ID": (
                     "${{ vars.OPENADAPT_RELEASE_APP_INSTALLATION_ID }}"
                 ),
                 "RELEASE_APP_SLUG": f"${{{{ steps.{app_id}.outputs.app-slug }}}}",
-                "TOKEN_INSTALLATION_ID": (
-                    f"${{{{ steps.{app_id}.outputs['installation-id'] }}}}"
-                ),
+                "TOKEN_INSTALLATION_ID": (f"${{{{ steps.{app_id}.outputs['installation-id'] }}}}"),
             }
+            if workflow_name == "ffmpeg-runtime.yml":
+                expected_identity["GH_TOKEN"] = f"${{{{ steps.{app_id}.outputs.token }}}}"
+            assert identity["env"] == expected_identity
             script = identity["run"]
             assert '"${CONFIGURED_RELEASE_APP_ID}" != "${RELEASE_APP_ID}"' in script
             assert '"${CONFIGURED_RELEASE_ACTOR_ID}" != "${RELEASE_APP_ACTOR_ID}"' in script
             assert (
-                '"${CONFIGURED_RELEASE_APP_INSTALLATION_ID}" '
-                '!= "${RELEASE_APP_INSTALLATION_ID}"'
+                '"${CONFIGURED_RELEASE_APP_INSTALLATION_ID}" != "${RELEASE_APP_INSTALLATION_ID}"'
             ) in script
             assert '"${TOKEN_INSTALLATION_ID}" != "${RELEASE_APP_INSTALLATION_ID}"' in script
     assert found > 0
 
 
 def test_every_release_app_token_checks_its_slug_before_any_write() -> None:
-    mutation = re.compile(r"\b(?:gh release (?:create|edit|upload|delete)|git push)\b")
+    mutation = re.compile(
+        r"\b(?:gh release (?:create|edit|upload|delete)|git push)\b"
+        r"|\bgh api --method (?:POST|PATCH|DELETE)\b"
+    )
     for workflow_name in (
         "release.yml",
         "native-release.yml",
@@ -874,6 +887,17 @@ def _write_source(path: Path, text: str) -> None:
 
 def _write_native_version_fixture(root: Path, version: str) -> None:
     (root / "src-tauri").mkdir()
+    (root / "engine").mkdir()
+    _write_source(
+        root / "pyproject.toml",
+        f'[project]\nname = "openadapt-desktop"\nversion = "{version}"\n',
+    )
+    _write_source(root / "engine/__init__.py", f'__version__ = "{version}"\n')
+    _write_source(
+        root / "uv.lock",
+        'version = 1\n\n[[package]]\nname = "openadapt-desktop"\n'
+        f'version = "{version}"\nsource = {{ editable = "." }}\n',
+    )
     _write_source(
         root / "package.json",
         json.dumps({"name": "openadapt-desktop", "version": version}, indent=2) + "\n",
@@ -916,6 +940,7 @@ def test_set_native_version_synchronizes_every_source_and_lockfile(tmp_path: Pat
 
     versions = set_native_version("0.5.0", tmp_path)
 
+    assert set(versions) == set(VERSION_TRANSFORM_PATHS)
     assert set(versions.values()) == {"0.5.0"}
     assert native_version(tmp_path) == "0.5.0"
     lock = json.loads((tmp_path / "package-lock.json").read_text())
@@ -945,6 +970,9 @@ def test_set_native_version_writes_utf8_lf_bytes_on_every_platform(tmp_path: Pat
     set_native_version("0.5.0", tmp_path)
 
     for relative in (
+        "pyproject.toml",
+        "engine/__init__.py",
+        "uv.lock",
         "package.json",
         "package-lock.json",
         "src-tauri/Cargo.toml",
@@ -958,8 +986,9 @@ def test_set_native_version_writes_utf8_lf_bytes_on_every_platform(tmp_path: Pat
 
 def test_sync_native_version_from_engine_uses_python_release_version(tmp_path: Path) -> None:
     _write_native_version_fixture(tmp_path, "0.1.1")
+    project = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
     (tmp_path / "pyproject.toml").write_text(
-        '[project]\nname = "openadapt-desktop"\nversion = "0.5.0"\n',
+        project.replace('version = "0.1.1"', 'version = "0.5.0"'),
         encoding="utf-8",
     )
 
@@ -1005,7 +1034,7 @@ def test_git_version_transform_requires_the_exact_reconstructed_tree(tmp_path: P
     _git(tmp_path, "add", ".")
     _git(tmp_path, "commit", "-qm", "exact version transform")
     exact = _git(tmp_path, "rev-parse", "HEAD")
-    assert validate_git_version_transform(base, exact, "0.5.0", root=tmp_path) == 5
+    assert validate_git_version_transform(base, exact, "0.5.0", root=tmp_path) == 8
 
     package = json.loads((tmp_path / "package.json").read_text())
     package["scripts"] = {"postinstall": "run-unreviewed-code"}
@@ -1020,7 +1049,7 @@ def test_git_version_transform_requires_the_exact_reconstructed_tree(tmp_path: P
     _git(tmp_path, "add", "unexpected.py")
     _git(tmp_path, "commit", "-qm", "tamper outside allowed files")
     unexpected = _git(tmp_path, "rev-parse", "HEAD")
-    with pytest.raises(ValueError, match="outside the version transformation"):
+    with pytest.raises(ValueError, match="outside the exact transformation"):
         validate_git_version_transform(base, unexpected, "0.5.0", root=tmp_path)
 
 
@@ -1041,7 +1070,7 @@ def test_git_version_advance_refuses_a_stale_or_equal_target(tmp_path: Path) -> 
     _git(tmp_path, "add", ".")
     _git(tmp_path, "commit", "-qm", "advance")
     candidate = _git(tmp_path, "rev-parse", "HEAD")
-    assert validate_git_version_advance(base, candidate, "1.5.0", root=tmp_path) == 5
+    assert validate_git_version_advance(base, candidate, "1.5.0", root=tmp_path) == 8
 
     for stale in ("1.4.0", "1.3.9"):
         with pytest.raises(ValueError, match="does not advance protected base"):

@@ -133,13 +133,38 @@ def expected_engine_release_asset_names(version: str) -> set[str]:
 
 
 def native_versions(root: Path = ROOT) -> dict[str, str]:
+    pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    engine_init = (root / "engine" / "__init__.py").read_text(encoding="utf-8")
+    uv_lock = (root / "uv.lock").read_text(encoding="utf-8")
     package = json.loads((root / "package.json").read_text(encoding="utf-8"))
+    package_lock = json.loads((root / "package-lock.json").read_text(encoding="utf-8"))
     tauri = json.loads((root / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8"))
     cargo = tomllib.loads((root / "src-tauri" / "Cargo.toml").read_text(encoding="utf-8"))
+    cargo_lock = (root / "src-tauri" / "Cargo.lock").read_text(encoding="utf-8")
+    engine_match = re.search(r'^__version__ = "([^"]+)"$', engine_init, flags=re.MULTILINE)
+    lock_match = re.search(
+        r'\[\[package\]\]\s+name = "openadapt-desktop"\s+version = "([^"]+)"'
+        r'\s+source = \{ editable = "\." \}',
+        uv_lock,
+    )
+    cargo_lock_match = re.search(
+        r'\[\[package\]\]\s+name = "openadapt-desktop"\s+version = "([^"]+)"',
+        cargo_lock,
+    )
+    if engine_match is None or lock_match is None or cargo_lock_match is None:
+        raise ValueError("could not read the package version sources")
+    package_lock_version = str(package_lock["version"])
+    if str(package_lock.get("packages", {}).get("", {}).get("version")) != package_lock_version:
+        raise ValueError("package-lock.json root versions differ")
     return {
+        "pyproject.toml": str(pyproject["project"]["version"]),
+        "engine/__init__.py": engine_match.group(1),
+        "uv.lock": lock_match.group(1),
         "package.json": package["version"],
+        "package-lock.json": package_lock_version,
         "src-tauri/tauri.conf.json": tauri["version"],
         "src-tauri/Cargo.toml": cargo["package"]["version"],
+        "src-tauri/Cargo.lock": cargo_lock_match.group(1),
     }
 
 
@@ -266,7 +291,7 @@ def validate_native_tag_order(candidate_tag: str, tags: object) -> str:
 
 
 def set_native_version(version: str, root: Path = ROOT) -> dict[str, str]:
-    """Synchronize every native version source (and lockfiles) to ``version``.
+    """Synchronize every package version source and lockfile to ``version``.
 
     This transformation must be byte-deterministic on every platform, because
     :func:`validate_git_version_transform` reconstructs it and compares the
@@ -277,7 +302,7 @@ def set_native_version(version: str, root: Path = ROOT) -> dict[str, str]:
     """
 
     if not VERSION_PATTERN.fullmatch(version):
-        raise ValueError(f"native version must be X.Y.Z, got {version!r}")
+        raise ValueError(f"package version must be X.Y.Z, got {version!r}")
 
     def read_source(path: Path) -> str:
         return path.read_bytes().decode("utf-8")
@@ -293,6 +318,39 @@ def set_native_version(version: str, root: Path = ROOT) -> dict[str, str]:
     def set_lock_versions(lock: dict) -> None:
         lock["version"] = version
         lock["packages"][""]["version"] = version
+
+    pyproject_path = root / "pyproject.toml"
+    text, replaced = re.subn(
+        r'(\[project\]\s+name = "openadapt-desktop"\s+version = ")[^"]+(")',
+        rf"\g<1>{version}\g<2>",
+        read_source(pyproject_path),
+        count=1,
+    )
+    if replaced != 1:
+        raise ValueError(f"could not rewrite package version in {pyproject_path}")
+    write_source(pyproject_path, text)
+
+    engine_init = root / "engine" / "__init__.py"
+    text, replaced = re.subn(
+        r'(?m)^__version__ = "[^"]+"$',
+        f'__version__ = "{version}"',
+        read_source(engine_init),
+        count=1,
+    )
+    if replaced != 1:
+        raise ValueError(f"could not rewrite package version in {engine_init}")
+    write_source(engine_init, text)
+
+    uv_lock = root / "uv.lock"
+    text, replaced = re.subn(
+        r'(\[\[package\]\]\nname = "openadapt-desktop"\nversion = ")[^"]+(")',
+        rf"\g<1>{version}\g<2>",
+        read_source(uv_lock),
+        count=1,
+    )
+    if replaced != 1:
+        raise ValueError(f"could not rewrite package version in {uv_lock}")
+    write_source(uv_lock, text)
 
     rewrite_json(root / "package.json", lambda data: data.__setitem__("version", version))
     rewrite_json(root / "package-lock.json", set_lock_versions)
@@ -322,11 +380,14 @@ def set_native_version(version: str, root: Path = ROOT) -> dict[str, str]:
 
     synchronized = native_version(root)
     if synchronized != version:
-        raise ValueError(f"native version sources disagree after sync: {native_versions(root)}")
+        raise ValueError(f"package version sources disagree after sync: {native_versions(root)}")
     return native_versions(root)
 
 
 VERSION_TRANSFORM_PATHS = (
+    "pyproject.toml",
+    "engine/__init__.py",
+    "uv.lock",
     "package.json",
     "package-lock.json",
     "src-tauri/Cargo.toml",
@@ -386,27 +447,54 @@ def _git_bytes(root: Path, commit: str, relative_path: str) -> bytes:
 
 
 def native_version_at_ref(ref: str, root: Path = ROOT) -> str:
-    """Return the one native version that ``ref`` records.
+    """Return the one package version that ``ref`` records.
 
     This reads Git objects, so a caller can ask about a commit that is not
-    checked out. The three sources must agree, exactly as they must in a
+    checked out. The eight sources must agree, exactly as they must in a
     working tree.
     """
 
     commit = _resolve_commit(root, ref)
+    pyproject = tomllib.loads(_git_bytes(root, commit, "pyproject.toml").decode("utf-8"))
+    engine_init = _git_bytes(root, commit, "engine/__init__.py").decode("utf-8")
+    uv_lock = _git_bytes(root, commit, "uv.lock").decode("utf-8")
     package = json.loads(_git_bytes(root, commit, "package.json"))
+    package_lock = json.loads(_git_bytes(root, commit, "package-lock.json"))
     tauri = json.loads(_git_bytes(root, commit, "src-tauri/tauri.conf.json"))
     cargo = tomllib.loads(_git_bytes(root, commit, "src-tauri/Cargo.toml").decode("utf-8"))
+    cargo_lock = _git_bytes(root, commit, "src-tauri/Cargo.lock").decode("utf-8")
+    engine_match = re.search(r'^__version__ = "([^"]+)"$', engine_init, flags=re.MULTILINE)
+    lock_match = re.search(
+        r'\[\[package\]\]\s+name = "openadapt-desktop"\s+version = "([^"]+)"'
+        r'\s+source = \{ editable = "\." \}',
+        uv_lock,
+    )
+    cargo_lock_match = re.search(
+        r'\[\[package\]\]\s+name = "openadapt-desktop"\s+version = "([^"]+)"',
+        cargo_lock,
+    )
+    if engine_match is None or lock_match is None or cargo_lock_match is None:
+        raise ValueError(f"could not read package versions at {ref}")
+    package_lock_version = str(package_lock.get("version") or "")
+    if str(package_lock.get("packages", {}).get("", {}).get("version") or "") != (
+        package_lock_version
+    ):
+        raise ValueError(f"package-lock.json root versions differ at {ref}")
     observed = {
+        str(pyproject.get("project", {}).get("version") or ""),
+        engine_match.group(1),
+        lock_match.group(1),
         str(package.get("version") or ""),
+        package_lock_version,
         str(tauri.get("version") or ""),
         str(cargo.get("package", {}).get("version") or ""),
+        cargo_lock_match.group(1),
     }
     if len(observed) != 1:
-        raise ValueError(f"native versions differ at {ref}: {sorted(observed)}")
+        raise ValueError(f"package versions differ at {ref}: {sorted(observed)}")
     version = observed.pop()
     if not VERSION_PATTERN.fullmatch(version):
-        raise ValueError(f"native version at {ref} is invalid: {version!r}")
+        raise ValueError(f"package version at {ref} is invalid: {version!r}")
     return version
 
 
@@ -419,14 +507,14 @@ def validate_git_version_transform(
 ) -> int:
     """Require ``candidate_ref`` to equal the exact set-version result.
 
-    A filename allowlist is not sufficient here. The five version files also
+    A filename allowlist is not sufficient here. The eight version files also
     contain executable package scripts, Rust dependencies, and Tauri build
     configuration. This function reconstructs the deterministic transformation
     from ``base_ref`` and compares every resulting byte with ``candidate_ref``.
     """
 
     if not VERSION_PATTERN.fullmatch(version):
-        raise ValueError(f"native version must be X.Y.Z, got {version!r}")
+        raise ValueError(f"package version must be X.Y.Z, got {version!r}")
     base_commit = _resolve_commit(root, base_ref)
     candidate_commit = _resolve_commit(root, candidate_ref)
     changed = subprocess.run(
@@ -437,12 +525,12 @@ def validate_git_version_transform(
         text=True,
     )
     if changed.returncode != 0:
-        raise ValueError("could not compare engine and native tag trees")
+        raise ValueError("could not compare package-version trees")
     changed_paths = {line for line in changed.stdout.splitlines() if line}
     unexpected = changed_paths.difference(VERSION_TRANSFORM_PATHS)
     if unexpected:
         raise ValueError(
-            "native tag contains changes outside the version transformation: "
+            "package-version change contains files outside the exact transformation: "
             + ", ".join(sorted(unexpected))
         )
 
@@ -461,7 +549,7 @@ def validate_git_version_transform(
         ]
     if mismatches:
         raise ValueError(
-            "native tag differs from the exact deterministic set-version output: "
+            "package version differs from the exact deterministic set-version output: "
             + ", ".join(mismatches)
         )
     return len(VERSION_TRANSFORM_PATHS)
@@ -482,10 +570,12 @@ def validate_git_version_advance(
     """
 
     base_version = native_version_at_ref(base_ref, root=root)
-    if native_tag_tuple(f"{NATIVE_TAG_PREFIX}{version}") <= native_tag_tuple(
-        f"{NATIVE_TAG_PREFIX}{base_version}"
-    ):
-        raise ValueError(f"native version {version} does not advance protected base {base_version}")
+    requested = tuple(int(part) for part in version.split("."))
+    base = tuple(int(part) for part in base_version.split("."))
+    if requested <= base:
+        raise ValueError(
+            f"package version {version} does not advance protected base {base_version}"
+        )
     return validate_git_version_transform(base_ref, candidate_ref, version, root=root)
 
 
