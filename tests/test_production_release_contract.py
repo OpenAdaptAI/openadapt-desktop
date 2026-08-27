@@ -25,12 +25,14 @@ from scripts.production_release_contract import (
     expected_asset_names,
     immutable_releases_digest,
     normalize_tag_rulesets,
+    stage_platform_artifacts,
     staging_digest,
     tag_binding_bytes,
     tag_ref_state_digest,
     tag_rulesets_digest,
     validate_bound_release,
     validate_immutable_releases_response,
+    validate_live_release_authority,
     validate_platform_verification,
     validate_publication_staging,
     validate_publication_staging_bytes,
@@ -271,6 +273,51 @@ def _draft_api(release: Path) -> dict:
     }
 
 
+def test_live_release_authority_must_equal_admitted_staging(tmp_path: Path) -> None:
+    release = tmp_path / "release"
+    _materialize_release(release)
+    creation, immutability = _raw_rulesets()
+    immutable_releases = {"enabled": True, "enforced_by_owner": False}
+    staging = build_publication_staging(
+        _draft_api(release),
+        directory=release,
+        version=VERSION,
+        source_commit=SOURCE_COMMIT,
+        embedded_flow_version="2.0.0",
+        immutable_releases=immutable_releases,
+        tag_rulesets=normalize_tag_rulesets(creation, immutability),
+        tag_ref_state={"ref": f"refs/tags/v{VERSION}", "exists": False},
+        observed_at="2026-08-27T12:00:00Z",
+    )
+
+    validate_live_release_authority(
+        staging,
+        version=VERSION,
+        immutable_releases=immutable_releases,
+        creation_ruleset=creation,
+        immutability_ruleset=immutability,
+    )
+
+    changed = {**creation, "enforcement": "evaluate"}
+    with pytest.raises(ValueError, match="tag ruleset"):
+        validate_live_release_authority(
+            staging,
+            version=VERSION,
+            immutable_releases=immutable_releases,
+            creation_ruleset=changed,
+            immutability_ruleset=immutability,
+        )
+
+    with pytest.raises(ValueError, match="immutable"):
+        validate_live_release_authority(
+            staging,
+            version=VERSION,
+            immutable_releases={"enabled": True, "enforced_by_owner": True},
+            creation_ruleset=creation,
+            immutability_ruleset=immutability,
+        )
+
+
 def _admission_reference() -> dict:
     object_digest = "sha256:" + "c" * 64
     value = {
@@ -335,6 +382,88 @@ def test_exact_production_asset_profile_has_fourteen_stable_names() -> None:
         "verification-metadata-macos-x86-64",
         "verification-metadata-windows-x86-64",
     }
+
+
+@pytest.mark.parametrize(
+    ("platform", "architecture", "source_names", "expected_names"),
+    [
+        (
+            "linux",
+            "x86_64",
+            ["bundle/app.AppImage", "bundle/app.deb"],
+            [
+                f"OpenAdapt-Desktop-v{VERSION}-linux-x86_64.AppImage",
+                f"OpenAdapt-Desktop-v{VERSION}-linux-x86_64.deb",
+            ],
+        ),
+        (
+            "macos",
+            "arm64",
+            ["bundle/app.dmg"],
+            [f"OpenAdapt-Desktop-v{VERSION}-macos-arm64.dmg"],
+        ),
+        (
+            "windows",
+            "x86_64",
+            ["bundle/app.msi", "bundle/app-setup.exe"],
+            [
+                f"OpenAdapt-Desktop-v{VERSION}-windows-x86_64.msi",
+                f"OpenAdapt-Desktop-v{VERSION}-windows-x86_64-setup.exe",
+            ],
+        ),
+    ],
+)
+def test_stage_platform_artifacts_uses_only_stable_production_names(
+    tmp_path: Path,
+    platform: str,
+    architecture: str,
+    source_names: list[str],
+    expected_names: list[str],
+) -> None:
+    bundle = tmp_path / "bundle-root"
+    for index, relative in enumerate(source_names, start=1):
+        path = bundle / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(f"artifact-{index}".encode())
+    output = tmp_path / "release"
+
+    staged = stage_platform_artifacts(
+        bundle,
+        output,
+        version=VERSION,
+        platform=platform,
+        architecture=architecture,
+    )
+
+    assert sorted(path.name for path in staged) == sorted(expected_names)
+    assert sorted(path.name for path in output.iterdir()) == sorted(expected_names)
+
+
+def test_stage_platform_artifacts_refuses_duplicates_and_nonempty_output(tmp_path: Path) -> None:
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "one.dmg").write_bytes(b"one")
+    (bundle / "two.dmg").write_bytes(b"two")
+    with pytest.raises(ValueError, match="exactly one"):
+        stage_platform_artifacts(
+            bundle,
+            tmp_path / "release",
+            version=VERSION,
+            platform="macos",
+            architecture="arm64",
+        )
+
+    output = tmp_path / "nonempty"
+    output.mkdir()
+    (output / "existing").write_bytes(b"existing")
+    with pytest.raises(ValueError, match="must be empty"):
+        stage_platform_artifacts(
+            bundle,
+            output,
+            version=VERSION,
+            platform="macos",
+            architecture="arm64",
+        )
 
 
 def test_artifact_inventory_binds_exact_bytes_and_destinations(tmp_path: Path) -> None:

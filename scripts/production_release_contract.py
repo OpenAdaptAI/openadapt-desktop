@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import re
+import shutil
 import sys
 from dataclasses import dataclass
 from datetime import datetime
@@ -154,6 +155,47 @@ def artifact_specs(version: str) -> tuple[ArtifactSpec, ...]:
 
 def expected_asset_names(version: str) -> set[str]:
     return {item.name for item in artifact_specs(version)}
+
+
+def stage_platform_artifacts(
+    bundle_root: Path,
+    output: Path,
+    *,
+    version: str,
+    platform: str,
+    architecture: str,
+) -> list[Path]:
+    """Copy one platform build into its stable Production asset names."""
+
+    if platform not in ARCHITECTURES or architecture not in ARCHITECTURES[platform]:
+        raise ValueError("Desktop platform or architecture is invalid")
+    if output.exists() and any(output.iterdir()):
+        raise ValueError("Desktop Production staging directory must be empty")
+    output.mkdir(parents=True, exist_ok=True)
+    profile = {
+        ("linux", "x86_64"): (
+            ("linux-appimage", "*.AppImage"),
+            ("linux-deb", "*.deb"),
+        ),
+        ("macos", "arm64"): (("macos-dmg-arm64", "*.dmg"),),
+        ("macos", "x86_64"): (("macos-dmg-x86-64", "*.dmg"),),
+        ("windows", "x86_64"): (
+            ("windows-msi", "*.msi"),
+            ("windows-nsis", "*-setup.exe"),
+        ),
+    }[(platform, architecture)]
+    specs = {item.kind: item for item in artifact_specs(version)}
+    staged: list[Path] = []
+    for kind, pattern in profile:
+        matches = sorted(path for path in bundle_root.rglob(pattern) if path.is_file())
+        if len(matches) != 1 or matches[0].is_symlink() or matches[0].stat().st_size <= 0:
+            raise ValueError(
+                f"expected exactly one non-empty regular {kind} artifact; got {matches}"
+            )
+        destination = output / specs[kind].name
+        shutil.copyfile(matches[0], destination)
+        staged.append(destination)
+    return staged
 
 
 def _canonical(value: object) -> bytes:
@@ -609,6 +651,7 @@ def build_publication_staging(
         or release_api.get("target_commitish") != source_commit
         or release_api.get("draft") is not True
         or release_api.get("prerelease") is not False
+        or release_api.get("immutable") is not False
         or not isinstance(author, dict)
         or str(author.get("id")) != "321543906"
         or author.get("login") != "openadapt-release[bot]"
@@ -669,6 +712,29 @@ def build_publication_staging(
         "observed_at": _timestamp(observed_at),
     }
     return validate_publication_staging(staging, version=version)
+
+
+def validate_live_release_authority(
+    publication_staging: Any,
+    *,
+    version: str,
+    immutable_releases: Any,
+    creation_ruleset: Any,
+    immutability_ruleset: Any,
+) -> None:
+    """Require live repository authority to equal the admitted staging state."""
+
+    staging = validate_publication_staging(publication_staging, version=version)
+    immutable = validate_immutable_releases_response(immutable_releases)
+    rulesets = normalize_tag_rulesets(creation_ruleset, immutability_ruleset)
+    if immutable != staging["immutable_releases"]:
+        raise ValueError("live immutable-releases state differs from admitted staging")
+    if immutable_releases_digest(immutable) != staging["immutable_releases_sha256"]:
+        raise ValueError("live immutable-releases digest differs from admitted staging")
+    if rulesets != staging["tag_rulesets"]:
+        raise ValueError("live tag rulesets differ from admitted staging")
+    if tag_rulesets_digest(rulesets) != staging["tag_rulesets_sha256"]:
+        raise ValueError("live tag-rulesets digest differs from admitted staging")
 
 
 def staging_digest(value: Mapping[str, Any]) -> str:
@@ -1477,6 +1543,12 @@ def _parser() -> argparse.ArgumentParser:
     inventory.add_argument("--directory", type=Path, required=True)
     inventory.add_argument("--version", required=True)
     inventory.add_argument("--output", type=Path, required=True)
+    stage_platform = commands.add_parser("stage-platform")
+    stage_platform.add_argument("--bundle-root", type=Path, required=True)
+    stage_platform.add_argument("--output", type=Path, required=True)
+    stage_platform.add_argument("--version", required=True)
+    stage_platform.add_argument("--platform", choices=tuple(ARCHITECTURES), required=True)
+    stage_platform.add_argument("--architecture", choices=("arm64", "x86_64"), required=True)
     immutable = commands.add_parser("validate-immutable-releases")
     immutable.add_argument("--file", type=Path, required=True)
     immutable.add_argument("--github-output", type=Path)
@@ -1506,6 +1578,15 @@ def _parser() -> argparse.ArgumentParser:
     validate_staging.add_argument("--source-commit", required=True)
     validate_staging.add_argument("--draft-release-id", required=True)
     validate_staging.add_argument("--expected-sha256", required=True)
+    live_authority = commands.add_parser("validate-live-authority")
+    live_authority.add_argument("--staging", type=Path, required=True)
+    live_authority.add_argument("--version", required=True)
+    live_authority.add_argument("--source-commit", required=True)
+    live_authority.add_argument("--draft-release-id", required=True)
+    live_authority.add_argument("--staging-sha256", required=True)
+    live_authority.add_argument("--immutable-releases", type=Path, required=True)
+    live_authority.add_argument("--creation-ruleset", type=Path, required=True)
+    live_authority.add_argument("--immutability-ruleset", type=Path, required=True)
     validate_release = commands.add_parser("validate-bound-release")
     validate_release.add_argument("--file", type=Path, required=True)
     validate_release.add_argument("--directory", type=Path, required=True)
@@ -1558,6 +1639,15 @@ def main() -> int:
             value = build_artifact_inventory(args.directory, version=args.version)
             write_artifact_inventory(args.output, value)
             print(args.output)
+        elif args.command == "stage-platform":
+            for path in stage_platform_artifacts(
+                args.bundle_root,
+                args.output,
+                version=args.version,
+                platform=args.platform,
+                architecture=args.architecture,
+            ):
+                print(path)
         elif args.command == "validate-immutable-releases":
             value = _load(args.file)
             response = validate_immutable_releases_response(value)
@@ -1611,6 +1701,22 @@ def main() -> int:
                 expected_sha256=args.expected_sha256,
             )
             print(f"Validated {args.file}.")
+        elif args.command == "validate-live-authority":
+            staging_value = validate_publication_staging_bytes(
+                args.staging.read_bytes(),
+                version=args.version,
+                expected_source_commit=args.source_commit,
+                expected_draft_release_id=args.draft_release_id,
+                expected_sha256=args.staging_sha256,
+            )
+            validate_live_release_authority(
+                staging_value,
+                version=args.version,
+                immutable_releases=_load(args.immutable_releases),
+                creation_ruleset=_load(args.creation_ruleset),
+                immutability_ruleset=_load(args.immutability_ruleset),
+            )
+            print("Validated live release authority.")
         elif args.command == "validate-bound-release":
             staging = validate_publication_staging_bytes(
                 args.staging.read_bytes(),
