@@ -169,6 +169,7 @@ def test_runtime_workflow_is_pinned_attested_and_separate_from_installers() -> N
     assert "--target" not in workflow
     assert 'cmp "release-assets/${name}" "existing-assets/${name}"' in workflow
     assert '.author.login == "openadapt-release[bot]"' in workflow
+    assert '.author.id == "BOT_kgDOEype4g"' in workflow
     assert "--json assets,author,isDraft,isPrerelease,tagName" in workflow
     assert "--clobber" not in workflow
     assert "ADMIN_TOKEN" not in workflow

@@ -84,6 +84,8 @@ WEBSITE_RELEASE_VERIFICATION = {
 }
 WEBSITE_RELEASE_SBOM_FORMAT = "CycloneDX"
 RELEASE_APP_LOGIN = "openadapt-release[bot]"
+RELEASE_APP_USER_ID = 321543906
+RELEASE_APP_NODE_ID = "BOT_kgDOEype4g"
 
 
 def expected_engine_asset_names(version: str) -> set[str]:
@@ -188,6 +190,9 @@ def _published_native_releases(releases: object) -> list[dict]:
         if (
             release.get("draft") is False
             and release.get("prerelease") is True
+            and isinstance(release.get("author"), dict)
+            and release["author"].get("login") == RELEASE_APP_LOGIN
+            and release["author"].get("id") == RELEASE_APP_USER_ID
             and isinstance(tag, str)
             and tag.startswith(NATIVE_TAG_PREFIX)
             and isinstance(body, str)
@@ -912,6 +917,7 @@ def validate_engine_release(
     if (
         not isinstance(release.get("author"), dict)
         or release["author"].get("login") != RELEASE_APP_LOGIN
+        or release["author"].get("id") != RELEASE_APP_NODE_ID
         or not isinstance(release.get("databaseId"), int)
         or release["databaseId"] <= 0
         or release.get("isDraft") is not False

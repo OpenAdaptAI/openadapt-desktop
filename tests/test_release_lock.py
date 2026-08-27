@@ -55,6 +55,7 @@ def test_release_workflow_checks_lock_repository_actor_and_source_boundary() -> 
     )
     assert "OpenAdaptAI/openadapt-desktop" in workflow
     assert "github.actor == 'openadapt-release[bot]'" in workflow
+    assert "github.actor_id == '321543906'" in workflow
     assert "python scripts/verify_release_lock.py" in workflow
     assert "python scripts/check_source_boundary.py --require-dist" in workflow
     assert "git tag -a" in workflow
@@ -65,6 +66,21 @@ def test_release_workflow_checks_lock_repository_actor_and_source_boundary() -> 
     assert "authorize-release-dispatch" in workflow
     assert "GITHUB_REF_TYPE" in workflow
     assert "needs.authorize-release-dispatch.result == 'success'" in workflow
+
+
+def test_engine_release_preflights_exact_app_before_pypi_publication() -> None:
+    workflow = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text())
+    steps = workflow["jobs"]["publish-tagged-engine"]["steps"]
+    names = [str(step.get("name") or "") for step in steps]
+
+    preflight = names.index("Preflight the release App before PyPI publication")
+    identity = names.index("Require the exact preflight release App identity")
+    build = names.index("Build and verify exact publication artifacts")
+    publish = names.index("Publish to PyPI with Trusted Publishing")
+    fresh_token = names.index("Mint the release App token for GitHub publication")
+
+    assert preflight < identity < build < publish < fresh_token
+    assert steps[preflight]["id"] == "release_app_preflight"
 
 
 @pytest.mark.parametrize(

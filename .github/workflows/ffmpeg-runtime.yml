@@ -20,6 +20,9 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  RELEASE_APP_ID: "4730708"
+  RELEASE_APP_ACTOR_ID: "321543906"
+  RELEASE_APP_INSTALLATION_ID: "156835568"
   FFMPEG_VERSION: "8.1.2"
   RUNTIME_REVISION: "r2"
   SOURCE_SHA256: "464beb5e7bf0c311e68b45ae2f04e9cc2af88851abb4082231742a74d97b524c"
@@ -118,11 +121,19 @@ jobs:
 
       - name: Require the exact release App identity
         env:
+          CONFIGURED_RELEASE_APP_ID: ${{ vars.OPENADAPT_RELEASE_APP_ID }}
+          CONFIGURED_RELEASE_ACTOR_ID: ${{ vars.OPENADAPT_RELEASE_ACTOR_ID }}
+          CONFIGURED_RELEASE_APP_INSTALLATION_ID: ${{ vars.OPENADAPT_RELEASE_APP_INSTALLATION_ID }}
           RELEASE_APP_SLUG: ${{ steps.release_app.outputs.app-slug }}
+          TOKEN_INSTALLATION_ID: ${{ steps.release_app.outputs['installation-id'] }}
         shell: bash
         run: |
-          if [ "${RELEASE_APP_SLUG}" != openadapt-release ]; then
-            echo "error: release token came from ${RELEASE_APP_SLUG:-an unknown App}" >&2
+          if [ "${RELEASE_APP_SLUG}" != openadapt-release ] || \
+             [ "${CONFIGURED_RELEASE_APP_ID}" != "${RELEASE_APP_ID}" ] || \
+             [ "${CONFIGURED_RELEASE_ACTOR_ID}" != "${RELEASE_APP_ACTOR_ID}" ] || \
+             [ "${CONFIGURED_RELEASE_APP_INSTALLATION_ID}" != "${RELEASE_APP_INSTALLATION_ID}" ] || \
+             [ "${TOKEN_INSTALLATION_ID}" != "${RELEASE_APP_INSTALLATION_ID}" ]; then
+            echo "error: release token does not match the admitted App identity" >&2
             exit 1
           fi
 
@@ -173,6 +184,9 @@ jobs:
           fetch-depth: 0
 
       - name: Refuse an unbound event, ref, tag, or source commit
+        env:
+          CONFIGURED_RELEASE_ACTOR_ID: ${{ vars.OPENADAPT_RELEASE_ACTOR_ID }}
+          EVENT_ACTOR_ID: ${{ github.actor_id }}
         shell: bash
         run: |
           set -euo pipefail
@@ -184,6 +198,8 @@ jobs:
             fi
           elif [ "${GITHUB_EVENT_NAME}" = "push" ]; then
             if [ "${GITHUB_ACTOR}" != "openadapt-release[bot]" ] || \
+               [ "${EVENT_ACTOR_ID}" != "${RELEASE_APP_ACTOR_ID}" ] || \
+               [ "${CONFIGURED_RELEASE_ACTOR_ID}" != "${RELEASE_APP_ACTOR_ID}" ] || \
                [ "${GITHUB_REPOSITORY}" != "OpenAdaptAI/openadapt-desktop" ]; then
               echo "error: managed-runtime publication requires the repository release App" >&2
               exit 1
@@ -371,7 +387,9 @@ jobs:
     name: Attest and publish runtime assets
     if: >-
       github.event_name == 'push' &&
-      startsWith(github.ref, 'refs/tags/ffmpeg-runtime-v')
+      startsWith(github.ref, 'refs/tags/ffmpeg-runtime-v') &&
+      github.actor == 'openadapt-release[bot]' &&
+      github.actor_id == '321543906'
     needs: [source, build]
     runs-on: ubuntu-22.04
     environment: native-release
@@ -421,11 +439,19 @@ jobs:
 
       - name: Require the exact release App identity
         env:
+          CONFIGURED_RELEASE_APP_ID: ${{ vars.OPENADAPT_RELEASE_APP_ID }}
+          CONFIGURED_RELEASE_ACTOR_ID: ${{ vars.OPENADAPT_RELEASE_ACTOR_ID }}
+          CONFIGURED_RELEASE_APP_INSTALLATION_ID: ${{ vars.OPENADAPT_RELEASE_APP_INSTALLATION_ID }}
           RELEASE_APP_SLUG: ${{ steps.release_app.outputs.app-slug }}
+          TOKEN_INSTALLATION_ID: ${{ steps.release_app.outputs['installation-id'] }}
         shell: bash
         run: |
-          if [ "${RELEASE_APP_SLUG}" != openadapt-release ]; then
-            echo "error: release token came from ${RELEASE_APP_SLUG:-an unknown App}" >&2
+          if [ "${RELEASE_APP_SLUG}" != openadapt-release ] || \
+             [ "${CONFIGURED_RELEASE_APP_ID}" != "${RELEASE_APP_ID}" ] || \
+             [ "${CONFIGURED_RELEASE_ACTOR_ID}" != "${RELEASE_APP_ACTOR_ID}" ] || \
+             [ "${CONFIGURED_RELEASE_APP_INSTALLATION_ID}" != "${RELEASE_APP_INSTALLATION_ID}" ] || \
+             [ "${TOKEN_INSTALLATION_ID}" != "${RELEASE_APP_INSTALLATION_ID}" ]; then
+            echo "error: release token does not match the admitted App identity" >&2
             exit 1
           fi
 
@@ -445,7 +471,8 @@ jobs:
             > release.json 2>/dev/null; then
             if ! jq -e --arg tag "${tag}" \
               '.tagName == $tag and .isDraft == false and .isPrerelease == true and
-               .author.login == "openadapt-release[bot]"' \
+               .author.login == "openadapt-release[bot]" and
+               .author.id == "BOT_kgDOEype4g"' \
               release.json >/dev/null; then
               echo "error: existing managed-runtime release has the wrong identity" >&2
               exit 1
@@ -477,5 +504,15 @@ jobs:
           fi
           mkdir published-assets
           gh release download "${tag}" --dir published-assets --pattern '*'
+          gh release view "${tag}" \
+            --json author,isDraft,isPrerelease,tagName > published-release.json
+          if ! jq -e --arg tag "${tag}" \
+            '.tagName == $tag and .isDraft == false and .isPrerelease == true and
+             .author.login == "openadapt-release[bot]" and
+             .author.id == "BOT_kgDOEype4g"' \
+            published-release.json >/dev/null; then
+            echo "error: published managed-runtime release has the wrong App identity" >&2
+            exit 1
+          fi
           cmp release-assets/SHA256SUMS published-assets/SHA256SUMS
           (cd published-assets && sha256sum --check SHA256SUMS)

@@ -21,6 +21,11 @@ on:
 permissions:
   contents: read
 
+env:
+  RELEASE_APP_ID: "4730708"
+  RELEASE_APP_ACTOR_ID: "321543906"
+  RELEASE_APP_INSTALLATION_ID: "156835568"
+
 concurrency:
   group: engine-release-${{ github.ref }}
   cancel-in-progress: false
@@ -189,11 +194,19 @@ jobs:
 
       - name: Require the exact release App identity
         env:
+          CONFIGURED_RELEASE_APP_ID: ${{ vars.OPENADAPT_RELEASE_APP_ID }}
+          CONFIGURED_RELEASE_ACTOR_ID: ${{ vars.OPENADAPT_RELEASE_ACTOR_ID }}
+          CONFIGURED_RELEASE_APP_INSTALLATION_ID: ${{ vars.OPENADAPT_RELEASE_APP_INSTALLATION_ID }}
           RELEASE_APP_SLUG: ${{ steps.release_app.outputs.app-slug }}
+          TOKEN_INSTALLATION_ID: ${{ steps.release_app.outputs['installation-id'] }}
         shell: bash
         run: |
-          if [ "${RELEASE_APP_SLUG}" != openadapt-release ]; then
-            echo "error: release token came from ${RELEASE_APP_SLUG:-an unknown App}" >&2
+          if [ "${RELEASE_APP_SLUG}" != openadapt-release ] || \
+             [ "${CONFIGURED_RELEASE_APP_ID}" != "${RELEASE_APP_ID}" ] || \
+             [ "${CONFIGURED_RELEASE_ACTOR_ID}" != "${RELEASE_APP_ACTOR_ID}" ] || \
+             [ "${CONFIGURED_RELEASE_APP_INSTALLATION_ID}" != "${RELEASE_APP_INSTALLATION_ID}" ] || \
+             [ "${TOKEN_INSTALLATION_ID}" != "${RELEASE_APP_INSTALLATION_ID}" ]; then
+            echo "error: release token does not match the admitted App identity" >&2
             exit 1
           fi
 
@@ -240,10 +253,15 @@ jobs:
     permissions: {}
     steps:
       - name: Refuse a tag outside the release App identity
+        env:
+          CONFIGURED_RELEASE_ACTOR_ID: ${{ vars.OPENADAPT_RELEASE_ACTOR_ID }}
+          EVENT_ACTOR_ID: ${{ github.actor_id }}
         shell: bash
         run: |
           set -euo pipefail
-          if [ "${GITHUB_ACTOR}" != "openadapt-release[bot]" ]; then
+          if [ "${GITHUB_ACTOR}" != "openadapt-release[bot]" ] || \
+             [ "${EVENT_ACTOR_ID}" != "${RELEASE_APP_ACTOR_ID}" ] || \
+             [ "${CONFIGURED_RELEASE_ACTOR_ID}" != "${RELEASE_APP_ACTOR_ID}" ]; then
             echo "error: engine publication requires the openadapt-release App" >&2
             exit 1
           fi
@@ -261,7 +279,8 @@ jobs:
       github.event_name == 'push' &&
       startsWith(github.ref, 'refs/tags/v') &&
       needs.authorize-release-tag.result == 'success' &&
-      github.actor == 'openadapt-release[bot]'
+      github.actor == 'openadapt-release[bot]' &&
+      github.actor_id == '321543906'
     runs-on: ubuntu-22.04
     environment: pypi
     permissions:
@@ -281,6 +300,8 @@ jobs:
 
       - name: Refuse a noncanonical tag, version, source, or event
         env:
+          CONFIGURED_RELEASE_ACTOR_ID: ${{ vars.OPENADAPT_RELEASE_ACTOR_ID }}
+          EVENT_ACTOR_ID: ${{ github.actor_id }}
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
@@ -291,6 +312,8 @@ jobs:
             exit 1
           fi
           if [ "${GITHUB_ACTOR}" != "openadapt-release[bot]" ] || \
+             [ "${EVENT_ACTOR_ID}" != "${RELEASE_APP_ACTOR_ID}" ] || \
+             [ "${CONFIGURED_RELEASE_ACTOR_ID}" != "${RELEASE_APP_ACTOR_ID}" ] || \
              [ "${GITHUB_REPOSITORY}" != "OpenAdaptAI/openadapt-desktop" ]; then
             echo "error: engine publication requires the repository release App" >&2
             exit 1
@@ -349,6 +372,38 @@ jobs:
               exit 1
             fi
           done
+
+      # This preflight runs before the first irreversible publication. The
+      # later token is fresh because a complete PyPI verification can outlive
+      # the short GitHub App token lifetime.
+      - name: Preflight the release App before PyPI publication
+        id: release_app_preflight
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.OPENADAPT_RELEASE_APP_ID }}
+          private-key: ${{ secrets.OPENADAPT_RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-metadata: read
+
+      - name: Require the exact preflight release App identity
+        env:
+          CONFIGURED_RELEASE_APP_ID: ${{ vars.OPENADAPT_RELEASE_APP_ID }}
+          CONFIGURED_RELEASE_ACTOR_ID: ${{ vars.OPENADAPT_RELEASE_ACTOR_ID }}
+          CONFIGURED_RELEASE_APP_INSTALLATION_ID: ${{ vars.OPENADAPT_RELEASE_APP_INSTALLATION_ID }}
+          RELEASE_APP_SLUG: ${{ steps.release_app_preflight.outputs.app-slug }}
+          TOKEN_INSTALLATION_ID: ${{ steps.release_app_preflight.outputs['installation-id'] }}
+        shell: bash
+        run: |
+          if [ "${RELEASE_APP_SLUG}" != openadapt-release ] || \
+             [ "${CONFIGURED_RELEASE_APP_ID}" != "${RELEASE_APP_ID}" ] || \
+             [ "${CONFIGURED_RELEASE_ACTOR_ID}" != "${RELEASE_APP_ACTOR_ID}" ] || \
+             [ "${CONFIGURED_RELEASE_APP_INSTALLATION_ID}" != "${RELEASE_APP_INSTALLATION_ID}" ] || \
+             [ "${TOKEN_INSTALLATION_ID}" != "${RELEASE_APP_INSTALLATION_ID}" ]; then
+            echo "error: preflight token does not match the admitted App identity" >&2
+            exit 1
+          fi
 
       - name: Build and verify exact publication artifacts
         shell: bash
@@ -442,11 +497,19 @@ jobs:
 
       - name: Require the exact release App identity
         env:
+          CONFIGURED_RELEASE_APP_ID: ${{ vars.OPENADAPT_RELEASE_APP_ID }}
+          CONFIGURED_RELEASE_ACTOR_ID: ${{ vars.OPENADAPT_RELEASE_ACTOR_ID }}
+          CONFIGURED_RELEASE_APP_INSTALLATION_ID: ${{ vars.OPENADAPT_RELEASE_APP_INSTALLATION_ID }}
           RELEASE_APP_SLUG: ${{ steps.release_app.outputs.app-slug }}
+          TOKEN_INSTALLATION_ID: ${{ steps.release_app.outputs['installation-id'] }}
         shell: bash
         run: |
-          if [ "${RELEASE_APP_SLUG}" != openadapt-release ]; then
-            echo "error: release token came from ${RELEASE_APP_SLUG:-an unknown App}" >&2
+          if [ "${RELEASE_APP_SLUG}" != openadapt-release ] || \
+             [ "${CONFIGURED_RELEASE_APP_ID}" != "${RELEASE_APP_ID}" ] || \
+             [ "${CONFIGURED_RELEASE_ACTOR_ID}" != "${RELEASE_APP_ACTOR_ID}" ] || \
+             [ "${CONFIGURED_RELEASE_APP_INSTALLATION_ID}" != "${RELEASE_APP_INSTALLATION_ID}" ] || \
+             [ "${TOKEN_INSTALLATION_ID}" != "${RELEASE_APP_INSTALLATION_ID}" ]; then
+            echo "error: release token does not match the admitted App identity" >&2
             exit 1
           fi
 
@@ -462,7 +525,8 @@ jobs:
             > release.json 2>/dev/null; then
             if ! jq -e --arg tag "${tag}" \
               '.tagName == $tag and .isDraft == false and .isPrerelease == false and
-               .author.login == "openadapt-release[bot]"' \
+               .author.login == "openadapt-release[bot]" and
+               .author.id == "BOT_kgDOEype4g"' \
               release.json >/dev/null; then
               echo "error: existing GitHub Release has the wrong identity" >&2
               exit 1

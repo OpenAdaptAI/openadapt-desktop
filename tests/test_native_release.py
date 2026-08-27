@@ -680,6 +680,56 @@ def test_every_github_release_mutation_uses_only_the_scoped_release_app(
     assert found > 0
 
 
+@pytest.mark.parametrize(
+    "workflow_name",
+    ["release.yml", "native-release.yml", "ffmpeg-runtime.yml", "production-channel.yml"],
+)
+def test_every_release_app_token_binds_exact_app_actor_and_installation(
+    workflow_name: str,
+) -> None:
+    workflow = _workflow(workflow_name)
+    assert workflow["env"] | {
+        "RELEASE_APP_ID": "4730708",
+        "RELEASE_APP_ACTOR_ID": "321543906",
+        "RELEASE_APP_INSTALLATION_ID": "156835568",
+    } == workflow["env"]
+
+    found = 0
+    for job in workflow["jobs"].values():
+        steps = job["steps"]
+        for app_index, app in enumerate(steps):
+            if not str(app.get("uses", "")).startswith("actions/create-github-app-token@"):
+                continue
+            found += 1
+            app_id = app["id"]
+            assert app["with"]["app-id"] == "${{ vars.OPENADAPT_RELEASE_APP_ID }}"
+            identity = next(
+                step
+                for step in steps[app_index + 1 :]
+                if str(step.get("name", "")).startswith("Require the exact")
+            )
+            assert identity["env"] == {
+                "CONFIGURED_RELEASE_APP_ID": "${{ vars.OPENADAPT_RELEASE_APP_ID }}",
+                "CONFIGURED_RELEASE_ACTOR_ID": "${{ vars.OPENADAPT_RELEASE_ACTOR_ID }}",
+                "CONFIGURED_RELEASE_APP_INSTALLATION_ID": (
+                    "${{ vars.OPENADAPT_RELEASE_APP_INSTALLATION_ID }}"
+                ),
+                "RELEASE_APP_SLUG": f"${{{{ steps.{app_id}.outputs.app-slug }}}}",
+                "TOKEN_INSTALLATION_ID": (
+                    f"${{{{ steps.{app_id}.outputs['installation-id'] }}}}"
+                ),
+            }
+            script = identity["run"]
+            assert '"${CONFIGURED_RELEASE_APP_ID}" != "${RELEASE_APP_ID}"' in script
+            assert '"${CONFIGURED_RELEASE_ACTOR_ID}" != "${RELEASE_APP_ACTOR_ID}"' in script
+            assert (
+                '"${CONFIGURED_RELEASE_APP_INSTALLATION_ID}" '
+                '!= "${RELEASE_APP_INSTALLATION_ID}"'
+            ) in script
+            assert '"${TOKEN_INSTALLATION_ID}" != "${RELEASE_APP_INSTALLATION_ID}"' in script
+    assert found > 0
+
+
 def test_every_release_app_token_checks_its_slug_before_any_write() -> None:
     mutation = re.compile(r"\b(?:gh release (?:create|edit|upload|delete)|git push)\b")
     for workflow_name in (
@@ -1281,6 +1331,7 @@ def _release(tag: str, *, marked: bool = True, draft: bool = False) -> dict:
         "tag_name": tag,
         "draft": draft,
         "prerelease": True,
+        "author": {"login": "openadapt-release[bot]", "id": 321543906},
         "body": "<!-- installer-release -->\n" if marked else "Candidate installer",
     }
 
@@ -1296,6 +1347,16 @@ def test_release_selection_uses_semver_and_ignores_event_order() -> None:
 
     # A late publish event for 1.9.9 must still select 1.11.0 for every write.
     assert select_latest_native_release(releases)["tag_name"] == "desktop-v1.11.0"
+
+
+def test_release_selection_requires_the_exact_release_app_identity() -> None:
+    wrong_login = _release("desktop-v1.11.1")
+    wrong_login["author"]["login"] = "openadapt-release[bot]-lookalike"
+    wrong_id = _release("desktop-v1.11.2")
+    wrong_id["author"]["id"] = 1
+
+    with pytest.raises(ValueError, match="no published marked native prerelease"):
+        select_latest_native_release([wrong_login, wrong_id])
 
 
 def _ls_remote(*tags: str) -> str:
@@ -1771,7 +1832,10 @@ def _engine_release_file(tmp_path: Path, *, version: str | None = None) -> Path:
     path.write_text(
         json.dumps(
             {
-                "author": {"login": "openadapt-release[bot]"},
+                "author": {
+                    "login": "openadapt-release[bot]",
+                    "id": "BOT_kgDOEype4g",
+                },
                 "databaseId": 654321,
                 "isDraft": False,
                 "isPrerelease": False,
@@ -1810,6 +1874,19 @@ def test_engine_release_requires_exact_published_identity(tmp_path: Path) -> Non
 
     payload["isPrerelease"] = False
     payload["author"]["login"] = "abrichr"
+    release.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="exact published engine release"):
+        validate_engine_release(
+            release,
+            repository="OpenAdaptAI/openadapt-desktop",
+            engine_tag=f"v{native_version()}",
+            engine_commit="b" * 40,
+        )
+
+    payload["author"] = {
+        "login": "openadapt-release[bot]",
+        "id": "BOT_wrong",
+    }
     release.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(ValueError, match="exact published engine release"):
         validate_engine_release(
@@ -3220,10 +3297,13 @@ def test_production_workflow_keeps_normal_publication_unadmitted() -> None:
     assert production_text.count("validate-engine-inventory") == 3
     assert production_text.count("--require-index") == 3
     assert production_text.count('"${engine_tag_ref}^{}"') == 6
-    assert production_text.count('.author.login == "openadapt-release[bot]"') == 2
+    assert production_text.count('.author.login == "openadapt-release[bot]"') == 3
+    assert production_text.count('.author.id == "BOT_kgDOEype4g"') == 3
 
     native_text = (ROOT / ".github/workflows/native-release.yml").read_text()
     assert '.author.login == "openadapt-release[bot]"' in native_text
+    assert '.author.id == "BOT_kgDOEype4g"' in native_text
+    assert ".author.id == 321543906" in native_text
     assert "validate-engine-inventory" in native_text
 
     normal_release_text = (ROOT / ".github/workflows/release.yml").read_text()

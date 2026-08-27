@@ -28,6 +28,11 @@ on:
 permissions:
   contents: read
 
+env:
+  RELEASE_APP_ID: "4730708"
+  RELEASE_APP_ACTOR_ID: "321543906"
+  RELEASE_APP_INSTALLATION_ID: "156835568"
+
 concurrency:
   group: production-channel
   cancel-in-progress: false
@@ -220,6 +225,7 @@ jobs:
             if ! jq -e \
               '.isDraft == false and .isPrerelease == true and
                .author.login == "openadapt-release[bot]" and
+               .author.id == "BOT_kgDOEype4g" and
                (.body | contains("<!-- production-channel-derived-cache -->"))' \
               production-cache-release.json >/dev/null; then
               echo "error: Production cache release identity differs" >&2
@@ -419,11 +425,19 @@ jobs:
 
       - name: Require the exact release App identity
         env:
+          CONFIGURED_RELEASE_APP_ID: ${{ vars.OPENADAPT_RELEASE_APP_ID }}
+          CONFIGURED_RELEASE_ACTOR_ID: ${{ vars.OPENADAPT_RELEASE_ACTOR_ID }}
+          CONFIGURED_RELEASE_APP_INSTALLATION_ID: ${{ vars.OPENADAPT_RELEASE_APP_INSTALLATION_ID }}
           RELEASE_APP_SLUG: ${{ steps.release_app.outputs.app-slug }}
+          TOKEN_INSTALLATION_ID: ${{ steps.release_app.outputs['installation-id'] }}
         shell: bash
         run: |
-          if [ "${RELEASE_APP_SLUG}" != openadapt-release ]; then
-            echo "error: release token came from ${RELEASE_APP_SLUG:-an unknown App}" >&2
+          if [ "${RELEASE_APP_SLUG}" != openadapt-release ] || \
+             [ "${CONFIGURED_RELEASE_APP_ID}" != "${RELEASE_APP_ID}" ] || \
+             [ "${CONFIGURED_RELEASE_ACTOR_ID}" != "${RELEASE_APP_ACTOR_ID}" ] || \
+             [ "${CONFIGURED_RELEASE_APP_INSTALLATION_ID}" != "${RELEASE_APP_INSTALLATION_ID}" ] || \
+             [ "${TOKEN_INSTALLATION_ID}" != "${RELEASE_APP_INSTALLATION_ID}" ]; then
+            echo "error: release token does not match the admitted App identity" >&2
             exit 1
           fi
 
@@ -493,6 +507,7 @@ jobs:
             if ! jq -e --arg tag "${PRODUCTION_CHANNEL_TAG}" \
               '.tagName == $tag and .isDraft == false and .isPrerelease == true and
                .author.login == "openadapt-release[bot]" and
+               .author.id == "BOT_kgDOEype4g" and
                (.body | contains("<!-- production-channel-derived-cache -->"))' \
               production-cache-release.json >/dev/null; then
               echo "error: Production cache release identity differs" >&2
@@ -530,6 +545,18 @@ jobs:
           fi
           gh release download "${PRODUCTION_CHANNEL_TAG}" --dir published-cache \
             --pattern "${CACHE_ASSET}"
+          gh release view "${PRODUCTION_CHANNEL_TAG}" \
+            --json author,isDraft,isPrerelease,tagName,body \
+            > published-cache-release.json
+          if ! jq -e --arg tag "${PRODUCTION_CHANNEL_TAG}" \
+            '.tagName == $tag and .isDraft == false and .isPrerelease == true and
+             .author.login == "openadapt-release[bot]" and
+             .author.id == "BOT_kgDOEype4g" and
+             (.body | contains("<!-- production-channel-derived-cache -->"))' \
+            published-cache-release.json >/dev/null; then
+            echo "error: published Production cache has the wrong App identity" >&2
+            exit 1
+          fi
           if [ "${compare_local}" = true ]; then
             cmp "${CACHE_PATH}" "published-cache/${CACHE_ASSET}"
           fi

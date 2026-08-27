@@ -18,6 +18,11 @@ on:
 permissions:
   contents: read
 
+env:
+  RELEASE_APP_ID: "4730708"
+  RELEASE_APP_ACTOR_ID: "321543906"
+  RELEASE_APP_INSTALLATION_ID: "156835568"
+
 concurrency:
   # One protected-main transaction owns tag creation, byte publication,
   # mirroring, and candidate-channel update. Never run two transactions at once.
@@ -176,11 +181,19 @@ jobs:
 
       - name: Require the exact release App identity
         env:
+          CONFIGURED_RELEASE_APP_ID: ${{ vars.OPENADAPT_RELEASE_APP_ID }}
+          CONFIGURED_RELEASE_ACTOR_ID: ${{ vars.OPENADAPT_RELEASE_ACTOR_ID }}
+          CONFIGURED_RELEASE_APP_INSTALLATION_ID: ${{ vars.OPENADAPT_RELEASE_APP_INSTALLATION_ID }}
           RELEASE_APP_SLUG: ${{ steps.release_app.outputs.app-slug }}
+          TOKEN_INSTALLATION_ID: ${{ steps.release_app.outputs['installation-id'] }}
         shell: bash
         run: |
-          if [ "${RELEASE_APP_SLUG}" != openadapt-release ]; then
-            echo "error: release token came from ${RELEASE_APP_SLUG:-an unknown App}" >&2
+          if [ "${RELEASE_APP_SLUG}" != openadapt-release ] || \
+             [ "${CONFIGURED_RELEASE_APP_ID}" != "${RELEASE_APP_ID}" ] || \
+             [ "${CONFIGURED_RELEASE_ACTOR_ID}" != "${RELEASE_APP_ACTOR_ID}" ] || \
+             [ "${CONFIGURED_RELEASE_APP_INSTALLATION_ID}" != "${RELEASE_APP_INSTALLATION_ID}" ] || \
+             [ "${TOKEN_INSTALLATION_ID}" != "${RELEASE_APP_INSTALLATION_ID}" ]; then
+            echo "error: release token does not match the admitted App identity" >&2
             exit 1
           fi
 
@@ -221,7 +234,9 @@ jobs:
     name: Validate the exact tagged native source
     if: >-
       github.event_name == 'push' &&
-      startsWith(github.ref, 'refs/tags/desktop-v')
+      startsWith(github.ref, 'refs/tags/desktop-v') &&
+      github.actor == 'openadapt-release[bot]' &&
+      github.actor_id == '321543906'
     runs-on: ubuntu-22.04
     permissions:
       contents: read
@@ -243,6 +258,9 @@ jobs:
 
       - name: Bind the event, ref, version, tag, and signed engine receipt
         id: release
+        env:
+          CONFIGURED_RELEASE_ACTOR_ID: ${{ vars.OPENADAPT_RELEASE_ACTOR_ID }}
+          EVENT_ACTOR_ID: ${{ github.actor_id }}
         shell: bash
         run: |
           set -euo pipefail
@@ -252,6 +270,8 @@ jobs:
             exit 1
           fi
           if [ "${GITHUB_ACTOR}" != "openadapt-release[bot]" ] || \
+             [ "${EVENT_ACTOR_ID}" != "${RELEASE_APP_ACTOR_ID}" ] || \
+             [ "${CONFIGURED_RELEASE_ACTOR_ID}" != "${RELEASE_APP_ACTOR_ID}" ] || \
              [ "${GITHUB_REPOSITORY}" != "OpenAdaptAI/openadapt-desktop" ]; then
             echo "error: native publication requires the repository release App" >&2
             exit 1
@@ -379,6 +399,7 @@ jobs:
           if ! jq -e --arg tag "${NATIVE_TAG}" \
             '.tag_name == $tag and .draft == false and .prerelease == true and
              .author.login == "openadapt-release[bot]" and
+             .author.id == 321543906 and
              (.body | contains("<!-- installer-release -->"))' \
             native-release.json >/dev/null; then
             echo "error: existing native release has the wrong public identity" >&2
@@ -1265,11 +1286,19 @@ jobs:
 
       - name: Require the exact release App identity
         env:
+          CONFIGURED_RELEASE_APP_ID: ${{ vars.OPENADAPT_RELEASE_APP_ID }}
+          CONFIGURED_RELEASE_ACTOR_ID: ${{ vars.OPENADAPT_RELEASE_ACTOR_ID }}
+          CONFIGURED_RELEASE_APP_INSTALLATION_ID: ${{ vars.OPENADAPT_RELEASE_APP_INSTALLATION_ID }}
           RELEASE_APP_SLUG: ${{ steps.release_app.outputs.app-slug }}
+          TOKEN_INSTALLATION_ID: ${{ steps.release_app.outputs['installation-id'] }}
         shell: bash
         run: |
-          if [ "${RELEASE_APP_SLUG}" != openadapt-release ]; then
-            echo "error: release token came from ${RELEASE_APP_SLUG:-an unknown App}" >&2
+          if [ "${RELEASE_APP_SLUG}" != openadapt-release ] || \
+             [ "${CONFIGURED_RELEASE_APP_ID}" != "${RELEASE_APP_ID}" ] || \
+             [ "${CONFIGURED_RELEASE_ACTOR_ID}" != "${RELEASE_APP_ACTOR_ID}" ] || \
+             [ "${CONFIGURED_RELEASE_APP_INSTALLATION_ID}" != "${RELEASE_APP_INSTALLATION_ID}" ] || \
+             [ "${TOKEN_INSTALLATION_ID}" != "${RELEASE_APP_INSTALLATION_ID}" ]; then
+            echo "error: release token does not match the admitted App identity" >&2
             exit 1
           fi
 
@@ -1305,6 +1334,7 @@ jobs:
             if ! jq -e --arg tag "${NATIVE_TAG}" \
               '.tagName == $tag and .isDraft == false and .isPrerelease == true and
                .author.login == "openadapt-release[bot]" and
+               .author.id == "BOT_kgDOEype4g" and
                (.body | contains("<!-- installer-release -->"))' \
               native-release.json >/dev/null; then
               echo "error: existing native release has the wrong public identity" >&2
@@ -1396,6 +1426,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          gh release view "${NATIVE_TAG}" \
+            --json author,isDraft,isPrerelease,tagName > native-release-identity.json
+          if ! jq -e --arg tag "${NATIVE_TAG}" \
+            '.tagName == $tag and .isDraft == false and .isPrerelease == true and
+             .author.login == "openadapt-release[bot]" and
+             .author.id == "BOT_kgDOEype4g"' \
+            native-release-identity.json >/dev/null; then
+            echo "error: published native release has the wrong App identity" >&2
+            exit 1
+          fi
           mkdir release-assets
           gh release download "${NATIVE_TAG}" --dir release-assets --pattern '*'
           git fetch --force origin "refs/tags/${NATIVE_TAG}:refs/tags/${NATIVE_TAG}"
@@ -1545,11 +1585,19 @@ jobs:
 
       - name: Require the exact release App identity
         env:
+          CONFIGURED_RELEASE_APP_ID: ${{ vars.OPENADAPT_RELEASE_APP_ID }}
+          CONFIGURED_RELEASE_ACTOR_ID: ${{ vars.OPENADAPT_RELEASE_ACTOR_ID }}
+          CONFIGURED_RELEASE_APP_INSTALLATION_ID: ${{ vars.OPENADAPT_RELEASE_APP_INSTALLATION_ID }}
           RELEASE_APP_SLUG: ${{ steps.release_app.outputs.app-slug }}
+          TOKEN_INSTALLATION_ID: ${{ steps.release_app.outputs['installation-id'] }}
         shell: bash
         run: |
-          if [ "${RELEASE_APP_SLUG}" != openadapt-release ]; then
-            echo "error: release token came from ${RELEASE_APP_SLUG:-an unknown App}" >&2
+          if [ "${RELEASE_APP_SLUG}" != openadapt-release ] || \
+             [ "${CONFIGURED_RELEASE_APP_ID}" != "${RELEASE_APP_ID}" ] || \
+             [ "${CONFIGURED_RELEASE_ACTOR_ID}" != "${RELEASE_APP_ACTOR_ID}" ] || \
+             [ "${CONFIGURED_RELEASE_APP_INSTALLATION_ID}" != "${RELEASE_APP_INSTALLATION_ID}" ] || \
+             [ "${TOKEN_INSTALLATION_ID}" != "${RELEASE_APP_INSTALLATION_ID}" ]; then
+            echo "error: release token does not match the admitted App identity" >&2
             exit 1
           fi
 
@@ -1670,11 +1718,19 @@ jobs:
 
       - name: Require the exact release App identity
         env:
+          CONFIGURED_RELEASE_APP_ID: ${{ vars.OPENADAPT_RELEASE_APP_ID }}
+          CONFIGURED_RELEASE_ACTOR_ID: ${{ vars.OPENADAPT_RELEASE_ACTOR_ID }}
+          CONFIGURED_RELEASE_APP_INSTALLATION_ID: ${{ vars.OPENADAPT_RELEASE_APP_INSTALLATION_ID }}
           RELEASE_APP_SLUG: ${{ steps.release_app.outputs.app-slug }}
+          TOKEN_INSTALLATION_ID: ${{ steps.release_app.outputs['installation-id'] }}
         shell: bash
         run: |
-          if [ "${RELEASE_APP_SLUG}" != openadapt-release ]; then
-            echo "error: release token came from ${RELEASE_APP_SLUG:-an unknown App}" >&2
+          if [ "${RELEASE_APP_SLUG}" != openadapt-release ] || \
+             [ "${CONFIGURED_RELEASE_APP_ID}" != "${RELEASE_APP_ID}" ] || \
+             [ "${CONFIGURED_RELEASE_ACTOR_ID}" != "${RELEASE_APP_ACTOR_ID}" ] || \
+             [ "${CONFIGURED_RELEASE_APP_INSTALLATION_ID}" != "${RELEASE_APP_INSTALLATION_ID}" ] || \
+             [ "${TOKEN_INSTALLATION_ID}" != "${RELEASE_APP_INSTALLATION_ID}" ]; then
+            echo "error: release token does not match the admitted App identity" >&2
             exit 1
           fi
 
@@ -1858,6 +1914,7 @@ jobs:
               --arg recovery "${recovery}" \
               '.tagName == $tag and .isDraft == false and .isPrerelease == true and
                .author.login == "openadapt-release[bot]" and
+               .author.id == "BOT_kgDOEype4g" and
                ([.assets[].name] | length == (unique | length)) and
                (.assets | length >= 1 and length <= 2) and
                (.assets | all(.name == $descriptor or .name == $recovery))' \
@@ -1950,6 +2007,7 @@ jobs:
               --arg recovery "${recovery}" \
               '.tag_name == $tag and .draft == false and .prerelease == true and
                .author.login == "openadapt-release[bot]" and
+               .author.id == 321543906 and
                ([.assets[].name] | length == (unique | length)) and
                (.assets | length >= 1 and length <= 2) and
                (.assets | all(.name == $descriptor or .name == $recovery))' \
@@ -1996,6 +2054,7 @@ jobs:
               if ! jq -e --arg recovery "${recovery}" \
                 '.draft == false and .prerelease == true and
                  .author.login == "openadapt-release[bot]" and
+                 .author.id == 321543906 and
                  (.assets | length == 1) and .assets[0].name == $recovery' \
                 channel-release-before-restore.json >/dev/null; then
                 echo "error: candidate channel changed before fixed-name recovery" >&2
@@ -2030,6 +2089,7 @@ jobs:
               if ! jq -e --arg descriptor "${descriptor}" --arg recovery "${recovery}" \
                 '.draft == false and .prerelease == true and
                  .author.login == "openadapt-release[bot]" and
+                 .author.id == 321543906 and
                  ([.assets[].name] | sort) == ([$descriptor, $recovery] | sort)' \
                 channel-release-before-write.json >/dev/null; then
                 echo "error: candidate channel changed before fixed-name publication" >&2
@@ -2092,6 +2152,7 @@ jobs:
             --arg recovery "${recovery}" \
             '.tagName == $tag and .isDraft == false and .isPrerelease == true and
              .author.login == "openadapt-release[bot]" and
+             .author.id == "BOT_kgDOEype4g" and
              (.assets | length >= 1 and length <= 2) and
              (.assets | all(.name == $descriptor or .name == $recovery))' \
             channel-release-final.json >/dev/null
@@ -2130,11 +2191,19 @@ jobs:
       # newer release was already public. No lower event can retarget consumers.
       - name: Require the exact release App identity
         env:
+          CONFIGURED_RELEASE_APP_ID: ${{ vars.OPENADAPT_RELEASE_APP_ID }}
+          CONFIGURED_RELEASE_ACTOR_ID: ${{ vars.OPENADAPT_RELEASE_ACTOR_ID }}
+          CONFIGURED_RELEASE_APP_INSTALLATION_ID: ${{ vars.OPENADAPT_RELEASE_APP_INSTALLATION_ID }}
           RELEASE_APP_SLUG: ${{ steps.release_app.outputs.app-slug }}
+          TOKEN_INSTALLATION_ID: ${{ steps.release_app.outputs['installation-id'] }}
         shell: bash
         run: |
-          if [ "${RELEASE_APP_SLUG}" != openadapt-release ]; then
-            echo "error: release token came from ${RELEASE_APP_SLUG:-an unknown App}" >&2
+          if [ "${RELEASE_APP_SLUG}" != openadapt-release ] || \
+             [ "${CONFIGURED_RELEASE_APP_ID}" != "${RELEASE_APP_ID}" ] || \
+             [ "${CONFIGURED_RELEASE_ACTOR_ID}" != "${RELEASE_APP_ACTOR_ID}" ] || \
+             [ "${CONFIGURED_RELEASE_APP_INSTALLATION_ID}" != "${RELEASE_APP_INSTALLATION_ID}" ] || \
+             [ "${TOKEN_INSTALLATION_ID}" != "${RELEASE_APP_INSTALLATION_ID}" ]; then
+            echo "error: release token does not match the admitted App identity" >&2
             exit 1
           fi
 
@@ -2147,6 +2216,7 @@ jobs:
           gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate \
             --jq '.[] | select(.draft == false and .prerelease == true)
                   | select(.author.login == "openadapt-release[bot]")
+                  | select(.author.id == 321543906)
                   | select(.tag_name | startswith("desktop-v"))
                   | select(.body | contains("<!-- installer-release -->"))
                   | .tag_name' > native-tags.txt
@@ -2159,6 +2229,7 @@ jobs:
             if ! jq -e --arg tag "${tag}" \
               '.tagName == $tag and .isDraft == false and .isPrerelease == true and
                .author.login == "openadapt-release[bot]" and
+               .author.id == "BOT_kgDOEype4g" and
                (.body | contains("<!-- installer-release -->"))' \
               candidate-release.json >/dev/null; then
               echo "error: ${tag} changed before the superseded notice update" >&2
