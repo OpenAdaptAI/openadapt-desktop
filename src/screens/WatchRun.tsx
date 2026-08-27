@@ -138,6 +138,8 @@ export function WatchRun({
   firstWorkflow = false,
   firstRunComplete = false,
   onPersistencePendingChange,
+  onRunningChange,
+  onFirstWorkflowStateChange,
   onQualify,
   onTeach,
 }: {
@@ -146,7 +148,13 @@ export function WatchRun({
   firstWorkflow?: boolean;
   firstRunComplete?: boolean;
   onPersistencePendingChange?: (pending: boolean) => void;
-  onQualify: (id: string) => void;
+  onRunningChange?: (running: boolean) => void;
+  onFirstWorkflowStateChange?: () => void;
+  onQualify: (
+    id: string,
+    afterSavedResult?: boolean,
+    target?: ExecutionTarget,
+  ) => void;
   onTeach: (id: string) => void;
 }) {
   const [report, setReport] = useState<RunReport | null>(null);
@@ -290,6 +298,12 @@ export function WatchRun({
         stepsRef.current = response.steps ?? [];
         setRunIssue(issueForReport(response));
         if (firstWorkflow) setCompletedFirstRun(true);
+        if (
+          firstWorkflow &&
+          response.persistence?.state === "persisted"
+        ) {
+          onFirstWorkflowStateChange?.();
+        }
       }
     } catch (error) {
       setRunIssue({
@@ -322,6 +336,7 @@ export function WatchRun({
       }
       setReport(response.report);
       stepsRef.current = response.report.steps ?? [];
+      if (firstWorkflow) onFirstWorkflowStateChange?.();
     } catch {
       setPersistenceIssue("Desktop could not save this run in local history.");
     } finally {
@@ -366,6 +381,11 @@ export function WatchRun({
     onPersistencePendingChange?.(firstRunPersistencePending);
     return () => onPersistencePendingChange?.(false);
   }, [firstRunPersistencePending, onPersistencePendingChange]);
+
+  useEffect(() => {
+    onRunningChange?.(running);
+    return () => onRunningChange?.(false);
+  }, [onRunningChange, running]);
 
   return (
     <div className="content">
@@ -480,7 +500,7 @@ export function WatchRun({
                     <Button
                       size="sm"
                       variant="primary"
-                      onClick={() => onQualify(workflowId)}
+                      onClick={() => onQualify(workflowId, false, target)}
                     >
                       Review before running
                     </Button>
@@ -757,7 +777,10 @@ export function WatchRun({
             The qualification review also applies the policy for each
             consequential action.
           </p>
-          <Button variant="primary" onClick={() => onQualify(workflowId)}>
+          <Button
+            variant="primary"
+            onClick={() => onQualify(workflowId, true, target)}
+          >
             Review identity, effects, and policy
           </Button>
         </Card>

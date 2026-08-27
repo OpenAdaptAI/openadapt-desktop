@@ -66,6 +66,7 @@ jobs:
           tests/test_engine/test_dispatch.py::TestLibraryCommands::test_first_supervised_replay_refuses_state_change_before_flow
           tests/test_engine/test_dispatch.py::TestLibraryCommands::test_first_supervised_replay_refuses_a_stale_exact_bundle_binding
           tests/test_engine/test_dispatch.py::TestLibraryCommands::test_first_supervised_replay_runs_an_exact_reviewed_read_only_bundle
+          tests/test_engine/test_dispatch.py::TestLibraryCommands::test_fresh_first_compile_creates_review_and_reaches_supervised_replay
           -v
 
       # The capture floor is only checkable where the bundled Flow runtime is

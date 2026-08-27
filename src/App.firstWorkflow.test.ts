@@ -40,6 +40,15 @@ it("resumes the durable first workflow at its exact user stage", () => {
     name: "qualify",
     id: "workflow-1",
     firstWorkflow: true,
+    firstRunComplete: false,
+    target: { backend: "web", url: "https://example.test" },
+  });
+  expect(routeForFirstWorkflow(state("qualification_after_result"))).toEqual({
+    name: "qualify",
+    id: "workflow-1",
+    firstWorkflow: true,
+    firstRunComplete: true,
+    target: { backend: "web", url: "https://example.test" },
   });
   expect(routeForFirstWorkflow(state("complete"))).toBeNull();
 });

@@ -714,7 +714,13 @@ class EngineDispatcher:
         """Move the first workflow between explicit operator-facing stages."""
 
         stage = str(params.get("stage") or "")
-        if stage not in {"record", "qualification", "complete"}:
+        if stage not in {
+            "record",
+            "review",
+            "qualification",
+            "qualification_after_result",
+            "complete",
+        }:
             raise ValueError("Invalid first workflow stage")
         if stage == "record":
             self.services.db.set_first_workflow_state(stage="record")
@@ -724,16 +730,33 @@ class EngineDispatcher:
         workflow_id = str(params.get("workflow_id") or "")
         current_workflow_id = str((current or {}).get("workflow_id") or "")
         same_workflow = bool(workflow_id and workflow_id == current_workflow_id)
+        allowed_from = {
+            "review": {"qualification"},
+            "qualification": {"review", "qualification"},
+            "result": {"qualification_after_result"},
+            "qualification_after_result": {
+                "qualification_after_result",
+                "complete",
+            },
+            "complete": set(),
+        }
         qualification_version = False
-        if current is not None and stage == "qualification" and not same_workflow:
+        if (
+            current is not None
+            and stage in {"qualification", "qualification_after_result"}
+            and not same_workflow
+        ):
             candidate = self.services.db.get_bundle(workflow_id)
             qualification_version = bool(
-                current.get("stage") == "qualification"
+                current.get("stage") in {"qualification", "qualification_after_result"}
                 and candidate
                 and candidate.get("capture_id") == current.get("capture_id")
             )
         if current is None or (not same_workflow and not qualification_version):
             raise ValueError("The first workflow stage does not match this workflow")
+        current_stage = str(current.get("stage") or "")
+        if stage not in allowed_from.get(current_stage, set()):
+            raise ValueError("Invalid first workflow stage transition")
         self.services.db.set_first_workflow_state(
             stage=stage,
             capture_id=current.get("capture_id"),
@@ -896,6 +919,36 @@ class EngineDispatcher:
             and first_state.get("stage") == "record"
             and first_state.get("capture_id") == capture_id
         ):
+            try:
+                self._initialize_first_workflow_review(
+                    workflow_id=str(compiled["bundle_id"]),
+                    bundle_path=Path(str(compiled["bundle_path"])),
+                    target=first_state.get("target"),
+                )
+            except Exception:
+                logger.exception("Could not initialize the first workflow review")
+                error = (
+                    "OpenAdapt compiled this recording, but it couldn't open the "
+                    "action review. The recording and compiled workflow are saved. "
+                    "Try the compile again."
+                )
+                self.emit(
+                    "compile_progress",
+                    {
+                        **progress,
+                        "state": "review_failed",
+                        "bundle_id": compiled["bundle_id"],
+                        "error": error,
+                        "recording_retained": recording_retained,
+                    },
+                )
+                return {
+                    "ok": False,
+                    "error": error,
+                    "workflow_id": str(compiled["bundle_id"]),
+                    "bundle_path": str(compiled["bundle_path"]),
+                    "recording_retained": recording_retained,
+                }
             self.services.db.set_first_workflow_state(
                 stage="review",
                 capture_id=capture_id,
@@ -918,6 +971,41 @@ class EngineDispatcher:
             "bundle_path": compiled["bundle_path"],
             "recording_retained": recording_retained,
         }
+
+    def _initialize_first_workflow_review(
+        self,
+        *,
+        workflow_id: str,
+        bundle_path: Path,
+        target: object,
+    ) -> dict:
+        """Create Flow's sealed draft project for the first action review."""
+
+        from engine.qualification import initialize_first_replay_review
+        from engine.targets import ExecutionTarget
+
+        parsed_target = ExecutionTarget.model_validate(target)
+        application = {
+            "web": "Browser application",
+            "windows": "Windows application",
+            "macos": "macOS application",
+            "linux": "Linux application",
+            "rdp": "RDP application",
+            "citrix": "Citrix application",
+        }[parsed_target.backend]
+        target_json = json.dumps(
+            parsed_target.model_dump(mode="json"),
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return initialize_first_replay_review(
+            bundle_path,
+            workflow_id=workflow_id,
+            target_kind=parsed_target.backend,
+            application=application,
+            environment_digest=hashlib.sha256(target_json.encode("utf-8")).hexdigest(),
+            bundle_key=self._qualification_bundle_key(workflow_id),
+        )
 
     def replay_workflow(self, **params: Any) -> dict:
         """Replay a bundle locally and return a ``RunReport``-shaped dict."""
@@ -943,7 +1031,25 @@ class EngineDispatcher:
         bundle = self._bundle_dir(workflow_id)
         if bundle is None:
             return self._pre_action_refusal(f"Unknown workflow {workflow_id}")
+        first_state = self.services.db.get_first_workflow_state()
+        active_first_review = bool(
+            first_state
+            and first_state.get("workflow_id") == workflow_id
+            and first_state.get("stage") in {"review", "qualification"}
+        )
+        if active_first_review and not first_supervised:
+            return self._pre_action_refusal(
+                "Finish this workflow's first supervised run before using the normal run controls."
+            )
         if first_supervised:
+            if not (
+                first_state
+                and first_state.get("stage") == "review"
+                and first_state.get("workflow_id") == workflow_id
+            ):
+                return self._pre_action_refusal(
+                    "Open the active first workflow review before the supervised run."
+                )
             admission = params.get("admission")
             if not isinstance(admission, dict):
                 return self._pre_action_refusal(
@@ -1931,18 +2037,27 @@ class EngineDispatcher:
     def get_qualification(self, **params: Any) -> dict:
         """Inspect Flow's canonical graph, coverage, and certification contract."""
 
-        from engine.qualification import DEFAULT_QUALIFICATION_POLICY, inspect_bundle
+        from engine.qualification import (
+            DEFAULT_QUALIFICATION_POLICY,
+            first_replay_review_is_draft,
+            inspect_bundle,
+        )
 
         workflow_id = str(params.get("workflow_id") or "")
         policy = str(params.get("policy") or DEFAULT_QUALIFICATION_POLICY)
         try:
             bundle = self._qualification_bundle_dir(workflow_id)
-            return inspect_bundle(
+            result = inspect_bundle(
                 bundle,
                 workflow_id=workflow_id,
                 policy_source=policy,
                 bundle_key=self._qualification_bundle_key(workflow_id),
             )
+            result["draft_environment"] = first_replay_review_is_draft(
+                bundle,
+                bundle_key=self._qualification_bundle_key(workflow_id),
+            )
+            return result
         except Exception as exc:
             return {"ok": False, "workflow_id": workflow_id, "error": str(exc)}
 
@@ -1951,6 +2066,7 @@ class EngineDispatcher:
 
         from engine.qualification import (
             DEFAULT_QUALIFICATION_POLICY,
+            first_replay_review_is_draft,
             initialize_qualification,
         )
 
@@ -1961,6 +2077,23 @@ class EngineDispatcher:
             if not isinstance(raw_capabilities, list):
                 raise ValueError("required_capabilities must be a list")
             bundle = self._qualification_bundle_dir(workflow_id)
+            bundle_key = self._qualification_bundle_key(workflow_id)
+            replace_first_replay_draft = first_replay_review_is_draft(
+                bundle,
+                bundle_key=bundle_key,
+            )
+            if replace_first_replay_draft:
+                first_state = self.services.db.get_first_workflow_state()
+                if not (
+                    first_state
+                    and first_state.get("workflow_id") == workflow_id
+                    and first_state.get("stage")
+                    in {"result", "qualification_after_result", "complete"}
+                ):
+                    raise ValueError(
+                        "Save the first supervised run before setting the "
+                        "qualification environment."
+                    )
             result = initialize_qualification(
                 bundle,
                 workflow_id=workflow_id,
@@ -1980,8 +2113,10 @@ class EngineDispatcher:
                 required_capabilities=[str(item) for item in raw_capabilities],
                 minimum_effect_tier=int(params.get("minimum_effect_tier", 3)),
                 policy_source=policy,
-                bundle_key=self._qualification_bundle_key(workflow_id),
+                bundle_key=bundle_key,
+                replace_first_replay_draft=replace_first_replay_draft,
             )
+            result["draft_environment"] = False
             self.services.db.update_bundle(workflow_id, status="qualification_pending")
             return result
         except Exception as exc:
@@ -2614,17 +2749,26 @@ class EngineDispatcher:
     def certify_qualification(self, **params: Any) -> dict:
         """Persist a pass/fail policy attempt into the resealed local bundle."""
 
-        from engine.qualification import DEFAULT_QUALIFICATION_POLICY, certify_bundle
+        from engine.qualification import (
+            DEFAULT_QUALIFICATION_POLICY,
+            certify_bundle,
+            first_replay_review_is_draft,
+        )
 
         workflow_id = str(params.get("workflow_id") or "")
         policy = str(params.get("policy") or DEFAULT_QUALIFICATION_POLICY)
         try:
             bundle = self._qualification_bundle_dir(workflow_id)
+            bundle_key = self._qualification_bundle_key(workflow_id)
+            if first_replay_review_is_draft(bundle, bundle_key=bundle_key):
+                raise ValueError(
+                    "Set the exact qualification environment before certification."
+                )
             result = certify_bundle(
                 bundle,
                 workflow_id=workflow_id,
                 policy_source=policy,
-                bundle_key=self._qualification_bundle_key(workflow_id),
+                bundle_key=bundle_key,
             )
             self.services.db.update_bundle(
                 workflow_id,

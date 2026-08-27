@@ -316,7 +316,11 @@ it("requires the first user to review the compiled workflow before a supervised 
       name: "Review identity, effects, and policy",
     }),
   );
-  expect(onQualify).toHaveBeenCalledWith("workflow-1");
+  expect(onQualify).toHaveBeenCalledWith(
+    "workflow-1",
+    true,
+    { backend: "web", url: "https://example.test" },
+  );
 });
 
 it("routes an unreviewed or state-changing first action to qualification without replay", async () => {
@@ -348,7 +352,11 @@ it("routes an unreviewed or state-changing first action to qualification without
   fireEvent.click(
     screen.getByRole("button", { name: "Review before running" }),
   );
-  expect(onQualify).toHaveBeenCalledWith("workflow-1");
+  expect(onQualify).toHaveBeenCalledWith(
+    "workflow-1",
+    false,
+    { backend: "web" },
+  );
   expect(engineInvoke).not.toHaveBeenCalled();
 });
 

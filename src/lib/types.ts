@@ -98,7 +98,13 @@ export interface Workflow {
 }
 
 export interface FirstWorkflowState {
-  stage: "record" | "review" | "result" | "qualification" | "complete";
+  stage:
+    | "record"
+    | "review"
+    | "result"
+    | "qualification"
+    | "qualification_after_result"
+    | "complete";
   capture_id?: string | null;
   workflow_id?: string | null;
   target?: ExecutionTarget | null;
@@ -428,6 +434,7 @@ export interface QualificationProject {
   policy: string;
   qualification_schema: "openadapt.qualification-project/v1";
   migration_required: boolean;
+  draft_environment?: boolean;
   project: {
     schema_version: "openadapt.qualification-project/v1";
     project_id: string;
