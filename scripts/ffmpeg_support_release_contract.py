@@ -124,6 +124,27 @@ def _regular(path: Path, label: str) -> Path:
     return path
 
 
+def _validate_asset_directory(directory: Path, *, inventory: Any) -> None:
+    inventory_digest(inventory)
+    if not directory.is_dir() or directory.is_symlink():
+        raise ValueError("managed FFmpeg downloaded assets must be a directory")
+    expected = {item["name"]: item for item in inventory["artifacts"]}
+    actual = {path.name for path in directory.iterdir()}
+    if actual != set(expected):
+        raise ValueError(
+            "managed FFmpeg downloaded assets differ: "
+            f"missing={sorted(set(expected) - actual)}, "
+            f"unexpected={sorted(actual - set(expected))}"
+        )
+    for name, artifact in expected.items():
+        path = _regular(directory / name, f"downloaded Support asset {name}")
+        if (
+            path.stat().st_size != artifact["size_bytes"]
+            or _file_digest(path) != artifact["sha256"]
+        ):
+            raise ValueError(f"downloaded Support asset bytes differ: {name}")
+
+
 def _timestamp(value: Any) -> str:
     if not isinstance(value, str) or TIMESTAMP.fullmatch(value) is None:
         raise ValueError("Support release observed_at must be an exact UTC timestamp")
@@ -165,18 +186,34 @@ def _read_zip(archive_path: Path, *, target: str) -> tuple[list[str], dict[str, 
     with zipfile.ZipFile(archive_path) as archive:
         infos = archive.infolist()
         names = [item.filename for item in infos]
-        if len(names) != len(set(names)) or set(names) != _expected_archive_members(target):
+        expected_members = _expected_archive_members(target)
+        expected_order = sorted(expected_members - {"SHA256SUMS"}) + ["SHA256SUMS"]
+        if names != expected_order or archive.comment != b"":
             raise ValueError(f"runtime archive {target} has an unexpected member set")
         for info in infos:
             path = PurePosixPath(info.filename)
             mode = info.external_attr >> 16
+            permissions = (
+                0o755
+                if info.filename
+                in {
+                    "bin/ffmpeg",
+                    "bin/ffprobe",
+                    "bin/ffmpeg.exe",
+                    "bin/ffprobe.exe",
+                }
+                else 0o644
+            )
+            expected_mode = stat.S_IFREG | permissions
             if (
                 info.is_dir()
                 or path.is_absolute()
                 or ".." in path.parts
                 or info.date_time != FIXED_ZIP_TIME
-                or stat.S_ISLNK(mode)
-                or not stat.S_ISREG(mode)
+                or mode != expected_mode
+                or info.compress_type != zipfile.ZIP_DEFLATED
+                or info.extra != b""
+                or info.comment != b""
             ):
                 raise ValueError(
                     f"runtime archive member is unsafe or noncanonical: {info.filename}"
@@ -453,15 +490,22 @@ def normalize_tag_rulesets(creation: Any, immutability: Any) -> list[dict[str, A
     ):
         if not isinstance(raw, dict):
             raise ValueError("managed FFmpeg Support ruleset response must be an object")
-        actors = [
-            {
-                "actor_id": str(item.get("actor_id")),
-                "actor_type": item.get("actor_type"),
-                "bypass_mode": item.get("bypass_mode"),
-            }
-            for item in raw.get("bypass_actors", [])
-            if isinstance(item, dict)
-        ]
+        raw_actors = raw.get("bypass_actors")
+        if not isinstance(raw_actors, list) or not all(
+            isinstance(item, dict) for item in raw_actors
+        ):
+            raise ValueError("managed FFmpeg Support ruleset bypass actors are invalid")
+        try:
+            actors = [
+                {
+                    "actor_id": str(item["actor_id"]),
+                    "actor_type": item["actor_type"],
+                    "bypass_mode": item["bypass_mode"],
+                }
+                for item in raw_actors
+            ]
+        except KeyError as exc:
+            raise ValueError("managed FFmpeg Support ruleset bypass actor is incomplete") from exc
         value = {
             "role": role,
             "repository": REPOSITORY,
@@ -545,12 +589,14 @@ def build_staging(
     release_api: Any,
     *,
     inventory: Any,
+    asset_directory: Path,
     immutable_releases: Any,
     tag_rulesets: Any,
     tag_ref_state: Any,
     observed_at: str,
 ) -> dict[str, Any]:
     inventory_sha256 = inventory_digest(inventory)
+    _validate_asset_directory(asset_directory, inventory=inventory)
     if not isinstance(release_api, dict):
         raise ValueError("managed FFmpeg draft release response must be an object")
     release_id = str(release_api.get("id"))
@@ -858,11 +904,13 @@ def validate_bound_release(
     *,
     inventory: Any,
     staging: Any,
+    asset_directory: Path,
     phase: str,
 ) -> dict[str, Any]:
     if phase not in {"draft", "published"} or not isinstance(release_api, dict):
         raise ValueError("managed FFmpeg release phase or response is invalid")
     staging_digest(staging, inventory=inventory)
+    _validate_asset_directory(asset_directory, inventory=inventory)
     author = release_api.get("author")
     release_id = str(release_api.get("id"))
     expected_draft = phase == "draft"
@@ -928,6 +976,7 @@ def _parser() -> argparse.ArgumentParser:
     staging = commands.add_parser("staging")
     staging.add_argument("--release", type=Path, required=True)
     staging.add_argument("--inventory", type=Path, required=True)
+    staging.add_argument("--asset-directory", type=Path, required=True)
     staging.add_argument("--immutable-releases", type=Path, required=True)
     staging.add_argument("--rulesets", type=Path, required=True)
     staging.add_argument("--tag-ref-state", type=Path, required=True)
@@ -952,6 +1001,7 @@ def _parser() -> argparse.ArgumentParser:
     validate_release.add_argument("--file", type=Path, required=True)
     validate_release.add_argument("--inventory", type=Path, required=True)
     validate_release.add_argument("--staging", type=Path, required=True)
+    validate_release.add_argument("--asset-directory", type=Path, required=True)
     validate_release.add_argument("--phase", choices=("draft", "published"), required=True)
     return parser
 
@@ -975,6 +1025,7 @@ def main() -> int:
             value = build_staging(
                 json.loads(_regular(args.release, "draft release").read_bytes()),
                 inventory=inventory,
+                asset_directory=args.asset_directory,
                 immutable_releases=json.loads(
                     _regular(args.immutable_releases, "immutable releases response").read_bytes()
                 ),
@@ -1029,6 +1080,7 @@ def main() -> int:
                 json.loads(_regular(args.file, "Support release response").read_bytes()),
                 inventory=inventory,
                 staging=staging,
+                asset_directory=args.asset_directory,
                 phase=args.phase,
             )
             print(f"Validated {args.phase} Support release {release['id']}.")

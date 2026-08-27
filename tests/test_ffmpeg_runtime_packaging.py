@@ -297,6 +297,7 @@ def test_support_release_binds_exact_archives_source_authority_and_draft(
     staging = build_staging(
         release_api,
         inventory=inventory,
+        asset_directory=release,
         immutable_releases={"enabled": True, "enforced_by_owner": False},
         tag_rulesets=rulesets,
         tag_ref_state={"ref": f"refs/tags/{TAG}", "exists": False},
@@ -348,6 +349,7 @@ def test_support_release_binds_exact_archives_source_authority_and_draft(
             release_api,
             inventory=inventory,
             staging=staging,
+            asset_directory=release,
             phase="draft",
         )
         == release_api
@@ -360,10 +362,23 @@ def test_support_release_binds_exact_archives_source_authority_and_draft(
             published,
             inventory=inventory,
             staging=staging,
+            asset_directory=release,
             phase="published",
         )
         == published
     )
+    changed_asset = release / inventory["artifacts"][0]["name"]
+    original_bytes = changed_asset.read_bytes()
+    changed_asset.write_bytes(original_bytes + b"changed")
+    with pytest.raises(ValueError, match="downloaded Support asset bytes differ"):
+        validate_bound_release(
+            published,
+            inventory=inventory,
+            staging=staging,
+            asset_directory=release,
+            phase="published",
+        )
+    changed_asset.write_bytes(original_bytes)
 
 
 def test_support_release_refuses_a_changed_archive_or_tag_authority(
@@ -390,6 +405,11 @@ def test_support_release_refuses_a_changed_archive_or_tag_authority(
     creation, immutability = _rulesets()
     creation["conditions"]["ref_name"]["include"] = ["refs/tags/v*"]
     with pytest.raises(ValueError, match="ruleset differs"):
+        normalize_tag_rulesets(creation, immutability)
+
+    creation, immutability = _rulesets()
+    immutability["bypass_actors"] = ["malformed"]
+    with pytest.raises(ValueError, match="bypass actors are invalid"):
         normalize_tag_rulesets(creation, immutability)
 
 
