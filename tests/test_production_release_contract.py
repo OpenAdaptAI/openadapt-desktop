@@ -33,6 +33,8 @@ from scripts.production_release_contract import (
     validate_immutable_releases_response,
     validate_platform_verification,
     validate_tag_binding_bytes,
+    validate_tag_object,
+    validate_tag_ref,
     validate_tag_ref_state,
     validate_tag_rulesets,
 )
@@ -627,6 +629,55 @@ def test_annotated_tag_binding_is_exact_canonical_json_plus_one_lf(
             inventory,
             version=VERSION,
             verified_artifact_inventory_sha256="sha256:" + "0" * 64,
+        )
+
+
+def test_tag_object_and_ref_bind_the_exact_canonical_annotation(tmp_path: Path) -> None:
+    release = tmp_path / "release"
+    _materialize_release(release)
+    inventory = build_artifact_inventory(release, version=VERSION)
+    binding = build_tag_binding(
+        _admission_reference(),
+        inventory,
+        version=VERSION,
+        verified_artifact_inventory_sha256=artifact_inventory_digest(inventory, version=VERSION),
+    )
+    tag_object_sha = "2" * 40
+    tag_object = {
+        "sha": tag_object_sha,
+        "tag": f"v{VERSION}",
+        "message": tag_binding_bytes(binding).decode(),
+        "object": {"type": "commit", "sha": SOURCE_COMMIT},
+    }
+
+    assert (
+        validate_tag_object(
+            tag_object,
+            expected_tag=f"v{VERSION}",
+            expected_commit=SOURCE_COMMIT,
+            expected_binding=binding,
+        )
+        == tag_object_sha
+    )
+    assert (
+        validate_tag_ref(
+            {
+                "ref": f"refs/tags/v{VERSION}",
+                "object": {"type": "tag", "sha": tag_object_sha},
+            },
+            expected_tag=f"v{VERSION}",
+            expected_tag_object_sha=tag_object_sha,
+        )
+        is None
+    )
+
+    tag_object["message"] = tag_object["message"].rstrip("\n")
+    with pytest.raises(ValueError, match="one LF"):
+        validate_tag_object(
+            tag_object,
+            expected_tag=f"v{VERSION}",
+            expected_commit=SOURCE_COMMIT,
+            expected_binding=binding,
         )
 
 

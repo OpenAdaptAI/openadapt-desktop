@@ -832,6 +832,56 @@ def validate_tag_binding_bytes(raw: bytes) -> dict[str, Any]:
     return value
 
 
+def validate_tag_object(
+    value: Any,
+    *,
+    expected_tag: str,
+    expected_commit: str,
+    expected_binding: Any,
+) -> str:
+    """Validate one GitHub annotated-tag object against the admitted binding."""
+
+    if not isinstance(value, dict):
+        raise ValueError("GitHub annotated tag response must be an object")
+    tag_object_sha = value.get("sha")
+    target = value.get("object")
+    message = value.get("message")
+    if (
+        not isinstance(tag_object_sha, str)
+        or COMMIT.fullmatch(tag_object_sha) is None
+        or value.get("tag") != expected_tag
+        or not isinstance(target, dict)
+        or target.get("type") != "commit"
+        or target.get("sha") != expected_commit
+        or not isinstance(message, str)
+    ):
+        raise ValueError("GitHub annotated tag identity or target differs")
+    binding = validate_tag_binding_bytes(message.encode("utf-8"))
+    if binding != expected_binding:
+        raise ValueError("GitHub annotated tag binding differs from the admitted binding")
+    return tag_object_sha
+
+
+def validate_tag_ref(
+    value: Any,
+    *,
+    expected_tag: str,
+    expected_tag_object_sha: str,
+) -> None:
+    """Require the public ref to resolve to the exact annotated-tag object."""
+
+    if not isinstance(value, dict) or COMMIT.fullmatch(expected_tag_object_sha) is None:
+        raise ValueError("GitHub annotated tag ref input is invalid")
+    target = value.get("object")
+    if (
+        value.get("ref") != f"refs/tags/{expected_tag}"
+        or not isinstance(target, dict)
+        or target.get("type") != "tag"
+        or target.get("sha") != expected_tag_object_sha
+    ):
+        raise ValueError("GitHub tag ref is not the exact annotated-tag object")
+
+
 def _validate_release(value: Any, *, version: str) -> dict[str, Any]:
     release = _closed(
         value,
@@ -1212,6 +1262,15 @@ def _parser() -> argparse.ArgumentParser:
     tag_binding.add_argument("--output", type=Path, required=True)
     validate_binding = commands.add_parser("validate-tag-binding")
     validate_binding.add_argument("--file", type=Path, required=True)
+    validate_tag = commands.add_parser("validate-tag-object")
+    validate_tag.add_argument("--file", type=Path, required=True)
+    validate_tag.add_argument("--tag", required=True)
+    validate_tag.add_argument("--source-commit", required=True)
+    validate_tag.add_argument("--binding", type=Path, required=True)
+    validate_ref = commands.add_parser("validate-tag-ref")
+    validate_ref.add_argument("--file", type=Path, required=True)
+    validate_ref.add_argument("--tag", required=True)
+    validate_ref.add_argument("--tag-object-sha", required=True)
     verification = commands.add_parser("validate-platform-verification")
     verification.add_argument("--file", type=Path, required=True)
     verification.add_argument("--version", required=True)
@@ -1295,6 +1354,22 @@ def main() -> int:
         elif args.command == "validate-tag-binding":
             _regular_file(args.file, "tag binding")
             validate_tag_binding_bytes(args.file.read_bytes())
+            print(f"Validated {args.file}.")
+        elif args.command == "validate-tag-object":
+            binding = validate_tag_binding_bytes(args.binding.read_bytes())
+            tag_object_sha = validate_tag_object(
+                _load(args.file),
+                expected_tag=args.tag,
+                expected_commit=args.source_commit,
+                expected_binding=binding,
+            )
+            print(tag_object_sha)
+        elif args.command == "validate-tag-ref":
+            validate_tag_ref(
+                _load(args.file),
+                expected_tag=args.tag,
+                expected_tag_object_sha=args.tag_object_sha,
+            )
             print(f"Validated {args.file}.")
         elif args.command == "validate-platform-verification":
             validate_platform_verification(_load(args.file), version=args.version)
