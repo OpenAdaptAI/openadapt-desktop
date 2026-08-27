@@ -1,0 +1,261 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openadapt.ai/schemas/desktop-platform-verification.schema.json",
+  "title": "OpenAdapt Desktop platform verification",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "release",
+    "platform",
+    "architecture",
+    "artifacts",
+    "build",
+    "verification"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "openadapt.desktop-platform-verification/v1"
+    },
+    "release": {"$ref": "#/$defs/release"},
+    "platform": {"enum": ["linux", "macos", "windows"]},
+    "architecture": {"enum": ["arm64", "x86_64"]},
+    "artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/artifact"}
+    },
+    "build": {"$ref": "#/$defs/build"},
+    "verification": {
+      "oneOf": [
+        {"$ref": "#/$defs/linuxVerification"},
+        {"$ref": "#/$defs/macosVerification"},
+        {"$ref": "#/$defs/windowsVerification"}
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"platform": {"const": "linux"}}},
+      "then": {
+        "properties": {
+          "architecture": {"const": "x86_64"},
+          "verification": {"$ref": "#/$defs/linuxVerification"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"platform": {"const": "macos"}}},
+      "then": {
+        "properties": {
+          "verification": {"$ref": "#/$defs/macosVerification"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"platform": {"const": "windows"}}},
+      "then": {
+        "properties": {
+          "architecture": {"const": "x86_64"},
+          "verification": {"$ref": "#/$defs/windowsVerification"}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "repository_id",
+        "source_commit",
+        "version",
+        "tag"
+      ],
+      "properties": {
+        "repository": {"const": "OpenAdaptAI/openadapt-desktop"},
+        "repository_id": {"const": "1171291730"},
+        "source_commit": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+        },
+        "tag": {
+          "type": "string",
+          "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+$"
+        }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "kind", "sha256", "size_bytes", "media_type"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "kind": {"type": "string", "minLength": 1},
+        "sha256": {"$ref": "#/$defs/digest"},
+        "size_bytes": {"type": "integer", "minimum": 1},
+        "media_type": {"type": "string", "minLength": 3}
+      }
+    },
+    "build": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workflow",
+        "workflow_ref",
+        "workflow_commit",
+        "event",
+        "run_id",
+        "run_attempt",
+        "runner_environment",
+        "install_verified",
+        "launch_verified",
+        "uninstall_verified",
+        "embedded_flow_version"
+      ],
+      "properties": {
+        "workflow": {"const": ".github/workflows/release.yml"},
+        "workflow_ref": {
+          "const": "OpenAdaptAI/openadapt-desktop/.github/workflows/release.yml@refs/heads/main"
+        },
+        "workflow_commit": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "event": {"const": "workflow_dispatch"},
+        "run_id": {"type": "integer", "minimum": 1},
+        "run_attempt": {"type": "integer", "minimum": 1},
+        "runner_environment": {"const": "github-hosted"},
+        "install_verified": {"const": true},
+        "launch_verified": {"const": true},
+        "uninstall_verified": {"const": true},
+        "embedded_flow_version": {"type": "string", "minLength": 1}
+      }
+    },
+    "macosVerification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["method", "signature", "notarization"],
+      "properties": {
+        "method": {"const": "apple-developer-id-notarization"},
+        "signature": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "team_id",
+            "signer_identity_sha256",
+            "designated_requirement_sha256",
+            "hardened_runtime"
+          ],
+          "properties": {
+            "status": {"const": "valid"},
+            "team_id": {"type": "string", "minLength": 1},
+            "signer_identity_sha256": {"$ref": "#/$defs/digest"},
+            "designated_requirement_sha256": {"$ref": "#/$defs/digest"},
+            "hardened_runtime": {"const": true}
+          }
+        },
+        "notarization": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "ticket_stapled",
+            "ticket_validated",
+            "gatekeeper_assessment"
+          ],
+          "properties": {
+            "status": {"const": "accepted"},
+            "ticket_stapled": {"const": true},
+            "ticket_validated": {"const": true},
+            "gatekeeper_assessment": {"const": "accepted"}
+          }
+        }
+      }
+    },
+    "windowsSignature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifact_name",
+        "status",
+        "signer_certificate_sha256",
+        "signer_subject_sha256",
+        "timestamp_certificate_sha256",
+        "timestamp_subject_sha256"
+      ],
+      "properties": {
+        "artifact_name": {"type": "string", "minLength": 1},
+        "status": {"const": "valid"},
+        "signer_certificate_sha256": {"$ref": "#/$defs/digest"},
+        "signer_subject_sha256": {"$ref": "#/$defs/digest"},
+        "timestamp_certificate_sha256": {"$ref": "#/$defs/digest"},
+        "timestamp_subject_sha256": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "windowsVerification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["method", "file_digest_algorithm", "signatures"],
+      "properties": {
+        "method": {"const": "authenticode"},
+        "file_digest_algorithm": {"const": "sha256"},
+        "signatures": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/windowsSignature"}
+        }
+      }
+    },
+    "linuxSubject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "sha256"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "sha256": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "linuxVerification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "method",
+        "oidc_issuer",
+        "certificate_identity",
+        "predicate_type",
+        "build_type",
+        "subjects"
+      ],
+      "properties": {
+        "method": {"const": "github-oidc-attestation"},
+        "oidc_issuer": {"const": "https://token.actions.githubusercontent.com"},
+        "certificate_identity": {
+          "const": "https://github.com/OpenAdaptAI/openadapt-desktop/.github/workflows/release.yml@refs/heads/main"
+        },
+        "predicate_type": {"const": "https://slsa.dev/provenance/v1"},
+        "build_type": {"const": "https://actions.github.io/buildtypes/workflow/v1"},
+        "subjects": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/linuxSubject"}
+        }
+      }
+    }
+  }
+}

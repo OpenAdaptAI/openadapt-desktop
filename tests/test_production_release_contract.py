@@ -1,0 +1,288 @@
+"""Tests for the closed Desktop Production release contract."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from scripts.production_release_contract import (
+    ARTIFACT_INVENTORY_SCHEMA,
+    IMMUTABLE_RELEASES_DOMAIN,
+    PLATFORM_VERIFICATION_MEDIA_TYPE,
+    PLATFORM_VERIFICATION_SCHEMA,
+    REPOSITORY,
+    REPOSITORY_ID,
+    artifact_specs,
+    build_artifact_inventory,
+    expected_asset_names,
+    immutable_releases_digest,
+    tag_ref_state_digest,
+    validate_immutable_releases_response,
+    validate_platform_verification,
+    validate_tag_ref_state,
+)
+
+VERSION = "1.2.3"
+SOURCE_COMMIT = "a" * 40
+DIGEST = "sha256:" + "b" * 64
+
+
+def _materialize_release(directory: Path) -> None:
+    directory.mkdir()
+    for index, spec in enumerate(artifact_specs(VERSION), start=1):
+        (directory / spec.name).write_bytes(f"artifact-{index}".encode())
+
+
+def _artifact(platform: str, architecture: str) -> list[dict[str, object]]:
+    values = []
+    for spec in artifact_specs(VERSION):
+        if spec.kind.startswith(f"{platform}-") and f"-{platform}-{architecture}" in spec.name:
+            values.append(
+                {
+                    "name": spec.name,
+                    "kind": spec.kind,
+                    "sha256": DIGEST,
+                    "size_bytes": 100,
+                    "media_type": spec.media_type,
+                }
+            )
+    return sorted(values, key=lambda item: (item["kind"], item["name"]))
+
+
+def _document(platform: str, architecture: str) -> dict:
+    artifacts = _artifact(platform, architecture)
+    common = {
+        "schema_version": PLATFORM_VERIFICATION_SCHEMA,
+        "release": {
+            "repository": REPOSITORY,
+            "repository_id": REPOSITORY_ID,
+            "source_commit": SOURCE_COMMIT,
+            "version": VERSION,
+            "tag": f"v{VERSION}",
+        },
+        "platform": platform,
+        "architecture": architecture,
+        "artifacts": artifacts,
+        "build": {
+            "workflow": ".github/workflows/release.yml",
+            "workflow_ref": (
+                "OpenAdaptAI/openadapt-desktop/.github/workflows/release.yml@refs/heads/main"
+            ),
+            "workflow_commit": SOURCE_COMMIT,
+            "event": "workflow_dispatch",
+            "run_id": 123,
+            "run_attempt": 1,
+            "runner_environment": "github-hosted",
+            "install_verified": True,
+            "launch_verified": True,
+            "uninstall_verified": True,
+            "embedded_flow_version": "2.0.0",
+        },
+    }
+    if platform == "macos":
+        verification = {
+            "method": "apple-developer-id-notarization",
+            "signature": {
+                "status": "valid",
+                "team_id": "ABCDE12345",
+                "signer_identity_sha256": DIGEST,
+                "designated_requirement_sha256": DIGEST,
+                "hardened_runtime": True,
+            },
+            "notarization": {
+                "status": "accepted",
+                "ticket_stapled": True,
+                "ticket_validated": True,
+                "gatekeeper_assessment": "accepted",
+            },
+        }
+    elif platform == "windows":
+        verification = {
+            "method": "authenticode",
+            "file_digest_algorithm": "sha256",
+            "signatures": [
+                {
+                    "artifact_name": artifact["name"],
+                    "status": "valid",
+                    "signer_certificate_sha256": DIGEST,
+                    "signer_subject_sha256": DIGEST,
+                    "timestamp_certificate_sha256": DIGEST,
+                    "timestamp_subject_sha256": DIGEST,
+                }
+                for artifact in artifacts
+            ],
+        }
+    else:
+        verification = {
+            "method": "github-oidc-attestation",
+            "oidc_issuer": "https://token.actions.githubusercontent.com",
+            "certificate_identity": (
+                "https://github.com/OpenAdaptAI/openadapt-desktop/.github/workflows/"
+                "release.yml@refs/heads/main"
+            ),
+            "predicate_type": "https://slsa.dev/provenance/v1",
+            "build_type": "https://actions.github.io/buildtypes/workflow/v1",
+            "subjects": [
+                {"name": artifact["name"], "sha256": artifact["sha256"]} for artifact in artifacts
+            ],
+        }
+    return {**common, "verification": verification}
+
+
+def test_exact_production_asset_profile_has_fourteen_stable_names() -> None:
+    specs = artifact_specs(VERSION)
+
+    assert len(specs) == 14
+    assert len(expected_asset_names(VERSION)) == 14
+    assert [item.kind for item in specs] == sorted(item.kind for item in specs)
+    assert all(
+        word not in item.name.lower()
+        for item in specs
+        for word in ("beta", "candidate", "adhoc", "unsigned")
+    )
+    assert {item.kind for item in specs if item.media_type == PLATFORM_VERIFICATION_MEDIA_TYPE} == {
+        "verification-metadata-linux-x86-64",
+        "verification-metadata-macos-arm64",
+        "verification-metadata-macos-x86-64",
+        "verification-metadata-windows-x86-64",
+    }
+
+
+def test_artifact_inventory_binds_exact_bytes_and_destinations(tmp_path: Path) -> None:
+    release = tmp_path / "release"
+    _materialize_release(release)
+
+    inventory = build_artifact_inventory(release, version=VERSION)
+
+    assert inventory["schema_version"] == ARTIFACT_INVENTORY_SCHEMA
+    assert inventory["target"] == "desktop"
+    assert inventory["claim_scope"] == "production_desktop"
+    assert len(inventory["artifacts"]) == 14
+    for artifact in inventory["artifacts"]:
+        assert set(artifact) == {
+            "name",
+            "kind",
+            "sha256",
+            "size_bytes",
+            "media_type",
+            "publish_destinations",
+        }
+        if artifact["kind"] in {"python-wheel", "python-sdist"}:
+            assert artifact["publish_destinations"] == ["github-release", "pypi"]
+        else:
+            assert artifact["publish_destinations"] == ["github-release"]
+
+    (release / "unexpected.txt").write_text("unexpected", encoding="utf-8")
+    with pytest.raises(ValueError, match="unexpected"):
+        build_artifact_inventory(release, version=VERSION)
+
+
+@pytest.mark.parametrize(
+    ("platform", "architecture"),
+    [
+        ("linux", "x86_64"),
+        ("macos", "arm64"),
+        ("macos", "x86_64"),
+        ("windows", "x86_64"),
+    ],
+)
+def test_platform_verification_schema_binds_native_evidence_without_secrets(
+    platform: str,
+    architecture: str,
+) -> None:
+    document = _document(platform, architecture)
+
+    assert validate_platform_verification(document, version=VERSION) == document
+    serialized = json.dumps(document, sort_keys=True).lower()
+    for secret_field in (
+        "private_key",
+        "certificate_password",
+        "apple_password",
+        "client_secret",
+        "pfx",
+    ):
+        assert secret_field not in serialized
+
+
+def test_platform_verification_rejects_unbound_or_false_evidence() -> None:
+    macos = _document("macos", "arm64")
+    macos["verification"]["notarization"]["ticket_stapled"] = False
+    with pytest.raises(ValueError, match="notarization"):
+        validate_platform_verification(macos, version=VERSION)
+
+    windows = _document("windows", "x86_64")
+    windows["verification"]["signatures"].pop()
+    with pytest.raises(ValueError, match="exact artifact set"):
+        validate_platform_verification(windows, version=VERSION)
+
+    linux = _document("linux", "x86_64")
+    linux["verification"]["certificate_identity"] = (
+        "https://github.com/attacker/repository/workflow.yml@refs/heads/main"
+    )
+    with pytest.raises(ValueError, match="provenance identity"):
+        validate_platform_verification(linux, version=VERSION)
+
+
+def test_platform_verification_is_closed() -> None:
+    document = _document("macos", "arm64")
+    document["credential"] = "must never be accepted"
+
+    with pytest.raises(ValueError, match="contain exactly"):
+        validate_platform_verification(document, version=VERSION)
+
+
+def test_immutable_releases_response_and_domain_digest_are_exact() -> None:
+    response = {"enabled": True, "enforced_by_owner": False}
+
+    assert validate_immutable_releases_response(response) == response
+    assert IMMUTABLE_RELEASES_DOMAIN.endswith(b"\0")
+    assert immutable_releases_digest(response) == (
+        "sha256:07649aafb167237fecc138f5e93b48ddce5a69f4060da7130e3c78e59fd48581"
+    )
+
+    with pytest.raises(ValueError, match="contain exactly"):
+        validate_immutable_releases_response({"enabled": True})
+    with pytest.raises(ValueError, match="contain exactly"):
+        validate_immutable_releases_response(
+            {"enabled": True, "enforced_by_owner": False, "extra": False}
+        )
+    with pytest.raises(ValueError, match="must be enabled"):
+        validate_immutable_releases_response({"enabled": False, "enforced_by_owner": True})
+    with pytest.raises(ValueError, match="must be boolean"):
+        validate_immutable_releases_response({"enabled": True, "enforced_by_owner": "false"})
+
+
+def test_prospective_tag_ref_state_must_be_absent_and_exact() -> None:
+    state = {"ref": f"refs/tags/v{VERSION}", "exists": False}
+
+    assert validate_tag_ref_state(state, tag=f"v{VERSION}") == state
+    assert tag_ref_state_digest(state, tag=f"v{VERSION}") == (
+        "sha256:561dd8fb56e1742c02468559b8810b6957687423ed0d2d30dd97b8994df0aaf3"
+    )
+
+    with pytest.raises(ValueError, match="already exists"):
+        validate_tag_ref_state(
+            {"ref": f"refs/tags/v{VERSION}", "exists": True},
+            tag=f"v{VERSION}",
+        )
+    with pytest.raises(ValueError, match="differs"):
+        validate_tag_ref_state(
+            {"ref": "refs/tags/v9.9.9", "exists": False},
+            tag=f"v{VERSION}",
+        )
+
+
+def test_platform_verification_json_schema_is_present_and_closed() -> None:
+    schema = json.loads(
+        (
+            Path(__file__).resolve().parents[1]
+            / "schemas"
+            / "desktop-platform-verification.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+
+    assert schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
+    assert schema["additionalProperties"] is False
+    assert schema["properties"]["schema_version"]["const"] == (PLATFORM_VERIFICATION_SCHEMA)
