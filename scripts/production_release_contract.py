@@ -23,6 +23,7 @@ IMMUTABLE_RELEASES_DOMAIN = b"OpenAdapt production immutable releases response v
 TAG_REF_STATE_DOMAIN = b"OpenAdapt production release tag ref state v1\0"
 TAG_RULESETS_DOMAIN = b"OpenAdapt production release tag rulesets v1\0"
 STAGING_DOMAIN = b"OpenAdapt production release staging evidence v1\0"
+ARTIFACT_INVENTORY_DOMAIN = b"OpenAdapt production release artifact inventory v1\0"
 TAG_ADMISSION_REFERENCE_DOMAIN = b"OpenAdapt production release tag admission reference v1\0"
 EVIDENCE_REGISTRY_ENTRY_DOMAIN = b"OpenAdapt production evidence registry entry v1\0"
 PLATFORM_VERIFICATION_MEDIA_TYPE = (
@@ -215,6 +216,71 @@ def write_artifact_inventory(path: Path, value: Mapping[str, Any]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return path
+
+
+def validate_artifact_inventory(value: Any, *, version: str) -> dict[str, Any]:
+    inventory = _closed(
+        value,
+        {"schema_version", "target", "claim_scope", "artifacts"},
+        "Desktop artifact inventory",
+    )
+    if (
+        inventory["schema_version"] != ARTIFACT_INVENTORY_SCHEMA
+        or inventory["target"] != TARGET
+        or inventory["claim_scope"] != CLAIM_SCOPE
+    ):
+        raise ValueError("Desktop artifact inventory identity differs")
+    artifacts = inventory["artifacts"]
+    if not isinstance(artifacts, list) or len(artifacts) != 14:
+        raise ValueError("Desktop artifact inventory must contain exactly fourteen assets")
+    specs = {item.name: item for item in artifact_specs(version)}
+    names: set[str] = set()
+    for index, artifact_value in enumerate(artifacts):
+        artifact = _closed(
+            artifact_value,
+            {
+                "name",
+                "kind",
+                "sha256",
+                "size_bytes",
+                "media_type",
+                "publish_destinations",
+            },
+            f"Desktop artifact inventory item {index}",
+        )
+        spec = specs.get(str(artifact["name"]))
+        if (
+            spec is None
+            or artifact["name"] in names
+            or artifact["kind"] != spec.kind
+            or artifact["media_type"] != spec.media_type
+            or artifact["publish_destinations"] != list(spec.publish_destinations)
+            or DIGEST.fullmatch(str(artifact["sha256"])) is None
+            or not isinstance(artifact["size_bytes"], int)
+            or isinstance(artifact["size_bytes"], bool)
+            or artifact["size_bytes"] <= 0
+        ):
+            raise ValueError("Desktop artifact inventory item differs from the profile")
+        names.add(artifact["name"])
+    if names != set(specs):
+        raise ValueError("Desktop artifact inventory is incomplete")
+    if artifacts != sorted(
+        artifacts, key=lambda item: (item["kind"], item["name"], item["sha256"])
+    ):
+        raise ValueError("Desktop artifact inventory is not canonically sorted")
+    return inventory
+
+
+def artifact_inventory_digest(value: Any, *, version: str) -> str:
+    inventory = validate_artifact_inventory(value, version=version)
+    projection = {
+        "target": inventory["target"],
+        "claim_scope": inventory["claim_scope"],
+        "artifacts": inventory["artifacts"],
+    }
+    return (
+        "sha256:" + hashlib.sha256(ARTIFACT_INVENTORY_DOMAIN + _canonical(projection)).hexdigest()
+    )
 
 
 def validate_immutable_releases_response(value: Any) -> dict[str, Any]:
@@ -710,15 +776,21 @@ def admission_reference_digest(value: Any) -> str:
 
 
 def build_tag_binding(
-    admission_reference: Any, *, artifact_inventory_sha256: str
+    admission_reference: Any,
+    artifact_inventory: Any,
+    *,
+    version: str,
+    verified_artifact_inventory_sha256: str,
 ) -> dict[str, Any]:
     reference = validate_admission_reference(admission_reference)
-    _valid_digest(artifact_inventory_sha256, "tag binding artifact inventory")
+    local_digest = artifact_inventory_digest(artifact_inventory, version=version)
+    if verified_artifact_inventory_sha256 != local_digest:
+        raise ValueError("verified artifact inventory digest differs from local inventory")
     return {
         "schema_version": "openadapt.production-release-tag-binding/v1",
         "admission_reference": reference,
         "admission_reference_sha256": admission_reference_digest(reference),
-        "artifact_inventory_sha256": artifact_inventory_sha256,
+        "artifact_inventory_sha256": local_digest,
     }
 
 
@@ -1134,7 +1206,9 @@ def _parser() -> argparse.ArgumentParser:
     staging.add_argument("--github-output", type=Path)
     tag_binding = commands.add_parser("tag-binding")
     tag_binding.add_argument("--admission-reference", type=Path, required=True)
-    tag_binding.add_argument("--artifact-inventory-sha256", required=True)
+    tag_binding.add_argument("--artifact-inventory", type=Path, required=True)
+    tag_binding.add_argument("--version", required=True)
+    tag_binding.add_argument("--verified-artifact-inventory-sha256", required=True)
     tag_binding.add_argument("--output", type=Path, required=True)
     validate_binding = commands.add_parser("validate-tag-binding")
     validate_binding.add_argument("--file", type=Path, required=True)
@@ -1209,7 +1283,9 @@ def main() -> int:
         elif args.command == "tag-binding":
             value = build_tag_binding(
                 _load(args.admission_reference),
-                artifact_inventory_sha256=args.artifact_inventory_sha256,
+                _load(args.artifact_inventory),
+                version=args.version,
+                verified_artifact_inventory_sha256=(args.verified_artifact_inventory_sha256),
             )
             if args.output.exists():
                 raise ValueError("tag binding output already exists")

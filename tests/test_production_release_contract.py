@@ -16,6 +16,7 @@ from scripts.production_release_contract import (
     REPOSITORY,
     REPOSITORY_ID,
     admission_reference_digest,
+    artifact_inventory_digest,
     artifact_specs,
     build_artifact_inventory,
     build_platform_verification,
@@ -583,11 +584,21 @@ def test_bound_release_reuses_admitted_draft_id_and_exact_bytes(tmp_path: Path) 
         )
 
 
-def test_annotated_tag_binding_is_exact_canonical_json_plus_one_lf() -> None:
+def test_annotated_tag_binding_is_exact_canonical_json_plus_one_lf(
+    tmp_path: Path,
+) -> None:
     reference = _admission_reference()
-    inventory_digest = "sha256:" + "1" * 64
+    release = tmp_path / "release"
+    _materialize_release(release)
+    inventory = build_artifact_inventory(release, version=VERSION)
+    inventory_digest = artifact_inventory_digest(inventory, version=VERSION)
 
-    binding = build_tag_binding(reference, artifact_inventory_sha256=inventory_digest)
+    binding = build_tag_binding(
+        reference,
+        inventory,
+        version=VERSION,
+        verified_artifact_inventory_sha256=inventory_digest,
+    )
     raw = tag_binding_bytes(binding)
 
     assert binding["schema_version"] == "openadapt.production-release-tag-binding/v1"
@@ -609,6 +620,14 @@ def test_annotated_tag_binding_is_exact_canonical_json_plus_one_lf() -> None:
     ):
         with pytest.raises(ValueError):
             validate_tag_binding_bytes(changed)
+
+    with pytest.raises(ValueError, match="differs from local"):
+        build_tag_binding(
+            reference,
+            inventory,
+            version=VERSION,
+            verified_artifact_inventory_sha256="sha256:" + "0" * 64,
+        )
 
 
 def test_platform_verification_json_schema_is_present_and_closed() -> None:
