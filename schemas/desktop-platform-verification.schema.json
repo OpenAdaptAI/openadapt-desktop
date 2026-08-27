@@ -41,6 +41,7 @@
       "then": {
         "properties": {
           "architecture": {"const": "x86_64"},
+          "artifacts": {"$ref": "#/$defs/linuxArtifacts"},
           "verification": {"$ref": "#/$defs/linuxVerification"}
         }
       }
@@ -58,7 +59,36 @@
       "then": {
         "properties": {
           "architecture": {"const": "x86_64"},
+          "artifacts": {"$ref": "#/$defs/windowsArtifacts"},
           "verification": {"$ref": "#/$defs/windowsVerification"}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "platform": {"const": "macos"},
+          "architecture": {"const": "arm64"}
+        },
+        "required": ["platform", "architecture"]
+      },
+      "then": {
+        "properties": {
+          "artifacts": {"$ref": "#/$defs/macosArm64Artifacts"}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "platform": {"const": "macos"},
+          "architecture": {"const": "x86_64"}
+        },
+        "required": ["platform", "architecture"]
+      },
+      "then": {
+        "properties": {
+          "artifacts": {"$ref": "#/$defs/macosX8664Artifacts"}
         }
       }
     }
@@ -107,6 +137,122 @@
         "media_type": {"type": "string", "minLength": 3}
       }
     },
+    "linuxArtifacts": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "prefixItems": [
+        {
+          "allOf": [
+            {"$ref": "#/$defs/artifact"},
+            {
+              "properties": {
+                "name": {
+                  "pattern": "^OpenAdapt-Desktop-v[0-9]+\\.[0-9]+\\.[0-9]+-linux-x86_64\\.AppImage$"
+                },
+                "kind": {"const": "linux-appimage"},
+                "media_type": {"const": "application/vnd.appimage"}
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {"$ref": "#/$defs/artifact"},
+            {
+              "properties": {
+                "name": {
+                  "pattern": "^OpenAdapt-Desktop-v[0-9]+\\.[0-9]+\\.[0-9]+-linux-x86_64\\.deb$"
+                },
+                "kind": {"const": "linux-deb"},
+                "media_type": {"const": "application/vnd.debian.binary-package"}
+              }
+            }
+          ]
+        }
+      ],
+      "items": false
+    },
+    "macosArm64Artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1,
+      "prefixItems": [
+        {
+          "allOf": [
+            {"$ref": "#/$defs/artifact"},
+            {
+              "properties": {
+                "name": {
+                  "pattern": "^OpenAdapt-Desktop-v[0-9]+\\.[0-9]+\\.[0-9]+-macos-arm64\\.dmg$"
+                },
+                "kind": {"const": "macos-dmg-arm64"},
+                "media_type": {"const": "application/x-apple-diskimage"}
+              }
+            }
+          ]
+        }
+      ],
+      "items": false
+    },
+    "macosX8664Artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1,
+      "prefixItems": [
+        {
+          "allOf": [
+            {"$ref": "#/$defs/artifact"},
+            {
+              "properties": {
+                "name": {
+                  "pattern": "^OpenAdapt-Desktop-v[0-9]+\\.[0-9]+\\.[0-9]+-macos-x86_64\\.dmg$"
+                },
+                "kind": {"const": "macos-dmg-x86-64"},
+                "media_type": {"const": "application/x-apple-diskimage"}
+              }
+            }
+          ]
+        }
+      ],
+      "items": false
+    },
+    "windowsArtifacts": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "prefixItems": [
+        {
+          "allOf": [
+            {"$ref": "#/$defs/artifact"},
+            {
+              "properties": {
+                "name": {
+                  "pattern": "^OpenAdapt-Desktop-v[0-9]+\\.[0-9]+\\.[0-9]+-windows-x86_64\\.msi$"
+                },
+                "kind": {"const": "windows-msi"},
+                "media_type": {"const": "application/x-msi"}
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {"$ref": "#/$defs/artifact"},
+            {
+              "properties": {
+                "name": {
+                  "pattern": "^OpenAdapt-Desktop-v[0-9]+\\.[0-9]+\\.[0-9]+-windows-x86_64-setup\\.exe$"
+                },
+                "kind": {"const": "windows-nsis"},
+                "media_type": {"const": "application/vnd.microsoft.portable-executable"}
+              }
+            }
+          ]
+        }
+      ],
+      "items": false
+    },
     "build": {
       "type": "object",
       "additionalProperties": false,
@@ -139,7 +285,10 @@
         "install_verified": {"const": true},
         "launch_verified": {"const": true},
         "uninstall_verified": {"const": true},
-        "embedded_flow_version": {"type": "string", "minLength": 1}
+        "embedded_flow_version": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+        }
       }
     },
     "macosVerification": {
@@ -160,7 +309,7 @@
           ],
           "properties": {
             "status": {"const": "valid"},
-            "team_id": {"type": "string", "minLength": 1},
+            "team_id": {"type": "string", "pattern": "^[A-Z0-9]{10}$"},
             "signer_identity_sha256": {"$ref": "#/$defs/digest"},
             "designated_requirement_sha256": {"$ref": "#/$defs/digest"},
             "hardened_runtime": {"const": true}

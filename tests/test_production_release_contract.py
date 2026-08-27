@@ -388,6 +388,16 @@ def test_platform_verification_rejects_unbound_or_false_evidence() -> None:
     with pytest.raises(ValueError, match="artifact binding"):
         validate_platform_verification(invalid_size, version=VERSION)
 
+    invalid_flow = _document("linux", "x86_64")
+    invalid_flow["build"]["embedded_flow_version"] = "latest"
+    with pytest.raises(ValueError, match="embedded Flow version"):
+        validate_platform_verification(invalid_flow, version=VERSION)
+
+    invalid_team = _document("macos", "arm64")
+    invalid_team["verification"]["signature"]["team_id"] = "unknown"
+    with pytest.raises(ValueError, match="signature verification"):
+        validate_platform_verification(invalid_team, version=VERSION)
+
 
 def test_platform_verification_is_closed() -> None:
     document = _document("macos", "arm64")
@@ -783,3 +793,17 @@ def test_platform_verification_json_schema_is_present_and_closed() -> None:
     assert schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
     assert schema["additionalProperties"] is False
     assert schema["properties"]["schema_version"]["const"] == (PLATFORM_VERIFICATION_SCHEMA)
+    definitions = schema["$defs"]
+    assert definitions["build"]["properties"]["embedded_flow_version"]["pattern"] == (
+        "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    )
+    assert (
+        definitions["macosVerification"]["properties"]["signature"]["properties"]["team_id"][
+            "pattern"
+        ]
+        == "^[A-Z0-9]{10}$"
+    )
+    assert definitions["linuxArtifacts"]["minItems"] == 2
+    assert definitions["macosArm64Artifacts"]["maxItems"] == 1
+    assert definitions["macosX8664Artifacts"]["maxItems"] == 1
+    assert definitions["windowsArtifacts"]["minItems"] == 2

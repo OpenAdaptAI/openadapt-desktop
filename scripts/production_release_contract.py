@@ -34,6 +34,7 @@ COMMIT = re.compile(r"^[0-9a-f]{40}$")
 DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 DECIMAL_ID = re.compile(r"^[1-9][0-9]*$")
 TIMESTAMP = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
+APPLE_TEAM_ID = re.compile(r"^[A-Z0-9]{10}$")
 ARCHITECTURES = {
     "linux": {"x86_64"},
     "macos": {"arm64", "x86_64"},
@@ -1062,7 +1063,7 @@ def _validate_build(value: Any, *, source_commit: str) -> dict[str, Any]:
     ):
         raise ValueError("platform verification run_attempt is invalid")
     flow_version = build.get("embedded_flow_version")
-    if not isinstance(flow_version, str) or not flow_version:
+    if not isinstance(flow_version, str) or VERSION.fullmatch(flow_version) is None:
         raise ValueError("platform verification embedded Flow version is invalid")
     return build
 
@@ -1144,7 +1145,7 @@ def _validate_native_verification(
             signature["status"] != "valid"
             or signature["hardened_runtime"] is not True
             or not isinstance(signature["team_id"], str)
-            or not signature["team_id"]
+            or APPLE_TEAM_ID.fullmatch(signature["team_id"]) is None
         ):
             raise ValueError("macOS signature verification result differs")
         _valid_digest(signature["signer_identity_sha256"], "macOS signer identity")
