@@ -28,6 +28,23 @@ it("resumes the durable first workflow at its exact user stage", () => {
     target: { backend: "web", url: "https://example.test" },
     firstWorkflow: true,
     firstRunComplete: false,
+    firstRunLocked: false,
+  });
+  expect(routeForFirstWorkflow(state("executing"))).toEqual({
+    name: "watch",
+    id: "workflow-1",
+    target: { backend: "web", url: "https://example.test" },
+    firstWorkflow: true,
+    firstRunComplete: false,
+    firstRunLocked: true,
+  });
+  expect(routeForFirstWorkflow(state("reconciliation"))).toEqual({
+    name: "watch",
+    id: "workflow-1",
+    target: { backend: "web", url: "https://example.test" },
+    firstWorkflow: true,
+    firstRunComplete: false,
+    firstRunLocked: true,
   });
   expect(routeForFirstWorkflow(state("result"))).toEqual({
     name: "watch",
@@ -35,6 +52,7 @@ it("resumes the durable first workflow at its exact user stage", () => {
     target: { backend: "web", url: "https://example.test" },
     firstWorkflow: true,
     firstRunComplete: true,
+    firstRunLocked: false,
   });
   expect(routeForFirstWorkflow(state("qualification"))).toEqual({
     name: "qualify",

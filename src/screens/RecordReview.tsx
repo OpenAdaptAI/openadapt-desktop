@@ -38,7 +38,7 @@ interface RecordingResult {
 
 interface CompileProgress {
   capture_id?: string;
-  state: "compiling" | "compiled" | "failed";
+  state: "compiling" | "compiled" | "failed" | "review_failed";
   bundle_id?: string;
   error?: string;
   recording_retained?: boolean;
@@ -194,7 +194,7 @@ export function RecordReview({
         if (next.state === "compiling") {
           setCompileError(null);
           setPhase("compiling");
-        } else if (next.state === "failed") {
+        } else if (next.state === "failed" || next.state === "review_failed") {
           setCompileError(
             next.error ||
               "OpenAdapt could not compile this recording. The raw recording was retained.",

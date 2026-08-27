@@ -872,6 +872,7 @@ def admit_first_supervised_replay(
     workflow_id: str,
     expected_project_revision: int,
     expected_bundle_content_digest: str,
+    expected_environment_digest: str,
     bundle_key: str | None = None,
 ) -> dict[str, Any]:
     """Admit one exact reviewed read-only bundle for supervised replay.
@@ -901,6 +902,17 @@ def admit_first_supervised_replay(
         raise QualificationError(
             "The reviewed workflow digest is invalid. Open the current review before running it."
         )
+    if (
+        not isinstance(expected_environment_digest, str)
+        or len(expected_environment_digest) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in expected_environment_digest
+        )
+    ):
+        raise QualificationError(
+            "The reviewed application target is invalid. Open the current review before running it."
+        )
 
     api = _flow_api()
     workflow = _load(bundle_dir, key=bundle_key)
@@ -916,6 +928,11 @@ def admit_first_supervised_replay(
     ):
         raise QualificationError(
             "The workflow changed after review. Open the current review before running it."
+        )
+    if project.environment.environment_digest != expected_environment_digest:
+        raise QualificationError(
+            "The application target changed after recording. Use the recorded "
+            "target for the first supervised run."
         )
 
     steps = list(api["iter_workflow_steps"](workflow))
@@ -943,6 +960,7 @@ def admit_first_supervised_replay(
         "workflow_id": workflow_id,
         "project_revision": project.revision,
         "bundle_content_digest": manifest.content_digest,
+        "environment_digest": project.environment.environment_digest,
     }
 
 

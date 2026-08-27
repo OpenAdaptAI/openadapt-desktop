@@ -733,6 +733,8 @@ class EngineDispatcher:
         allowed_from = {
             "review": {"qualification"},
             "qualification": {"review", "qualification"},
+            "executing": {"review"},
+            "reconciliation": {"review"},
             "result": {"qualification_after_result"},
             "qualification_after_result": {
                 "qualification_after_result",
@@ -993,19 +995,23 @@ class EngineDispatcher:
             "rdp": "RDP application",
             "citrix": "Citrix application",
         }[parsed_target.backend]
-        target_json = json.dumps(
-            parsed_target.model_dump(mode="json"),
-            sort_keys=True,
-            separators=(",", ":"),
-        )
         return initialize_first_replay_review(
             bundle_path,
             workflow_id=workflow_id,
             target_kind=parsed_target.backend,
             application=application,
-            environment_digest=hashlib.sha256(target_json.encode("utf-8")).hexdigest(),
+            environment_digest=self._canonical_target_digest(parsed_target),
             bundle_key=self._qualification_bundle_key(workflow_id),
         )
+
+    @staticmethod
+    def _canonical_target_digest(target: Any) -> str:
+        target_json = json.dumps(
+            target.model_dump(mode="json"),
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(target_json.encode("utf-8")).hexdigest()
 
     def replay_workflow(self, **params: Any) -> dict:
         """Replay a bundle locally and return a ``RunReport``-shaped dict."""
@@ -1035,12 +1041,15 @@ class EngineDispatcher:
         active_first_review = bool(
             first_state
             and first_state.get("workflow_id") == workflow_id
-            and first_state.get("stage") in {"review", "qualification"}
+            and first_state.get("stage")
+            in {"review", "qualification", "executing", "reconciliation"}
         )
         if active_first_review and not first_supervised:
             return self._pre_action_refusal(
                 "Finish this workflow's first supervised run before using the normal run controls."
             )
+        target = None
+        deployment_config = None
         if first_supervised:
             if not (
                 first_state
@@ -1060,6 +1069,19 @@ class EngineDispatcher:
                     "The workflow changed after review. Open the current review before running it."
                 )
             try:
+                target, deployment_config = self._execution_target(params)
+            except ValueError as exc:
+                return self._pre_action_refusal(str(exc))
+            if target is None:
+                return self._pre_action_refusal(
+                    "The recorded application target is required for the first supervised run."
+                )
+            if deployment_config is not None:
+                return self._pre_action_refusal(
+                    "Use the recorded application target without an advanced "
+                    "deployment config for the first supervised run."
+                )
+            try:
                 from engine.qualification import (
                     QualificationError,
                     admit_first_supervised_replay,
@@ -1072,6 +1094,7 @@ class EngineDispatcher:
                     expected_bundle_content_digest=admission.get(
                         "bundle_content_digest"
                     ),
+                    expected_environment_digest=self._canonical_target_digest(target),
                     bundle_key=self._qualification_bundle_key(str(workflow_id)),
                 )
             except QualificationError as exc:
@@ -1082,10 +1105,11 @@ class EngineDispatcher:
                     "Desktop could not verify the current workflow review. "
                     "Open it again before running."
                 )
-        try:
-            target, deployment_config = self._execution_target(params)
-        except ValueError as exc:
-            return self._pre_action_refusal(str(exc))
+        else:
+            try:
+                target, deployment_config = self._execution_target(params)
+            except ValueError as exc:
+                return self._pre_action_refusal(str(exc))
         if target is not None:
             from engine.capabilities import CapabilityError, ensure_backend_capability
 
@@ -1176,6 +1200,15 @@ class EngineDispatcher:
                         "total_steps": self._workflow_step_count(workflow_id),
                     },
                 )
+                if first_supervised:
+                    try:
+                        self._mark_first_workflow_execution_started(
+                            str(workflow_id)
+                        )
+                    except Exception:
+                        return self._pre_action_refusal(
+                            "Desktop could not save the supervised run state."
+                        )
                 try:
                     invocation_started = True
                     if run:
@@ -1542,17 +1575,35 @@ class EngineDispatcher:
         return {"ok": True, "report": report}
 
     def _mark_first_workflow_result(self, workflow_id: str, outcome: str) -> None:
-        if outcome not in {"VERIFIED", "COMPLETED_UNVERIFIED", "success"}:
+        state = self.services.db.get_first_workflow_state()
+        if (
+            state is None
+            or state.get("stage") != "executing"
+            or state.get("workflow_id") != workflow_id
+        ):
             return
+        self.services.db.set_first_workflow_state(
+            stage=(
+                "result"
+                if outcome in {"VERIFIED", "COMPLETED_UNVERIFIED", "success"}
+                else "reconciliation"
+            ),
+            capture_id=state.get("capture_id"),
+            workflow_id=workflow_id,
+            target=state.get("target"),
+            task=str(state.get("task") or ""),
+        )
+
+    def _mark_first_workflow_execution_started(self, workflow_id: str) -> None:
         state = self.services.db.get_first_workflow_state()
         if (
             state is None
             or state.get("stage") != "review"
             or state.get("workflow_id") != workflow_id
         ):
-            return
+            raise ValueError("The first workflow review is no longer active")
         self.services.db.set_first_workflow_state(
-            stage="result",
+            stage="executing",
             capture_id=state.get("capture_id"),
             workflow_id=workflow_id,
             target=state.get("target"),
@@ -2084,11 +2135,21 @@ class EngineDispatcher:
             )
             if replace_first_replay_draft:
                 first_state = self.services.db.get_first_workflow_state()
+                candidate = self.services.db.get_bundle(workflow_id)
+                same_completed_capture = bool(
+                    first_state
+                    and first_state.get("stage") == "complete"
+                    and candidate
+                    and candidate.get("capture_id") == first_state.get("capture_id")
+                )
                 if not (
                     first_state
-                    and first_state.get("workflow_id") == workflow_id
                     and first_state.get("stage")
                     in {"result", "qualification_after_result", "complete"}
+                    and (
+                        first_state.get("workflow_id") == workflow_id
+                        or same_completed_capture
+                    )
                 ):
                     raise ValueError(
                         "Save the first supervised run before setting the "

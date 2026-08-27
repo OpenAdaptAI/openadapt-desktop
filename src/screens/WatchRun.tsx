@@ -137,9 +137,11 @@ export function WatchRun({
   initialTarget,
   firstWorkflow = false,
   firstRunComplete = false,
+  firstRunLocked = false,
   onPersistencePendingChange,
   onRunningChange,
   onFirstWorkflowStateChange,
+  onReconcile,
   onQualify,
   onTeach,
 }: {
@@ -147,9 +149,11 @@ export function WatchRun({
   initialTarget?: ExecutionTarget;
   firstWorkflow?: boolean;
   firstRunComplete?: boolean;
+  firstRunLocked?: boolean;
   onPersistencePendingChange?: (pending: boolean) => void;
   onRunningChange?: (running: boolean) => void;
   onFirstWorkflowStateChange?: () => void;
+  onReconcile?: (id: string) => void;
   onQualify: (
     id: string,
     afterSavedResult?: boolean,
@@ -163,6 +167,7 @@ export function WatchRun({
   const [reviewedAuthority, setReviewedAuthority] = useState<string | null>(null);
   const [completedFirstRun, setCompletedFirstRun] = useState(firstRunComplete);
   const [running, setRunning] = useState(false);
+  const [commandInFlight, setCommandInFlight] = useState(false);
   const [runtime, setRuntime] = useState<BrowserRuntimeStatus | null>(null);
   const [runIssue, setRunIssue] = useState<RunIssue | null>(null);
   const [persistenceIssue, setPersistenceIssue] = useState("");
@@ -175,6 +180,7 @@ export function WatchRun({
   const reportGenerationRef = useRef(0);
   const reviewGenerationRef = useRef(0);
   const fieldPrefix = useId();
+  const executionBusy = running || commandInFlight;
 
   async function load(generation: number) {
     const next = await engineTry<RunReport | null>(
@@ -243,6 +249,7 @@ export function WatchRun({
 
   async function execute(mode: ExecuteMode) {
     reportGenerationRef.current += 1;
+    setCommandInFlight(true);
     setRunning(true);
     setRunIssue(null);
     setPersistenceIssue("");
@@ -315,6 +322,7 @@ export function WatchRun({
         preActionRefusal: false,
       });
     } finally {
+      setCommandInFlight(false);
       setRunning(false);
     }
   }
@@ -383,9 +391,9 @@ export function WatchRun({
   }, [firstRunPersistencePending, onPersistencePendingChange]);
 
   useEffect(() => {
-    onRunningChange?.(running);
+    onRunningChange?.(executionBusy);
     return () => onRunningChange?.(false);
-  }, [onRunningChange, running]);
+  }, [executionBusy, onRunningChange]);
 
   return (
     <div className="content">
@@ -402,12 +410,12 @@ export function WatchRun({
         </div>
         {!firstWorkflow && (
           <div className="row">
-            <Button disabled={running} onClick={() => execute("replay")}>
-              {running ? "Running…" : "Replay"}
+            <Button disabled={executionBusy} onClick={() => execute("replay")}>
+              {executionBusy ? "Running…" : "Replay"}
             </Button>
             <Button
               variant="primary"
-              disabled={running}
+              disabled={executionBusy}
               onClick={() => execute("run")}
             >
               Run with safety gates
@@ -529,20 +537,29 @@ export function WatchRun({
       <Card>
         <CardHead
           eyebrow="Target"
-          title="Where should this workflow run?"
-          sub="Choose the application surface. OpenAdapt uses the same compiled workflow and fail-closed verification on every target."
+          title={
+            firstWorkflow
+              ? "Recorded application target"
+              : "Where should this workflow run?"
+          }
+          sub={
+            firstWorkflow
+              ? "The supervised run uses the same application target as the recording."
+              : "Choose the application surface. OpenAdapt uses the same compiled workflow and fail-closed verification on every target."
+          }
         />
         <ExecutionTargetForm
           target={target}
           onChange={(next) => {
             setTarget(next);
             setRuntime(null);
+            setReviewedAuthority(null);
           }}
           idPrefix={fieldPrefix}
-          disabled={running}
+          disabled={executionBusy || firstWorkflow}
         />
 
-        <details className="advanced-target">
+        {!firstWorkflow && <details className="advanced-target">
           <summary>Advanced deployment details</summary>
           <div className="advanced-target-body">
             <Field
@@ -555,7 +572,7 @@ export function WatchRun({
                 id={`${fieldPrefix}-deployment-config`}
                 className="input mono"
                 value={deploymentConfig}
-                disabled={running}
+                disabled={executionBusy}
                 aria-describedby={`${fieldPrefix}-deployment-config-hint ${fieldPrefix}-deployment-config-note`}
                 onChange={(event) => setDeploymentConfig(event.target.value)}
                 placeholder="/path/to/deployment.yaml"
@@ -571,20 +588,38 @@ export function WatchRun({
               out of Desktop logs.
             </p>
           </div>
-        </details>
-        {firstWorkflow && firstReplaySafe && (
+        </details>}
+        {firstWorkflow && !completedFirstRun && !firstRunLocked && firstReplaySafe && (
           <div style={{ marginTop: "var(--space-5)" }}>
             <p className="page-sub">
               Keep the target app visible and watch each step.
             </p>
             <Button
               variant="primary"
-              disabled={running || !reviewed}
+              disabled={executionBusy || !reviewed}
               onClick={() => execute("replay")}
             >
-              {running ? "Running…" : "Run once while I watch"}
+              {executionBusy ? "Running…" : "Run once while I watch"}
             </Button>
           </div>
+        )}
+        {firstWorkflow && firstRunLocked && (
+          <Callout tone="warn" title="Check the target before another attempt">
+            The prior run might have reached the application. Check the target
+            and restore the test state if it changed. Desktop won't dispatch
+            this workflow again until you confirm that check.
+            <div style={{ marginTop: "var(--space-3)" }}>
+              <Button
+                size="sm"
+                onClick={() => {
+                  setReviewedAuthority(null);
+                  onReconcile?.(workflowId);
+                }}
+              >
+                I checked the target. Review again
+              </Button>
+            </div>
+          </Callout>
         )}
       </Card>
 

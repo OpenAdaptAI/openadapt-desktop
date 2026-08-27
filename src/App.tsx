@@ -1,7 +1,7 @@
 // Product shell + routed screens, gated by first-run/auth.
 // The top shell uses the same OpenAdapt | Product pattern as Cloud. It also
 // carries the local engine, recording, sync, and attention state.
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   CMD,
   EVT,
@@ -57,6 +57,7 @@ type Route =
       target?: ExecutionTarget;
       firstWorkflow?: boolean;
       firstRunComplete?: boolean;
+      firstRunLocked?: boolean;
     }
   | { name: "teach"; id: string }
   | { name: "runner" }
@@ -102,7 +103,10 @@ export function routeForFirstWorkflow(
     };
   }
   if (
-    (state.stage === "review" || state.stage === "result") &&
+    (state.stage === "review" ||
+      state.stage === "executing" ||
+      state.stage === "reconciliation" ||
+      state.stage === "result") &&
     state.workflow_id
   ) {
     return {
@@ -111,6 +115,8 @@ export function routeForFirstWorkflow(
       target: state.target ?? undefined,
       firstWorkflow: true,
       firstRunComplete: state.stage === "result",
+      firstRunLocked:
+        state.stage === "executing" || state.stage === "reconciliation",
     };
   }
   return null;
@@ -167,9 +173,12 @@ export default function App() {
   const [firstRunPersistencePending, setFirstRunPersistencePending] =
     useState(false);
   const [firstWorkflowRunning, setFirstWorkflowRunning] = useState(false);
+  const [workflowCompiling, setWorkflowCompiling] = useState(false);
   const [firstWorkflowState, setFirstWorkflowState] =
     useState<FirstWorkflowState | null>(null);
+  const firstWorkflowStateRef = useRef<FirstWorkflowState | null>(null);
   const [firstWorkflowStageError, setFirstWorkflowStageError] = useState("");
+  firstWorkflowStateRef.current = firstWorkflowState;
 
   async function saveFirstWorkflowStage(
     stage:
@@ -253,7 +262,34 @@ export default function App() {
         setRecording(!!s?.recording),
       ),
       onEngineEvent(EVT.RECORDING_STARTED, () => setRecording(true)),
-      onEngineEvent(EVT.RECORDING_STOPPED, () => setRecording(false)),
+      onEngineEvent(EVT.RECORDING_STOPPED, () => {
+        setRecording(false);
+        if (firstWorkflowStateRef.current?.stage === "record") {
+          setWorkflowCompiling(true);
+        }
+      }),
+      onEngineEvent(
+        EVT.COMPILE_PROGRESS,
+        (progress: { state?: string; bundle_id?: string }) => {
+          if (progress.state === "compiling") {
+            setWorkflowCompiling(true);
+            return;
+          }
+          if (
+            progress.state === "compiled" ||
+            progress.state === "failed" ||
+            progress.state === "review_failed"
+          ) {
+            setWorkflowCompiling(false);
+          }
+          if (progress.state === "compiled" && progress.bundle_id) {
+            void refreshFirstWorkflowState().then((state) => {
+              const resumed = routeForFirstWorkflow(state);
+              if (resumed) setRoute(resumed);
+            });
+          }
+        },
+      ),
       onEngineEvent(EVT.SYNC_STATE, (s: SyncState) => setSync(s)),
       onEngineEvent(EVT.BREAK_COUNT, (d: { count: number }) =>
         setBreaks(d?.count ?? 0),
@@ -377,14 +413,19 @@ export default function App() {
           ? "warn"
           : "ok";
   const navigationLocked =
-    recording || firstWorkflowRunning || firstRunPersistencePending;
+    recording ||
+    workflowCompiling ||
+    firstWorkflowRunning ||
+    firstRunPersistencePending;
   const navigationLockTitle = recording
     ? "Stop and save this recording before you leave."
-    : firstWorkflowRunning
-      ? "Keep the supervised run open until it stops."
-      : firstRunPersistencePending
-        ? "Save this first run before you leave the result."
-        : undefined;
+    : workflowCompiling
+      ? "Keep setup open while Desktop compiles the recording."
+      : firstWorkflowRunning
+        ? "Keep the supervised run open until it stops."
+        : firstRunPersistencePending
+          ? "Save this first run before you leave the result."
+          : undefined;
 
   return (
     <>
@@ -572,10 +613,23 @@ export default function App() {
             initialTarget={route.target}
             firstWorkflow={route.firstWorkflow}
             firstRunComplete={route.firstRunComplete}
+            firstRunLocked={route.firstRunLocked}
             onPersistencePendingChange={setFirstRunPersistencePending}
             onRunningChange={setFirstWorkflowRunning}
             onFirstWorkflowStateChange={() => {
-              void refreshFirstWorkflowState();
+              void refreshFirstWorkflowState().then((state) => {
+                const resumed = routeForFirstWorkflow(state);
+                if (resumed) setRoute(resumed);
+              });
+            }}
+            onReconcile={async (id) => {
+              if (!(await saveFirstWorkflowStage("review", id))) return;
+              setRoute({
+                name: "watch",
+                id,
+                target: route.target,
+                firstWorkflow: true,
+              });
             }}
             onQualify={async (id, afterSavedResult = false, target) => {
               if (route.firstWorkflow) {

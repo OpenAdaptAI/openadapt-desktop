@@ -1,12 +1,22 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act } from "react";
 import { afterEach, expect, it, vi } from "vitest";
+
+const appEventMocks = vi.hoisted(() => ({
+  handlers: new Map<string, (payload: unknown) => void>(),
+}));
 
 vi.mock("./lib/engine", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./lib/engine")>();
   return {
     ...actual,
     engineTry: vi.fn(),
-    onEngineEvent: vi.fn(async () => () => {}),
+    onEngineEvent: vi.fn(
+      (event: string, handler: (payload: unknown) => void) => {
+        appEventMocks.handlers.set(event, handler);
+        return Promise.resolve(() => appEventMocks.handlers.delete(event));
+      },
+    ),
     sidecarRunning: vi.fn(async () => true),
   };
 });
@@ -55,10 +65,12 @@ vi.mock("./screens/Qualification", () => ({
 }));
 
 import App from "./App";
-import { CMD, engineTry } from "./lib/engine";
+import { CMD, engineTry, EVT } from "./lib/engine";
+import type { FirstWorkflowState } from "./lib/types";
 
 afterEach(() => {
   cleanup();
+  appEventMocks.handlers.clear();
   vi.clearAllMocks();
 });
 
@@ -205,5 +217,61 @@ it("keeps navigation locked while the supervised replay is running", async () =>
       (screen.getByRole("button", { name: "Workflows" }) as HTMLButtonElement)
         .disabled,
     ).toBe(true),
+  );
+});
+
+it("keeps navigation locked from recording stop through review initialization", async () => {
+  let firstState: FirstWorkflowState = {
+    stage: "record",
+    capture_id: "capture-1",
+    workflow_id: null,
+    target: { backend: "web", url: "https://example.test" },
+    task: "Read one test record",
+    updated_at: "2026-08-27T00:00:00Z",
+  };
+  vi.mocked(engineTry).mockImplementation(async (command) => {
+    if (command === CMD.GET_AUTH_STATUS) return { authenticated: true };
+    if (command === CMD.GET_WORKFLOWS) return [];
+    if (command === CMD.GET_FIRST_WORKFLOW_STATE) {
+      return { ok: true, state: firstState };
+    }
+    if (command === CMD.GET_NEEDS_ATTENTION) {
+      return { count: 0, open_halts: 0, failed_runs: 0 };
+    }
+    if (command === CMD.GET_SYNC_STATE) return { state: "synced", queued: 0 };
+    return null;
+  });
+
+  render(<App />);
+  expect(await screen.findByText("First workflow recording")).toBeTruthy();
+  await waitFor(() => {
+    expect(appEventMocks.handlers.has(EVT.RECORDING_STOPPED)).toBe(true);
+    expect(appEventMocks.handlers.has(EVT.COMPILE_PROGRESS)).toBe(true);
+  });
+
+  act(() => {
+    appEventMocks.handlers.get(EVT.RECORDING_STOPPED)?.({
+      capture_id: "capture-1",
+    });
+  });
+  const workflows = screen.getByRole("button", { name: "Workflows" });
+  expect((workflows as HTMLButtonElement).disabled).toBe(true);
+
+  firstState = {
+    ...firstState,
+    stage: "review",
+    workflow_id: "workflow-1",
+  };
+  act(() => {
+    appEventMocks.handlers.get(EVT.COMPILE_PROGRESS)?.({
+      capture_id: "capture-1",
+      state: "compiled",
+      bundle_id: "workflow-1",
+    });
+  });
+
+  expect(await screen.findByText("First supervised replay")).toBeTruthy();
+  await waitFor(() =>
+    expect((workflows as HTMLButtonElement).disabled).toBe(false),
   );
 });

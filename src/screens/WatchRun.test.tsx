@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
-import { CMD, engineInvoke, engineTry } from "../lib/engine";
+import { CMD, engineInvoke, engineTry, EVT } from "../lib/engine";
 import type {
   ExecutionResponse,
   QualificationProject,
@@ -8,18 +8,28 @@ import type {
 } from "../lib/types";
 import { WatchRun } from "./WatchRun";
 
+const watchEventMocks = vi.hoisted(() => ({
+  handlers: new Map<string, (payload: unknown) => void>(),
+}));
+
 vi.mock("../lib/engine", async (importOriginal) => {
   const original = await importOriginal<typeof import("../lib/engine")>();
   return {
     ...original,
     engineInvoke: vi.fn(),
     engineTry: vi.fn(),
-    onEngineEvent: vi.fn(() => Promise.resolve(() => {})),
+    onEngineEvent: vi.fn(
+      (event: string, handler: (payload: unknown) => void) => {
+        watchEventMocks.handlers.set(event, handler);
+        return Promise.resolve(() => watchEventMocks.handlers.delete(event));
+      },
+    ),
   };
 });
 
 afterEach(() => {
   cleanup();
+  watchEventMocks.handlers.clear();
   vi.clearAllMocks();
 });
 
@@ -321,6 +331,84 @@ it("requires the first user to review the compiled workflow before a supervised 
     true,
     { backend: "web", url: "https://example.test" },
   );
+});
+
+it("keeps the supervised run locked until its command returns", async () => {
+  const qualification = firstWorkflowReview();
+  let finishRun!: (report: ExecutionResponse) => void;
+  const pendingRun = new Promise<ExecutionResponse>((resolve) => {
+    finishRun = resolve;
+  });
+  vi.mocked(engineTry).mockImplementation(async (command) =>
+    command === CMD.GET_QUALIFICATION ? qualification : null,
+  );
+  vi.mocked(engineInvoke).mockReturnValue(pendingRun);
+  const onRunningChange = vi.fn();
+
+  render(
+    <WatchRun
+      workflowId="workflow-1"
+      initialTarget={{ backend: "web", url: "https://example.test" }}
+      firstWorkflow
+      onRunningChange={onRunningChange}
+      onQualify={() => {}}
+      onTeach={() => {}}
+    />,
+  );
+
+  fireEvent.click(await screen.findByRole("checkbox"));
+  fireEvent.click(
+    screen.getByRole("button", { name: "Run once while I watch" }),
+  );
+  await waitFor(() => expect(onRunningChange).toHaveBeenLastCalledWith(true));
+  await waitFor(() => expect(watchEventMocks.handlers.has(EVT.REPLAY_PROGRESS)).toBe(true));
+
+  act(() => {
+    watchEventMocks.handlers.get(EVT.REPLAY_PROGRESS)?.({
+      workflow_id: "workflow-1",
+      state: "unknown",
+      backend: "web",
+    });
+  });
+  expect(onRunningChange).toHaveBeenLastCalledWith(true);
+
+  await act(async () => {
+    finishRun(preciseReport("VERIFIED"));
+    await pendingRun;
+  });
+  await waitFor(() => expect(onRunningChange).toHaveBeenLastCalledWith(false));
+});
+
+it("requires a target check before an uncertain supervised replay can return to review", async () => {
+  vi.mocked(engineTry).mockImplementation(async (command) =>
+    command === CMD.GET_QUALIFICATION ? firstWorkflowReview() : null,
+  );
+  const onReconcile = vi.fn();
+
+  render(
+    <WatchRun
+      workflowId="workflow-1"
+      initialTarget={{ backend: "web", url: "https://example.test" }}
+      firstWorkflow
+      firstRunLocked
+      onReconcile={onReconcile}
+      onQualify={() => {}}
+      onTeach={() => {}}
+    />,
+  );
+
+  expect(
+    await screen.findByText("Check the target before another attempt"),
+  ).toBeTruthy();
+  expect(
+    screen.queryByRole("button", { name: "Run once while I watch" }),
+  ).toBeNull();
+  fireEvent.click(
+    screen.getByRole("button", {
+      name: "I checked the target. Review again",
+    }),
+  );
+  expect(onReconcile).toHaveBeenCalledWith("workflow-1");
 });
 
 it("routes an unreviewed or state-changing first action to qualification without replay", async () => {

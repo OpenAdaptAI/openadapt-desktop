@@ -74,8 +74,16 @@ def _first_supervised_bundle(path: Path, *, state_changing: bool) -> dict:
         target_kind="web",
         application="Reference app",
         application_version="1",
-        environment_label="reference-test-environment",
+        environment_digest=_target_digest({"backend": "web"}),
         required_capabilities=[],
+    )
+
+
+def _target_digest(target: dict) -> str:
+    from engine.targets import ExecutionTarget
+
+    return EngineDispatcher._canonical_target_digest(
+        ExecutionTarget.model_validate(target)
     )
 
 
@@ -724,6 +732,7 @@ class TestLibraryCommands:
             "replay_first_workflow",
             {
                 "workflow_id": "bnd1",
+                "target": {"backend": "web"},
                 "admission": {
                     "workflow_id": "bnd1",
                     "project_revision": review["project"]["revision"],
@@ -773,6 +782,7 @@ class TestLibraryCommands:
             "replay_first_workflow",
             {
                 "workflow_id": "bnd1",
+                "target": {"backend": "web"},
                 "admission": {
                     "workflow_id": "bnd1",
                     "project_revision": review["project"]["revision"],
@@ -784,6 +794,123 @@ class TestLibraryCommands:
         assert result["pre_action_refusal"] is True
         assert result["error"].startswith("The workflow changed after review")
         assert bridge.replay_called is False
+
+    @pytest.mark.parametrize(
+        "extra_params",
+        [
+            {"target": {"backend": "web", "url": "https://other.test"}},
+            {"target": {"backend": "web"}, "deployment_config": "config.yaml"},
+        ],
+    )
+    def test_first_supervised_replay_refuses_a_changed_execution_target(
+        self, deps, tmp_path: Path, extra_params: dict, monkeypatch
+    ) -> None:
+        disp, db, _events = deps
+        bundle = disp.config.data_dir / "bundles" / "bnd1"
+        review = _first_supervised_bundle(bundle, state_changing=False)
+        db.insert_bundle("bnd1", str(bundle), capture_id="cap1")
+        db.set_first_workflow_state(
+            stage="review",
+            capture_id="cap1",
+            workflow_id="bnd1",
+            target={"backend": "web"},
+            task="Inspect the test page",
+        )
+        if "deployment_config" in extra_params:
+            config = tmp_path / "config.yaml"
+            config.write_text("backend:\n  kind: web\n")
+            extra_params = {**extra_params, "deployment_config": str(config)}
+        monkeypatch.setattr(
+            "engine.capabilities.ensure_backend_capability",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("changed target must refuse before capability setup")
+            ),
+        )
+
+        class Bridge:
+            replay_called = False
+
+            def replay(self, *_args, **_kwargs):
+                self.replay_called = True
+                raise AssertionError("changed target must not reach Flow")
+
+        bridge = Bridge()
+        disp.services._flow_bridge = bridge
+        result = disp.dispatch(
+            "replay_first_workflow",
+            {
+                "workflow_id": "bnd1",
+                **extra_params,
+                "admission": {
+                    "workflow_id": "bnd1",
+                    "project_revision": review["project"]["revision"],
+                    "bundle_content_digest": review["graph"]["bundle"][
+                        "provenance"
+                    ]["content_digest"],
+                },
+            },
+        )
+
+        assert result["pre_action_refusal"] is True
+        assert bridge.replay_called is False
+
+    def test_uncertain_first_replay_requires_reconciliation_before_retry(
+        self, deps, monkeypatch
+    ) -> None:
+        disp, db, _events = deps
+        bundle = disp.config.data_dir / "bundles" / "bnd1"
+        review = _first_supervised_bundle(bundle, state_changing=False)
+        db.insert_bundle("bnd1", str(bundle), capture_id="cap1")
+        db.set_first_workflow_state(
+            stage="review",
+            capture_id="cap1",
+            workflow_id="bnd1",
+            target={"backend": "web"},
+            task="Inspect the test page",
+        )
+        monkeypatch.setattr(
+            "engine.capabilities.ensure_backend_capability",
+            lambda *_args, **_kwargs: None,
+        )
+
+        class Bridge:
+            replay_calls = 0
+
+            def ensure_browser_runtime(self, _progress) -> None:
+                return None
+
+            def replay(self, *_args, **_kwargs):
+                self.replay_calls += 1
+                raise RuntimeError("connection ended after dispatch")
+
+        bridge = Bridge()
+        disp.services._flow_bridge = bridge
+        params = {
+            "workflow_id": "bnd1",
+            "target": {"backend": "web"},
+            "admission": {
+                "workflow_id": "bnd1",
+                "project_revision": review["project"]["revision"],
+                "bundle_content_digest": review["graph"]["bundle"]["provenance"][
+                    "content_digest"
+                ],
+            },
+        }
+
+        first = disp.dispatch("replay_first_workflow", params)
+        second = disp.dispatch("replay_first_workflow", params)
+
+        assert first["outcome"] == "unknown"
+        assert first["persistence"]["state"] == "persisted"
+        assert db.get_first_workflow_state()["stage"] == "reconciliation"
+        assert second["pre_action_refusal"] is True
+        assert bridge.replay_calls == 1
+
+        reconciled = disp.dispatch(
+            "set_first_workflow_stage",
+            {"stage": "review", "workflow_id": "bnd1"},
+        )
+        assert reconciled["state"]["stage"] == "review"
 
     def test_first_supervised_replay_runs_an_exact_reviewed_read_only_bundle(
         self, deps, monkeypatch
@@ -823,6 +950,7 @@ class TestLibraryCommands:
             "replay_first_workflow",
             {
                 "workflow_id": "bnd1",
+                "target": {"backend": "web"},
                 "admission": {
                     "workflow_id": "bnd1",
                     "project_revision": review["project"]["revision"],
@@ -1012,6 +1140,53 @@ class TestLibraryCommands:
         assert "first supervised run" in result["error"]
         assert bridge.replay_called is False
         assert bridge.run_called is False
+
+    def test_completed_first_workflow_allows_exact_environment_on_draft_descendant(
+        self, deps
+    ) -> None:
+        flow_ir = pytest.importorskip("openadapt_flow.ir")
+
+        disp, db, _events = deps
+        descendant = disp.config.data_dir / "bundles" / "bnd2"
+        flow_ir.Workflow(
+            name="draft-descendant",
+            steps=[
+                flow_ir.Step(
+                    id="step-1",
+                    intent="Wait for the remote application",
+                    action=flow_ir.ActionKind.WAIT,
+                )
+            ],
+        ).save(descendant)
+        db.insert_bundle("bnd2", str(descendant), capture_id="cap1")
+        db.set_first_workflow_state(
+            stage="complete",
+            capture_id="cap1",
+            workflow_id="bnd1",
+            target={"backend": "citrix"},
+            task="Inspect the remote test record",
+        )
+        draft = disp._initialize_first_workflow_review(
+            workflow_id="bnd2",
+            bundle_path=descendant,
+            target={"backend": "citrix"},
+        )
+
+        replacement = disp.dispatch(
+            "initialize_qualification",
+            {
+                "workflow_id": "bnd2",
+                "target_kind": "citrix",
+                "application": "Citrix test application",
+                "application_version": "2026.1",
+                "environment_label": "citrix-test-vda",
+            },
+        )
+
+        assert draft["project"]["environment"]["target_kind"] == "citrix"
+        assert replacement["ok"] is True
+        assert replacement["draft_environment"] is False
+        assert replacement["project"]["environment"]["target_kind"] == "citrix"
 
     def test_saved_first_result_cannot_return_to_pre_run_review(
         self, deps
@@ -1608,7 +1783,7 @@ class TestLibraryCommands:
             )
         )
         db.set_first_workflow_state(
-            stage="review",
+            stage="executing",
             capture_id="cap1",
             workflow_id="bnd1",
             task="Read one test record",

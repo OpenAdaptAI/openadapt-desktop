@@ -245,7 +245,10 @@ export function Qualification({
         setError(response.error);
         return;
       }
-      if ((response.migration_required || response.draft_environment) && !application) {
+      if (response.draft_environment && response.project) {
+        setTargetKind(response.project.environment.target_kind);
+        setApplication("");
+      } else if (response.migration_required && !application) {
         setApplication(response.graph.bundle.name);
       }
       setProject(response);

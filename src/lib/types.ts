@@ -101,6 +101,8 @@ export interface FirstWorkflowState {
   stage:
     | "record"
     | "review"
+    | "executing"
+    | "reconciliation"
     | "result"
     | "qualification"
     | "qualification_after_result"
