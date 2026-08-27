@@ -9,6 +9,7 @@ import json
 import re
 import sys
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -20,6 +21,8 @@ ARTIFACT_INVENTORY_SCHEMA = "openadapt.production-release-artifact-inventory/v1"
 PLATFORM_VERIFICATION_SCHEMA = "openadapt.desktop-platform-verification/v1"
 IMMUTABLE_RELEASES_DOMAIN = b"OpenAdapt production immutable releases response v1\0"
 TAG_REF_STATE_DOMAIN = b"OpenAdapt production release tag ref state v1\0"
+TAG_RULESETS_DOMAIN = b"OpenAdapt production release tag rulesets v1\0"
+STAGING_DOMAIN = b"OpenAdapt production release staging evidence v1\0"
 PLATFORM_VERIFICATION_MEDIA_TYPE = (
     "application/vnd.openadapt.desktop-platform-verification+json;version=1"
 )
@@ -27,6 +30,7 @@ VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
 DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 DECIMAL_ID = re.compile(r"^[1-9][0-9]*$")
+TIMESTAMP = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
 ARCHITECTURES = {
     "linux": {"x86_64"},
     "macos": {"arm64", "x86_64"},
@@ -245,6 +249,257 @@ def validate_tag_ref_state(value: Any, *, tag: str) -> dict[str, Any]:
 def tag_ref_state_digest(value: Any, *, tag: str) -> str:
     state = validate_tag_ref_state(value, tag=tag)
     return "sha256:" + hashlib.sha256(TAG_REF_STATE_DOMAIN + _canonical(state)).hexdigest()
+
+
+def _ruleset(value: Any, *, role: str) -> dict[str, Any]:
+    ruleset = _closed(
+        value,
+        {
+            "schema_version",
+            "role",
+            "repository",
+            "repository_id",
+            "ruleset_id",
+            "name",
+            "target",
+            "enforcement",
+            "bypass_actors",
+            "conditions",
+            "rules",
+        },
+        f"{role} tag ruleset",
+    )
+    if (
+        ruleset["schema_version"] != "openadapt.production-release-tag-ruleset/v1"
+        or ruleset["role"] != role
+        or ruleset["repository"] != REPOSITORY
+        or ruleset["repository_id"] != REPOSITORY_ID
+        or DECIMAL_ID.fullmatch(str(ruleset["ruleset_id"])) is None
+        or ruleset["target"] != "tag"
+        or ruleset["enforcement"] != "active"
+    ):
+        raise ValueError(f"{role} tag ruleset identity differs")
+    expected_name = {
+        "creation_authority": "OpenAdapt policy: release tag creation",
+        "immutability": "OpenAdapt policy: immutable release tags",
+    }[role]
+    expected_actors = (
+        [
+            {
+                "actor_id": "4730708",
+                "actor_type": "Integration",
+                "bypass_mode": "always",
+            }
+        ]
+        if role == "creation_authority"
+        else []
+    )
+    expected_rules = (
+        [{"type": "creation"}]
+        if role == "creation_authority"
+        else [
+            {"type": "deletion"},
+            {"type": "non_fast_forward"},
+            {
+                "type": "update",
+                "parameters": {"update_allows_fetch_and_merge": False},
+            },
+        ]
+    )
+    conditions = _closed(ruleset["conditions"], {"ref_name"}, "tag ruleset conditions")
+    ref_name = _closed(conditions["ref_name"], {"include", "exclude"}, "tag ref conditions")
+    if (
+        ruleset["name"] != expected_name
+        or ruleset["bypass_actors"] != expected_actors
+        or ref_name != {"include": ["refs/tags/v*"], "exclude": []}
+        or ruleset["rules"] != expected_rules
+    ):
+        raise ValueError(f"{role} tag ruleset policy differs")
+    return ruleset
+
+
+def validate_tag_rulesets(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or len(value) != 2:
+        raise ValueError("tag rulesets must contain creation and immutability rulesets")
+    _ruleset(value[0], role="creation_authority")
+    _ruleset(value[1], role="immutability")
+    return value
+
+
+def tag_rulesets_digest(value: Any) -> str:
+    rulesets = validate_tag_rulesets(value)
+    return "sha256:" + hashlib.sha256(TAG_RULESETS_DOMAIN + _canonical(rulesets)).hexdigest()
+
+
+def normalize_tag_rulesets(creation: Any, immutability: Any) -> list[dict[str, Any]]:
+    """Normalize the two full GitHub ruleset API responses for central staging."""
+
+    values = []
+    for role, raw_value in (
+        ("creation_authority", creation),
+        ("immutability", immutability),
+    ):
+        if not isinstance(raw_value, dict):
+            raise ValueError(f"{role} GitHub ruleset response must be an object")
+        try:
+            actors = [
+                {
+                    "actor_id": str(item["actor_id"]),
+                    "actor_type": item["actor_type"],
+                    "bypass_mode": item["bypass_mode"],
+                }
+                for item in raw_value["bypass_actors"]
+            ]
+            values.append(
+                {
+                    "schema_version": "openadapt.production-release-tag-ruleset/v1",
+                    "role": role,
+                    "repository": REPOSITORY,
+                    "repository_id": REPOSITORY_ID,
+                    "ruleset_id": str(raw_value["id"]),
+                    "name": raw_value["name"],
+                    "target": raw_value["target"],
+                    "enforcement": raw_value["enforcement"],
+                    "bypass_actors": actors,
+                    "conditions": raw_value["conditions"],
+                    "rules": raw_value["rules"],
+                }
+            )
+        except (KeyError, TypeError) as exc:
+            raise ValueError(f"{role} GitHub ruleset response is incomplete") from exc
+    return validate_tag_rulesets(values)
+
+
+def _timestamp(value: str) -> str:
+    if TIMESTAMP.fullmatch(value) is None:
+        raise ValueError("staging observed_at must be an exact UTC timestamp")
+    try:
+        datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError as exc:
+        raise ValueError("staging observed_at is not a calendar timestamp") from exc
+    return value
+
+
+def _release_api_asset_map(value: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(value, list):
+        raise ValueError("draft release assets must be a list")
+    result: dict[str, dict[str, Any]] = {}
+    ids: set[str] = set()
+    for index, asset in enumerate(value):
+        if not isinstance(asset, dict):
+            raise ValueError(f"draft release asset {index} must be an object")
+        try:
+            name = asset["name"]
+            asset_id = str(asset["id"])
+            uploader = asset["uploader"]
+        except (KeyError, TypeError) as exc:
+            raise ValueError(f"draft release asset {index} is incomplete") from exc
+        if (
+            not isinstance(name, str)
+            or not name
+            or name in result
+            or DECIMAL_ID.fullmatch(asset_id) is None
+            or asset_id in ids
+        ):
+            raise ValueError("draft release asset names and ids must be unique and valid")
+        if (
+            asset.get("state") != "uploaded"
+            or not isinstance(uploader, dict)
+            or str(uploader.get("id")) != "321543906"
+            or uploader.get("login") != "openadapt-release[bot]"
+        ):
+            raise ValueError("draft release asset is not uploaded by the release App")
+        result[name] = asset
+        ids.add(asset_id)
+    return result
+
+
+def build_publication_staging(
+    release_api: Any,
+    *,
+    directory: Path,
+    version: str,
+    source_commit: str,
+    immutable_releases: Any,
+    tag_rulesets: Any,
+    tag_ref_state: Any,
+    observed_at: str,
+) -> dict[str, Any]:
+    """Build exact central staging evidence from one complete App draft."""
+
+    if COMMIT.fullmatch(source_commit) is None:
+        raise ValueError("staging source commit is invalid")
+    if not isinstance(release_api, dict):
+        raise ValueError("draft release API response must be an object")
+    tag = f"v{version}"
+    try:
+        release_id = str(release_api["id"])
+        author = release_api["author"]
+    except (KeyError, TypeError) as exc:
+        raise ValueError("draft release API response is incomplete") from exc
+    if (
+        DECIMAL_ID.fullmatch(release_id) is None
+        or release_api.get("tag_name") != tag
+        or release_api.get("target_commitish") != source_commit
+        or release_api.get("draft") is not True
+        or release_api.get("prerelease") is not False
+        or not isinstance(author, dict)
+        or str(author.get("id")) != "321543906"
+        or author.get("login") != "openadapt-release[bot]"
+    ):
+        raise ValueError("draft release identity, state, or App author differs")
+
+    inventory = build_artifact_inventory(directory, version=version)
+    release_assets = _release_api_asset_map(release_api.get("assets"))
+    inventory_names = {item["name"] for item in inventory["artifacts"]}
+    if set(release_assets) != inventory_names:
+        raise ValueError("draft release assets differ from the exact local inventory")
+    staged_assets = []
+    for artifact in inventory["artifacts"]:
+        remote = release_assets[artifact["name"]]
+        if (
+            remote.get("digest") != artifact["sha256"]
+            or remote.get("size") != artifact["size_bytes"]
+        ):
+            raise ValueError("draft release asset bytes differ from the local inventory")
+        staged_assets.append(
+            {
+                "asset_id": str(remote["id"]),
+                **artifact,
+                "uploader_id": "321543906",
+                "uploader_login": "openadapt-release[bot]",
+            }
+        )
+    staged_assets.sort(key=lambda item: (item["name"], item["asset_id"]))
+    immutable = validate_immutable_releases_response(immutable_releases)
+    rulesets = validate_tag_rulesets(tag_rulesets)
+    state = validate_tag_ref_state(tag_ref_state, tag=tag)
+    return {
+        "schema_version": "openadapt.production-release-staging-evidence/v1",
+        "repository": REPOSITORY,
+        "repository_id": REPOSITORY_ID,
+        "draft_release_id": release_id,
+        "tag": tag,
+        "target_commitish": source_commit,
+        "draft": True,
+        "prerelease": False,
+        "release_app_id": "4730708",
+        "release_app_installation_id": "156835568",
+        "release_app_bot_user_id": "321543906",
+        "release_author_login": "openadapt-release[bot]",
+        "assets": staged_assets,
+        "immutable_releases": immutable,
+        "immutable_releases_sha256": immutable_releases_digest(immutable),
+        "tag_rulesets": rulesets,
+        "tag_rulesets_sha256": tag_rulesets_digest(rulesets),
+        "tag_ref_state": state,
+        "tag_ref_state_sha256": tag_ref_state_digest(state, tag=tag),
+        "observed_at": _timestamp(observed_at),
+    }
+
+
+def staging_digest(value: Mapping[str, Any]) -> str:
+    return "sha256:" + hashlib.sha256(STAGING_DOMAIN + _canonical(value)).hexdigest()
 
 
 def _validate_release(value: Any, *, version: str) -> dict[str, Any]:
@@ -536,6 +791,21 @@ def _parser() -> argparse.ArgumentParser:
     tag_state.add_argument("--file", type=Path, required=True)
     tag_state.add_argument("--tag", required=True)
     tag_state.add_argument("--github-output", type=Path)
+    rulesets = commands.add_parser("rulesets")
+    rulesets.add_argument("--creation", type=Path, required=True)
+    rulesets.add_argument("--immutability", type=Path, required=True)
+    rulesets.add_argument("--output", type=Path, required=True)
+    staging = commands.add_parser("staging")
+    staging.add_argument("--release-api", type=Path, required=True)
+    staging.add_argument("--directory", type=Path, required=True)
+    staging.add_argument("--version", required=True)
+    staging.add_argument("--source-commit", required=True)
+    staging.add_argument("--immutable-releases", type=Path, required=True)
+    staging.add_argument("--tag-rulesets", type=Path, required=True)
+    staging.add_argument("--tag-ref-state", type=Path, required=True)
+    staging.add_argument("--observed-at", required=True)
+    staging.add_argument("--output", type=Path, required=True)
+    staging.add_argument("--github-output", type=Path)
     verification = commands.add_parser("validate-platform-verification")
     verification.add_argument("--file", type=Path, required=True)
     verification.add_argument("--version", required=True)
@@ -568,6 +838,29 @@ def main() -> int:
                 with args.github_output.open("a", encoding="utf-8") as output:
                     output.write("tag_ref_state=" + _canonical(state).decode("utf-8") + "\n")
                     output.write(f"tag_ref_state_sha256={digest}\n")
+            print(digest)
+        elif args.command == "rulesets":
+            value = normalize_tag_rulesets(_load(args.creation), _load(args.immutability))
+            write_artifact_inventory(args.output, value)
+            print(args.output)
+        elif args.command == "staging":
+            value = build_publication_staging(
+                _load(args.release_api),
+                directory=args.directory,
+                version=args.version,
+                source_commit=args.source_commit,
+                immutable_releases=_load(args.immutable_releases),
+                tag_rulesets=_load(args.tag_rulesets),
+                tag_ref_state=_load(args.tag_ref_state),
+                observed_at=args.observed_at,
+            )
+            write_artifact_inventory(args.output, value)
+            digest = staging_digest(value)
+            if args.github_output:
+                with args.github_output.open("a", encoding="utf-8") as output:
+                    output.write("publication_staging_json=" + _canonical(value).decode() + "\n")
+                    output.write(f"publication_staging_sha256={digest}\n")
+                    output.write(f"draft_release_id={value['draft_release_id']}\n")
             print(digest)
         else:
             validate_platform_verification(_load(args.file), version=args.version)

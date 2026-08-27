@@ -16,12 +16,17 @@ from scripts.production_release_contract import (
     REPOSITORY_ID,
     artifact_specs,
     build_artifact_inventory,
+    build_publication_staging,
     expected_asset_names,
     immutable_releases_digest,
+    normalize_tag_rulesets,
+    staging_digest,
     tag_ref_state_digest,
+    tag_rulesets_digest,
     validate_immutable_releases_response,
     validate_platform_verification,
     validate_tag_ref_state,
+    validate_tag_rulesets,
 )
 
 VERSION = "1.2.3"
@@ -129,6 +134,68 @@ def _document(platform: str, architecture: str) -> dict:
             ],
         }
     return {**common, "verification": verification}
+
+
+def _raw_rulesets() -> tuple[dict, dict]:
+    common = {
+        "target": "tag",
+        "enforcement": "active",
+        "conditions": {"ref_name": {"include": ["refs/tags/v*"], "exclude": []}},
+    }
+    creation = {
+        **common,
+        "id": 100,
+        "name": "OpenAdapt policy: release tag creation",
+        "bypass_actors": [
+            {
+                "actor_id": 4730708,
+                "actor_type": "Integration",
+                "bypass_mode": "always",
+            }
+        ],
+        "rules": [{"type": "creation"}],
+    }
+    immutability = {
+        **common,
+        "id": 101,
+        "name": "OpenAdapt policy: immutable release tags",
+        "bypass_actors": [],
+        "rules": [
+            {"type": "deletion"},
+            {"type": "non_fast_forward"},
+            {
+                "type": "update",
+                "parameters": {"update_allows_fetch_and_merge": False},
+            },
+        ],
+    }
+    return creation, immutability
+
+
+def _draft_api(release: Path) -> dict:
+    inventory = build_artifact_inventory(release, version=VERSION)
+    return {
+        "id": 200,
+        "tag_name": f"v{VERSION}",
+        "target_commitish": SOURCE_COMMIT,
+        "draft": True,
+        "prerelease": False,
+        "author": {"id": 321543906, "login": "openadapt-release[bot]"},
+        "assets": [
+            {
+                "id": 300 + index,
+                "name": artifact["name"],
+                "state": "uploaded",
+                "size": artifact["size_bytes"],
+                "digest": artifact["sha256"],
+                "uploader": {
+                    "id": 321543906,
+                    "login": "openadapt-release[bot]",
+                },
+            }
+            for index, artifact in enumerate(inventory["artifacts"])
+        ],
+    }
 
 
 def test_exact_production_asset_profile_has_fourteen_stable_names() -> None:
@@ -271,6 +338,87 @@ def test_prospective_tag_ref_state_must_be_absent_and_exact() -> None:
         validate_tag_ref_state(
             {"ref": "refs/tags/v9.9.9", "exists": False},
             tag=f"v{VERSION}",
+        )
+
+
+def test_tag_rulesets_normalize_exact_live_authority() -> None:
+    creation, immutability = _raw_rulesets()
+
+    rulesets = normalize_tag_rulesets(creation, immutability)
+
+    assert validate_tag_rulesets(rulesets) == rulesets
+    assert rulesets[0]["bypass_actors"][0]["actor_id"] == "4730708"
+    assert rulesets[1]["bypass_actors"] == []
+    assert tag_rulesets_digest(rulesets).startswith("sha256:")
+
+    creation["bypass_actors"][0]["actor_id"] = 321543906
+    with pytest.raises(ValueError, match="policy differs"):
+        normalize_tag_rulesets(creation, immutability)
+
+
+def test_publication_staging_binds_the_same_complete_app_draft(tmp_path: Path) -> None:
+    release = tmp_path / "release"
+    _materialize_release(release)
+    creation, immutability = _raw_rulesets()
+    rulesets = normalize_tag_rulesets(creation, immutability)
+    tag_state = {"ref": f"refs/tags/v{VERSION}", "exists": False}
+
+    staging = build_publication_staging(
+        _draft_api(release),
+        directory=release,
+        version=VERSION,
+        source_commit=SOURCE_COMMIT,
+        immutable_releases={"enabled": True, "enforced_by_owner": False},
+        tag_rulesets=rulesets,
+        tag_ref_state=tag_state,
+        observed_at="2026-08-27T12:00:00Z",
+    )
+
+    assert staging["schema_version"] == ("openadapt.production-release-staging-evidence/v1")
+    assert staging["draft_release_id"] == "200"
+    assert staging["draft"] is True
+    assert staging["prerelease"] is False
+    assert staging["release_app_id"] == "4730708"
+    assert staging["release_app_installation_id"] == "156835568"
+    assert staging["release_app_bot_user_id"] == "321543906"
+    assert staging["tag_ref_state"] == tag_state
+    assert len(staging["assets"]) == 14
+    assert staging["assets"] == sorted(
+        staging["assets"], key=lambda item: (item["name"], item["asset_id"])
+    )
+    assert staging_digest(staging).startswith("sha256:")
+
+
+def test_publication_staging_rejects_a_changed_draft_or_tag(tmp_path: Path) -> None:
+    release = tmp_path / "release"
+    _materialize_release(release)
+    creation, immutability = _raw_rulesets()
+    rulesets = normalize_tag_rulesets(creation, immutability)
+    draft = _draft_api(release)
+    draft["assets"][0]["uploader"]["id"] = 999
+
+    with pytest.raises(ValueError, match="release App"):
+        build_publication_staging(
+            draft,
+            directory=release,
+            version=VERSION,
+            source_commit=SOURCE_COMMIT,
+            immutable_releases={"enabled": True, "enforced_by_owner": True},
+            tag_rulesets=rulesets,
+            tag_ref_state={"ref": f"refs/tags/v{VERSION}", "exists": False},
+            observed_at="2026-08-27T12:00:00Z",
+        )
+
+    with pytest.raises(ValueError, match="already exists"):
+        build_publication_staging(
+            _draft_api(release),
+            directory=release,
+            version=VERSION,
+            source_commit=SOURCE_COMMIT,
+            immutable_releases={"enabled": True, "enforced_by_owner": True},
+            tag_rulesets=rulesets,
+            tag_ref_state={"ref": f"refs/tags/v{VERSION}", "exists": True},
+            observed_at="2026-08-27T12:00:00Z",
         )
 
 
