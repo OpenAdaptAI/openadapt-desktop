@@ -4,7 +4,7 @@ Pull requests keep the representative Linux frozen-sidecar build. Release
 candidates and explicit dispatches keep the complete platform matrix. A push
 to protected ``main`` repeats the expensive matrix only when a dependency,
 toolchain, packaging, or native-runtime input changed. The immutable native
-release workflow always rebuilds every installer from its release tag.
+release workflow builds every installer once before it assembles the draft.
 """
 
 from __future__ import annotations
@@ -16,8 +16,6 @@ from pathlib import Path, PurePosixPath
 
 FULL_ARTIFACT_FILES = {
     ".github/workflows/build.yml",
-    ".github/workflows/native-freshness.yml",
-    ".github/workflows/native-release.yml",
     ".github/workflows/release.yml",
     ".python-version",
     "LICENSE",
@@ -44,6 +42,7 @@ FULL_ARTIFACT_SCRIPTS = {
     "scripts/native_release.py",
     "scripts/native_signing.py",
     "scripts/package_ffmpeg_runtime.py",
+    "scripts/production_release_contract.py",
     "scripts/smoke_test_frozen_flow.py",
     "scripts/smoke_test_native_installer.py",
     "scripts/sync_frozen_dependencies.py",

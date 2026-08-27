@@ -1,11 +1,9 @@
 name: Release health
 
-# Nothing here publishes anything. Releases stay a deliberate operation: the
-# engine and native lanes are `workflow_dispatch`-only. The native lane keeps
-# its `native-release` reviewer gate on `publish-native`, the single point where
-# the immutable tag and installer release are created. That design exists because Flow 1.13.0/1.14.0
-# were yanked for shipping AGPL benchmark files. This workflow only LOOKS, and
-# prints the command a human would run.
+# Nothing here publishes anything. Desktop has one manual package release
+# workflow. It assembles one complete draft before it creates vX.Y.Z. The
+# central admission binds that draft and all 14 public assets. This workflow
+# only reports a missing or incomplete release.
 #
 # Why it exists: four native releases here never published, and nothing said
 # so. `desktop-v0.12.0`, `desktop-v0.8.0`, `desktop-v0.7.0` and
@@ -37,7 +35,7 @@ on:
     - cron: '07 */3 * * *'
   workflow_dispatch:
   workflow_run:
-    workflows: ["Release and PyPI Publish", "Native Installer Release"]
+    workflows: ["Production package release"]
     types: [completed]
   pull_request:
     paths:

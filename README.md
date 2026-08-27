@@ -8,14 +8,12 @@
 > the local authoring and teaching cockpit for OpenAdapt. The canonical compiler
 > and governed runtime live in
 > [`openadapt-flow`](https://github.com/OpenAdaptAI/openadapt-flow). This
-> repository publishes release candidates. An exact release becomes the active
+> repository publishes one package release for each `vX.Y.Z` version. Each
+> release contains the Python package, native installers, platform verification
+> records, an SBOM, and checksums. An exact release becomes the active
 > Production default only while the canonical signed lifecycle ledger has a
-> current admission for its exact artifacts. An absent, inactive, expired, or
-> revoked admission means that the release is not actively admitted. The latest
-> published native prerelease is historical and carries its original
-> ad-hoc/unsigned labels. The next native release is blocked until macOS has
-> Developer ID plus notarization, Windows has Authenticode, and the exact Linux
-> bytes pass GitHub OIDC attestation verification.
+> current admission for its exact artifacts. An absent, expired, revoked, or
+> unverifiable admission means that the release is not actively admitted.
 
 ## What OpenAdapt is
 
@@ -125,12 +123,13 @@ teaching, escalation, and terminal receipts.
 | Hosted auth and governed handoff | Browser-PKCE and paste-token sign-in; host-bound keychain credentials; exact `openadapt.push-result/v1` review, accepted-ingest, and uncertain-delivery state; local handoff retention; and halted-run break reports | Distribution requires a release-qualified Flow build and live Cloud acceptance before Desktop updates its exact runtime pin |
 | Attended phone decisions | One-use QR pairing, protected local evidence, typed allowed actions, runner revalidation, receipts, device revocation, and an optional outbound hosted lane | Device pairing does not replace the deployment's authenticated operator principal |
 | Build artifacts | Wheel/sdist, a self-contained PyInstaller engine+Flow runtime, and DMG/MSI/NSIS/DEB/AppImage native jobs | Native jobs prove the frozen browser lifecycle, structurally install/uninstall, and label every platform, architecture, and signing state |
-| Native installers | Distinct `desktop-v*` prerelease workflow with final-byte checksums and GitHub provenance | Unadmitted release-candidate lane; signing state is encoded in every filename and workflow qualification remains specific |
-| Code signing and updater | Apple Developer ID/notarization and Windows Authenticode are credential-gated and fail closed on partial configuration; the updater feed is disabled | Candidate publication requires the complete platform trust set; the updater is outside the current channel |
+| Package release | One draft-first `v*` workflow binds eight primary packages, four platform verification records, one CycloneDX SBOM, and `SHA256SUMS` | Publication requires the exact active central release admission; workflow qualification remains a separate gate |
+| Code signing and updater | Apple Developer ID/notarization and Windows Authenticode are credential-gated and fail closed on partial configuration; Linux uses exact-byte OIDC provenance; the updater feed is disabled | Package publication requires the complete platform trust set; the updater has its own future key lifecycle |
 
-CI builds the self-contained `openadapt-engine` freeze. Candidate publication
-requires the external code-signing and notarization controls. Production
-selection also requires an active central admission for the exact artifacts.
+CI builds the self-contained `openadapt-engine` freeze. Package publication
+requires the external code-signing, notarization, and release-authority
+controls. Production selection also requires an active central admission for
+the exact artifacts.
 
 ## Use OpenAdapt today
 
@@ -196,18 +195,21 @@ To work on the shell and frontend you also need Rust, Node.js, and the Tauri
 CLI. A dev shell runs frontend-only and shows the engine as offline until a
 frozen sidecar binary from CI is present.
 
-### Native installer release candidates
+### Desktop package releases
 
-Native packages are published under a distinct `desktop-vX.Y.Z` prerelease
-channel, separate from the engine's `vX.Y.Z` PyPI/GitHub releases. The native
-version is synchronized to each engine release by CI, so a native prerelease
-mirrors the engine version it was built from. A native prerelease is packaging
-evidence, and it is not a separate supported desktop release. Historical
-prereleases retain their original trust labels. New release filenames require
-`developer-id-notarized` on macOS, `authenticode` on Windows, and
-`github-attested` for the exact Linux bytes. CI installs, launches, and
-uninstalls each package on clean runners. Packaging structure is not workflow
-qualification.
+One `vX.Y.Z` GitHub Release carries the wheel, source distribution, macOS DMGs,
+Windows MSI and NSIS packages, Linux DEB and AppImage packages, four platform
+verification records, a CycloneDX SBOM, and `SHA256SUMS`. The workflow builds
+these files once and assembles an App-authored draft before the tag exists. It
+publishes the same draft only after the pinned central verifier accepts the
+exact release admission and artifact inventory. The admitted wheel and source
+distribution then publish to PyPI without a rebuild.
+
+CI installs, launches, and uninstalls each native package on clean runners.
+macOS requires Developer ID and notarization. Windows requires timestamped
+Authenticode. Linux requires GitHub OIDC provenance over the exact package
+bytes. These release checks do not replace qualification of a complete
+workflow.
 
 On macOS, regular ad-hoc CI uses an explicit non-hardened overlay because an
 identity-less hardened launcher cannot load PyInstaller's identity-less embedded
@@ -221,10 +223,8 @@ the components they cover and verified against the actual frozen archive. The
 pinned sources, hashes, and modification status are recorded in
 [`third_party/README.md`](third_party/README.md).
 
-- Which release to download, and the two-lane policy, are in
-  [RELEASES.md](RELEASES.md).
-- Artifact names, verification scope, and provenance are in
-  [Native Release Candidates](docs/RELEASE_CANDIDATE_INSTALLERS.md).
+- The complete package policy and its 14-asset profile are in
+  [Desktop package releases](docs/DESKTOP_RELEASES.md).
 - The signing activation runbook (what to buy, which secrets to add, and what
   each surface may then truthfully claim) is in
   [docs/CODE_SIGNING.md](docs/CODE_SIGNING.md).
@@ -273,14 +273,13 @@ compiler or runtime. Those remain in `openadapt-flow`.
   real-application qualification remains workflow-specific.
 - The frozen `openadapt-engine` sidecar binary is produced only by CI. A plain
   dev checkout runs the shell in frontend-only mode.
-- Native packages remain unadmitted release candidates until the central
-  Production lifecycle activates an exact release. The latest published
-  prerelease predates the mandatory platform trust gate. Structural
-  install/uninstall success is not evidence of a validated workflow.
+- The checked-out code does not claim an active release admission. Production
+  requires the active signed central admission for the exact 14-asset release.
+  Structural install and uninstall success does not qualify a workflow.
 - Apple Developer ID/notarization and Windows Authenticode credentials must be
-  provisioned before the next native release. A missing or partial set stops
-  the release. The updater and rollback remain disabled pending an independent
-  signing-key lifecycle.
+  provisioned before the next Desktop package release. A missing or partial
+  set stops the release. The updater and rollback remain disabled pending an
+  independent signing-key lifecycle.
 - This repository serves the tray's loopback IPC contract, but the desktop and
   the shipped tray client have not been validated together end to end.
 
@@ -316,9 +315,9 @@ automatic retry. The command never falls back to a direct Desktop upload when
 Flow is missing or returns an error. The former direct hosted-ingest backend
 now refuses every upload.
 
-This path does not enter a native release until the exact pinned Flow artifact
-and the managed Cloud runtime pass the same live acceptance contract. The legacy
-customer-owned adapter queue remains paused for this release; its exit
+This path does not enter a Desktop package release until the exact pinned Flow
+artifact and the managed Cloud runtime pass the same live acceptance contract.
+The legacy customer-owned adapter queue remains paused for this release; its exit
 condition is a Flow-owned complete inventory, image-capable scrub, and exact
 in-app review. The dormant queue also selects the reviewed scrubbed path again
 immediately before egress; a dismissed raw capture is not uploadable.
