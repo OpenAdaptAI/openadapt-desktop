@@ -772,6 +772,74 @@ def validate_platform_verification(value: Any, *, version: str) -> dict[str, Any
     return document
 
 
+def build_platform_verification(
+    directory: Path,
+    *,
+    version: str,
+    source_commit: str,
+    platform: str,
+    architecture: str,
+    workflow_commit: str,
+    run_id: int,
+    run_attempt: int,
+    embedded_flow_version: str,
+    verification: Any,
+) -> dict[str, Any]:
+    """Build one public metadata object from verified native artifact bytes."""
+
+    if platform not in ARCHITECTURES or architecture not in ARCHITECTURES[platform]:
+        raise ValueError("platform verification platform or architecture is invalid")
+    if source_commit != workflow_commit or COMMIT.fullmatch(source_commit) is None:
+        raise ValueError("platform verification source and workflow commits must match")
+    artifacts = []
+    for spec in artifact_specs(version):
+        if not spec.kind.startswith(f"{platform}-"):
+            continue
+        if f"-{platform}-{architecture}" not in spec.name:
+            continue
+        path = _regular_file(directory / spec.name, f"platform artifact {spec.name}")
+        artifacts.append(
+            {
+                "name": spec.name,
+                "kind": spec.kind,
+                "sha256": _digest(path),
+                "size_bytes": path.stat().st_size,
+                "media_type": spec.media_type,
+            }
+        )
+    artifacts.sort(key=lambda item: (item["kind"], item["name"]))
+    document = {
+        "schema_version": PLATFORM_VERIFICATION_SCHEMA,
+        "release": {
+            "repository": REPOSITORY,
+            "repository_id": REPOSITORY_ID,
+            "source_commit": source_commit,
+            "version": version,
+            "tag": f"v{version}",
+        },
+        "platform": platform,
+        "architecture": architecture,
+        "artifacts": artifacts,
+        "build": {
+            "workflow": ".github/workflows/release.yml",
+            "workflow_ref": (
+                "OpenAdaptAI/openadapt-desktop/.github/workflows/release.yml@refs/heads/main"
+            ),
+            "workflow_commit": workflow_commit,
+            "event": "workflow_dispatch",
+            "run_id": run_id,
+            "run_attempt": run_attempt,
+            "runner_environment": "github-hosted",
+            "install_verified": True,
+            "launch_verified": True,
+            "uninstall_verified": True,
+            "embedded_flow_version": embedded_flow_version,
+        },
+        "verification": verification,
+    }
+    return validate_platform_verification(document, version=version)
+
+
 def _load(path: Path) -> Any:
     _regular_file(path, str(path))
     return json.loads(path.read_text(encoding="utf-8"))
@@ -809,6 +877,18 @@ def _parser() -> argparse.ArgumentParser:
     verification = commands.add_parser("validate-platform-verification")
     verification.add_argument("--file", type=Path, required=True)
     verification.add_argument("--version", required=True)
+    build_verification = commands.add_parser("platform-verification")
+    build_verification.add_argument("--directory", type=Path, required=True)
+    build_verification.add_argument("--version", required=True)
+    build_verification.add_argument("--source-commit", required=True)
+    build_verification.add_argument("--platform", choices=tuple(ARCHITECTURES), required=True)
+    build_verification.add_argument("--architecture", choices=("arm64", "x86_64"), required=True)
+    build_verification.add_argument("--workflow-commit", required=True)
+    build_verification.add_argument("--run-id", type=int, required=True)
+    build_verification.add_argument("--run-attempt", type=int, required=True)
+    build_verification.add_argument("--embedded-flow-version", required=True)
+    build_verification.add_argument("--verification", type=Path, required=True)
+    build_verification.add_argument("--output", type=Path, required=True)
     return parser
 
 
@@ -862,9 +942,24 @@ def main() -> int:
                     output.write(f"publication_staging_sha256={digest}\n")
                     output.write(f"draft_release_id={value['draft_release_id']}\n")
             print(digest)
-        else:
+        elif args.command == "validate-platform-verification":
             validate_platform_verification(_load(args.file), version=args.version)
             print(f"Validated {args.file}.")
+        else:
+            value = build_platform_verification(
+                args.directory,
+                version=args.version,
+                source_commit=args.source_commit,
+                platform=args.platform,
+                architecture=args.architecture,
+                workflow_commit=args.workflow_commit,
+                run_id=args.run_id,
+                run_attempt=args.run_attempt,
+                embedded_flow_version=args.embedded_flow_version,
+                verification=_load(args.verification),
+            )
+            write_artifact_inventory(args.output, value)
+            print(args.output)
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         print(f"REFUSED: {exc}", file=sys.stderr)
         return 1

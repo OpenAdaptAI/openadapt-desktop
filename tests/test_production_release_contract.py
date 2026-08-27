@@ -16,6 +16,7 @@ from scripts.production_release_contract import (
     REPOSITORY_ID,
     artifact_specs,
     build_artifact_inventory,
+    build_platform_verification,
     build_publication_staging,
     expected_asset_names,
     immutable_releases_digest,
@@ -273,6 +274,33 @@ def test_platform_verification_schema_binds_native_evidence_without_secrets(
         assert secret_field not in serialized
 
 
+def test_platform_verification_builder_hashes_exact_stable_artifacts(
+    tmp_path: Path,
+) -> None:
+    release = tmp_path / "release"
+    _materialize_release(release)
+    expected = _document("windows", "x86_64")
+
+    document = build_platform_verification(
+        release,
+        version=VERSION,
+        source_commit=SOURCE_COMMIT,
+        platform="windows",
+        architecture="x86_64",
+        workflow_commit=SOURCE_COMMIT,
+        run_id=123,
+        run_attempt=1,
+        embedded_flow_version="2.0.0",
+        verification=expected["verification"],
+    )
+
+    assert [item["name"] for item in document["artifacts"]] == [
+        item["name"] for item in expected["artifacts"]
+    ]
+    assert all(item["sha256"] != DIGEST for item in document["artifacts"])
+    assert document["verification"] == expected["verification"]
+
+
 def test_platform_verification_rejects_unbound_or_false_evidence() -> None:
     macos = _document("macos", "arm64")
     macos["verification"]["notarization"]["ticket_stapled"] = False
@@ -418,6 +446,32 @@ def test_publication_staging_rejects_a_changed_draft_or_tag(tmp_path: Path) -> N
             immutable_releases={"enabled": True, "enforced_by_owner": True},
             tag_rulesets=rulesets,
             tag_ref_state={"ref": f"refs/tags/v{VERSION}", "exists": True},
+            observed_at="2026-08-27T12:00:00Z",
+        )
+
+
+def test_platform_verification_asset_hashes_exact_bytes_before_parsing(
+    tmp_path: Path,
+) -> None:
+    release = tmp_path / "release"
+    _materialize_release(release)
+    metadata = release / f"OpenAdapt-Desktop-v{VERSION}-linux-x86_64-verification.json"
+    metadata.write_text('{"same":"meaning"}\n', encoding="utf-8")
+    draft = _draft_api(release)
+
+    parsed = json.loads(metadata.read_bytes())
+    metadata.write_text(json.dumps(parsed, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    creation, immutability = _raw_rulesets()
+    with pytest.raises(ValueError, match="bytes differ"):
+        build_publication_staging(
+            draft,
+            directory=release,
+            version=VERSION,
+            source_commit=SOURCE_COMMIT,
+            immutable_releases={"enabled": True, "enforced_by_owner": False},
+            tag_rulesets=normalize_tag_rulesets(creation, immutability),
+            tag_ref_state={"ref": f"refs/tags/v{VERSION}", "exists": False},
             observed_at="2026-08-27T12:00:00Z",
         )
 
