@@ -22,6 +22,7 @@ permissions:
   contents: read
 
 env:
+  RELEASE_DISPATCH_ACTOR_ID: "774615"
   RELEASE_APP_ID: "4730708"
   RELEASE_APP_ACTOR_ID: "321543906"
   RELEASE_APP_INSTALLATION_ID: "156835568"
@@ -39,11 +40,13 @@ jobs:
     steps:
       - name: Require the exact repository, main ref, and stable version input
         env:
+          EVENT_ACTOR_ID: ${{ github.actor_id }}
           REQUESTED_VERSION: ${{ inputs.version }}
         shell: bash
         run: |
           set -euo pipefail
           if [ "${GITHUB_EVENT_NAME}" != "workflow_dispatch" ] || \
+             [ "${EVENT_ACTOR_ID}" != "${RELEASE_DISPATCH_ACTOR_ID}" ] || \
              [ "${GITHUB_REPOSITORY}" != "OpenAdaptAI/openadapt-desktop" ] || \
              [ "${GITHUB_REF}" != "refs/heads/main" ] || \
              [ "${GITHUB_REF_TYPE}" != "branch" ] || \
@@ -182,6 +185,7 @@ jobs:
           private-key: ${{ secrets.OPENADAPT_RELEASE_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
+          permission-administration: read
           permission-contents: write
           permission-metadata: read
 
@@ -197,6 +201,7 @@ jobs:
           CONFIGURED_RELEASE_APP_ID: ${{ vars.OPENADAPT_RELEASE_APP_ID }}
           CONFIGURED_RELEASE_ACTOR_ID: ${{ vars.OPENADAPT_RELEASE_ACTOR_ID }}
           CONFIGURED_RELEASE_APP_INSTALLATION_ID: ${{ vars.OPENADAPT_RELEASE_APP_INSTALLATION_ID }}
+          GH_TOKEN: ${{ steps.release_app.outputs.token }}
           RELEASE_APP_SLUG: ${{ steps.release_app.outputs.app-slug }}
           TOKEN_INSTALLATION_ID: ${{ steps.release_app.outputs['installation-id'] }}
         shell: bash
@@ -209,6 +214,10 @@ jobs:
             echo "error: release token does not match the admitted App identity" >&2
             exit 1
           fi
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/immutable-releases" > immutable-releases.json
+          python scripts/production_release_contract.py validate-immutable-releases \
+            --file immutable-releases.json
 
       - name: Create only the exact candidate tag
         env:
@@ -384,6 +393,7 @@ jobs:
           private-key: ${{ secrets.OPENADAPT_RELEASE_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
+          permission-administration: read
           permission-contents: write
           permission-metadata: read
 
@@ -392,6 +402,7 @@ jobs:
           CONFIGURED_RELEASE_APP_ID: ${{ vars.OPENADAPT_RELEASE_APP_ID }}
           CONFIGURED_RELEASE_ACTOR_ID: ${{ vars.OPENADAPT_RELEASE_ACTOR_ID }}
           CONFIGURED_RELEASE_APP_INSTALLATION_ID: ${{ vars.OPENADAPT_RELEASE_APP_INSTALLATION_ID }}
+          GH_TOKEN: ${{ steps.release_app_preflight.outputs.token }}
           RELEASE_APP_SLUG: ${{ steps.release_app_preflight.outputs.app-slug }}
           TOKEN_INSTALLATION_ID: ${{ steps.release_app_preflight.outputs['installation-id'] }}
         shell: bash
@@ -404,6 +415,10 @@ jobs:
             echo "error: preflight token does not match the admitted App identity" >&2
             exit 1
           fi
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/immutable-releases" > immutable-releases.json
+          python scripts/production_release_contract.py validate-immutable-releases \
+            --file immutable-releases.json
 
       - name: Build and verify exact publication artifacts
         shell: bash
@@ -492,6 +507,7 @@ jobs:
           private-key: ${{ secrets.OPENADAPT_RELEASE_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
+          permission-administration: read
           permission-contents: write
           permission-metadata: read
 
@@ -500,6 +516,7 @@ jobs:
           CONFIGURED_RELEASE_APP_ID: ${{ vars.OPENADAPT_RELEASE_APP_ID }}
           CONFIGURED_RELEASE_ACTOR_ID: ${{ vars.OPENADAPT_RELEASE_ACTOR_ID }}
           CONFIGURED_RELEASE_APP_INSTALLATION_ID: ${{ vars.OPENADAPT_RELEASE_APP_INSTALLATION_ID }}
+          GH_TOKEN: ${{ steps.release_app.outputs.token }}
           RELEASE_APP_SLUG: ${{ steps.release_app.outputs.app-slug }}
           TOKEN_INSTALLATION_ID: ${{ steps.release_app.outputs['installation-id'] }}
         shell: bash
@@ -512,106 +529,86 @@ jobs:
             echo "error: release token does not match the admitted App identity" >&2
             exit 1
           fi
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/immutable-releases" > immutable-releases.json
+          python scripts/production_release_contract.py validate-immutable-releases \
+            --file immutable-releases.json
 
-      - name: Create or resume the exact GitHub Release
+      - name: Resolve or create the exact engine release draft
+        id: release_state
         env:
           GH_TOKEN: ${{ steps.release_app.outputs.token }}
         shell: bash
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
-          title="OpenAdapt Desktop ${tag#v}"
-          if gh release view "${tag}" --json assets,author,isDraft,isPrerelease,tagName \
-            > release.json 2>/dev/null; then
-            if ! jq -e --arg tag "${tag}" \
-              '.tagName == $tag and .isDraft == false and .isPrerelease == false and
-               .author.login == "openadapt-release[bot]" and
-               .author.id == "BOT_kgDOEype4g"' \
-              release.json >/dev/null; then
-              echo "error: existing GitHub Release has the wrong identity" >&2
+          release_id="$(gh release view "${tag}" --json databaseId --jq .databaseId 2>/dev/null || true)"
+          if [ -n "${release_id}" ]; then
+            gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/${GITHUB_REPOSITORY}/releases/${release_id}" > release-api.json
+            if jq -e '.draft == false and .immutable == true' release-api.json >/dev/null; then
+              mkdir published-engine
+              gh release download "${tag}" --dir published-engine --pattern '*'
+              python scripts/native_release.py validate-github-release \
+                --file release-api.json \
+                --directory published-engine \
+                --repository "${GITHUB_REPOSITORY}" \
+                --tag "${tag}" \
+                --phase published
+              gh release view "${tag}" \
+                --json author,databaseId,isDraft,isPrerelease,publishedAt,tagName,url \
+                > published-engine-release.json
+              python scripts/native_release.py validate-engine-inventory \
+                --directory published-engine \
+                --release published-engine-release.json \
+                --repository "${GITHUB_REPOSITORY}" \
+                --engine-tag "${tag}" \
+                --engine-commit "${GITHUB_SHA}" \
+                --local-engine-directory dist
+              python scripts/native_release.py validate-exact-engine-inventory \
+                --directory published-engine \
+                --release published-engine-release.json \
+                --repository "${GITHUB_REPOSITORY}" \
+                --engine-tag "${tag}" \
+                --engine-commit "${GITHUB_SHA}"
+              echo "state=published" >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+            if ! jq -e \
+              '.draft == true and .prerelease == false and .immutable == false and
+               .author.login == "openadapt-release[bot]" and .author.id == 321543906' \
+              release-api.json >/dev/null; then
+              echo "error: existing engine release is neither an exact draft nor immutable" >&2
               exit 1
             fi
-            mkdir -p existing-assets existing-release-assets
-            gh release download "${tag}" --dir existing-release-assets --pattern '*'
-            gh release view "${tag}" \
-              --json author,databaseId,isDraft,isPrerelease,publishedAt,tagName,url \
-              > existing-engine-release.json
-            python scripts/native_release.py validate-engine-inventory \
-              --directory existing-release-assets \
-              --release existing-engine-release.json \
-              --repository "${GITHUB_REPOSITORY}" \
-              --engine-tag "${tag}" \
-              --engine-commit "${GITHUB_SHA}" \
-              --local-engine-directory dist
-            jq -r '.assets[].name' release.json > existing-assets.txt
-            for path in dist/*.whl dist/*.tar.gz; do
-              name="$(basename "${path}")"
-              if grep -qxF "${name}" existing-assets.txt; then
-                gh release download "${tag}" --dir existing-assets --pattern "${name}"
-                cmp "${path}" "existing-assets/${name}"
-              else
-                gh release upload "${tag}" "${path}"
-              fi
-            done
           else
-            gh release create "${tag}" dist/*.whl dist/*.tar.gz \
+            gh release create "${tag}" \
+              --draft \
               --verify-tag \
-              --title "${title}" \
+              --title "OpenAdapt Desktop ${tag#v}" \
               --generate-notes
           fi
-          mkdir -p published-assets
-          gh release download "${tag}" --dir published-assets \
-            --pattern '*.whl' --pattern '*.tar.gz'
-          for path in dist/*.whl dist/*.tar.gz; do
-            cmp "${path}" "published-assets/$(basename "${path}")"
-          done
           gh release view "${tag}" \
             --json author,databaseId,isDraft,isPrerelease,publishedAt,tagName,url \
-            > strict-engine-release.json
-          mkdir strict-engine-release-assets
-          gh release download "${tag}" --dir strict-engine-release-assets --pattern '*'
-          python scripts/native_release.py validate-engine-inventory \
-            --directory strict-engine-release-assets \
-            --release strict-engine-release.json \
+            > engine-release-draft.json
+          python scripts/native_release.py validate-engine-release \
+            --file engine-release-draft.json \
             --repository "${GITHUB_REPOSITORY}" \
             --engine-tag "${tag}" \
-            --engine-commit "${GITHUB_SHA}"
-
-      - name: Resolve the exact release receipt state
-        id: receipt
-        env:
-          GH_TOKEN: ${{ steps.release_app.outputs.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          engine_tag="${GITHUB_REF_NAME}"
-          gh release view "${engine_tag}" \
-            --json author,databaseId,isDraft,isPrerelease,publishedAt,tagName,url \
-            > engine-release.json
-          mkdir engine-assets
-          gh release download "${engine_tag}" --dir engine-assets \
-            --pattern '*.whl' --pattern '*.tar.gz'
-          gh release view "${engine_tag}" --json assets --jq '.assets[].name' \
-            > engine-release-assets.txt
-          receipt=openadapt-desktop-engine-release-provenance.json
-          if grep -qxF "${receipt}" engine-release-assets.txt; then
-            mkdir existing-receipt
-            gh release download "${engine_tag}" --dir existing-receipt --pattern "${receipt}"
-            echo "exists=true" >> "${GITHUB_OUTPUT}"
-          else
-            echo "exists=false" >> "${GITHUB_OUTPUT}"
-          fi
+            --engine-commit "${GITHUB_SHA}" \
+            --allow-draft
+          echo "state=draft" >> "${GITHUB_OUTPUT}"
 
       - name: Write the exact-tag engine release receipt
-        if: steps.receipt.outputs.exists == 'false'
+        if: steps.release_state.outputs.state == 'draft'
         shell: bash
         run: |
           set -euo pipefail
           engine_tag="${GITHUB_REF_NAME}"
           python scripts/native_release.py write-engine-provenance \
             --output openadapt-desktop-engine-release-provenance.json \
-            --directory engine-assets \
-            --release engine-release.json \
+            --directory dist \
+            --release engine-release-draft.json \
             --repository "${GITHUB_REPOSITORY}" \
             --engine-tag "${engine_tag}" \
             --engine-commit "${GITHUB_SHA}" \
@@ -622,12 +619,42 @@ jobs:
             --runner-environment "${RUNNER_ENVIRONMENT}"
 
       - name: Attest the engine release receipt
-        if: steps.receipt.outputs.exists == 'false'
+        if: steps.release_state.outputs.state == 'draft'
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-path: openadapt-desktop-engine-release-provenance.json
 
-      - name: Publish and reverify the engine release receipt
+      - name: Assemble and publish the immutable engine release
+        if: steps.release_state.outputs.state == 'draft'
+        env:
+          GH_TOKEN: ${{ steps.release_app.outputs.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          engine_tag="${GITHUB_REF_NAME}"
+          mkdir release-upload
+          cp dist/*.whl dist/*.tar.gz release-upload/
+          cp openadapt-desktop-engine-release-provenance.json release-upload/
+          receipt=release-upload/openadapt-desktop-engine-release-provenance.json
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/tags/${engine_tag}"
+          gh attestation verify "${receipt}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --cert-identity "${identity}" \
+            --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --deny-self-hosted-runners
+          gh release upload "${engine_tag}" release-upload/* --clobber
+          release_id="$(gh release view "${engine_tag}" --json databaseId --jq .databaseId)"
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/releases/${release_id}" > draft-release-api.json
+          python scripts/native_release.py validate-github-release \
+            --file draft-release-api.json \
+            --directory release-upload \
+            --repository "${GITHUB_REPOSITORY}" \
+            --tag "${engine_tag}" \
+            --phase draft
+          gh release edit "${engine_tag}" --draft=false
+
+      - name: Verify the exact immutable engine release
         env:
           GH_TOKEN: ${{ steps.release_app.outputs.token }}
         shell: bash
@@ -636,23 +663,44 @@ jobs:
           engine_tag="${GITHUB_REF_NAME}"
           receipt=openadapt-desktop-engine-release-provenance.json
           identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/tags/${engine_tag}"
-          if [ "${{ steps.receipt.outputs.exists }}" = "true" ]; then
-            subject="existing-receipt/${receipt}"
-          else
-            subject="${receipt}"
-            gh release upload "${engine_tag}" "${subject}"
-          fi
-          gh attestation verify "${subject}" \
+          mkdir remote-engine
+          gh release download "${engine_tag}" --dir remote-engine --pattern '*'
+          release_id="$(gh release view "${engine_tag}" --json databaseId --jq .databaseId)"
+          for attempt in $(seq 1 30); do
+            gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/${GITHUB_REPOSITORY}/releases/${release_id}" > published-release-api.json
+            if jq -e \
+              '.immutable == true and (.assets | all(.digest | type == "string"))' \
+              published-release-api.json >/dev/null; then
+              break
+            fi
+            echo "Waiting for immutable engine release metadata (${attempt}/30)."
+            sleep 2
+          done
+          jq -e '.immutable == true and (.assets | all(.digest | type == "string"))' \
+            published-release-api.json >/dev/null
+          python scripts/native_release.py validate-github-release \
+            --file published-release-api.json \
+            --directory remote-engine \
+            --repository "${GITHUB_REPOSITORY}" \
+            --tag "${engine_tag}" \
+            --phase published
+          gh release view "${engine_tag}" \
+            --json author,databaseId,isDraft,isPrerelease,publishedAt,tagName,url \
+            > engine-release.json
+          gh attestation verify "remote-engine/${receipt}" \
             --repo "${GITHUB_REPOSITORY}" \
             --cert-identity "${identity}" \
             --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
             --deny-self-hosted-runners
-          mkdir remote-engine
-          gh release download "${engine_tag}" --dir remote-engine \
-            --pattern '*.whl' --pattern '*.tar.gz' --pattern "${receipt}"
-          cmp "${subject}" "remote-engine/${receipt}"
           python scripts/native_release.py validate-engine-provenance \
             --file "remote-engine/${receipt}" \
+            --directory remote-engine \
+            --release engine-release.json \
+            --repository "${GITHUB_REPOSITORY}" \
+            --engine-tag "${engine_tag}" \
+            --engine-commit "${GITHUB_SHA}"
+          python scripts/native_release.py validate-exact-engine-inventory \
             --directory remote-engine \
             --release engine-release.json \
             --repository "${GITHUB_REPOSITORY}" \

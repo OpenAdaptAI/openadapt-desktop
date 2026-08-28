@@ -1,13 +1,13 @@
-name: Native Version Advance Guard
+name: Package Version Advance Guard
 
-# The five native version files carry the installer version, and they also
-# carry ordinary npm and Cargo dependency state. Dependabot and feature pull
-# requests edit them for those ordinary reasons, so this job cannot demand a
-# reserved branch from every pull request that touches the paths.
+# Eight package version files carry the one Python and native package version.
+# Some also carry ordinary dependency state. This job therefore judges the
+# exact content change instead of rejecting every pull request that touches a
+# lockfile.
 #
 # It decides on content instead of on a branch name. When the pull request
-# leaves the native version alone, it passes. When the pull request moves the
-# native version, only the reserved `native-version/v*` branch of this
+# leaves the package version alone, it passes. When the pull request moves the
+# package version, only the reserved `release-version/v*` branch of this
 # repository may do it, from the current protected base, as the exact strict
 # advance. The job never skips: a skipped job satisfies a required status
 # check, and the branch name is author controlled.
@@ -16,6 +16,9 @@ on:
   pull_request:
     types: [opened, reopened, synchronize, ready_for_review]
     paths:
+      - pyproject.toml
+      - engine/__init__.py
+      - uv.lock
       - package.json
       - package-lock.json
       - src-tauri/Cargo.toml
@@ -26,12 +29,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: native-version-guard-${{ github.event.pull_request.number }}
+  group: package-version-guard-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
   validate-advance:
-    name: Reject an unreserved or stale native version pull request
+    name: Reject an unreserved or stale package version pull request
     runs-on: ubuntu-22.04
     steps:
       # Check out the base, never the head. This job grades the head, so it
@@ -74,20 +77,20 @@ jobs:
           base_version="$(python scripts/native_release.py version --ref "${BASE_SHA}")"
           head_version="$(python scripts/native_release.py version --ref "${HEAD_SHA}")"
           if [ "${base_version}" = "${head_version}" ]; then
-            echo "This pull request keeps native version ${base_version}."
+            echo "This pull request keeps package version ${base_version}."
             exit 0
           fi
 
-          echo "This pull request moves the native version ${base_version} -> ${head_version}."
+          echo "This pull request moves the package version ${base_version} -> ${head_version}."
           if [ "${HEAD_REPOSITORY}" != "${GITHUB_REPOSITORY}" ]; then
-            echo "error: a native version change must come from ${GITHUB_REPOSITORY}," \
+            echo "error: a package version change must come from ${GITHUB_REPOSITORY}," \
                  "not from '${HEAD_REPOSITORY}'" >&2
             exit 1
           fi
           case "${HEAD_REF}" in
-            native-version/v*) ;;
+            release-version/v*) ;;
             *)
-              echo "error: a native version change must come from a native-version/v*" \
+              echo "error: a package version change must come from a release-version/v*" \
                    "branch, not from '${HEAD_REF}'" >&2
               exit 1
               ;;
@@ -96,7 +99,7 @@ jobs:
           git fetch origin main:refs/remotes/origin/main
           current_base="$(git rev-parse refs/remotes/origin/main)"
           if [ "${BASE_SHA}" != "${current_base}" ]; then
-            echo "error: native version pull request base is stale" >&2
+            echo "error: package version pull request base is stale" >&2
             exit 1
           fi
           python scripts/native_release.py validate-version-advance \

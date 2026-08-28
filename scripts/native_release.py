@@ -132,14 +132,45 @@ def expected_engine_release_asset_names(version: str) -> set[str]:
     )
 
 
+def expected_exact_engine_release_asset_names(version: str) -> set[str]:
+    """Return the immutable package-only engine Release inventory."""
+
+    return expected_engine_asset_names(version) | {ENGINE_RELEASE_PROVENANCE}
+
+
 def native_versions(root: Path = ROOT) -> dict[str, str]:
+    pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    engine_init = (root / "engine" / "__init__.py").read_text(encoding="utf-8")
+    uv_lock = (root / "uv.lock").read_text(encoding="utf-8")
     package = json.loads((root / "package.json").read_text(encoding="utf-8"))
+    package_lock = json.loads((root / "package-lock.json").read_text(encoding="utf-8"))
     tauri = json.loads((root / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8"))
     cargo = tomllib.loads((root / "src-tauri" / "Cargo.toml").read_text(encoding="utf-8"))
+    cargo_lock = (root / "src-tauri" / "Cargo.lock").read_text(encoding="utf-8")
+    engine_match = re.search(r'^__version__ = "([^"]+)"$', engine_init, flags=re.MULTILINE)
+    lock_match = re.search(
+        r'\[\[package\]\]\s+name = "openadapt-desktop"\s+version = "([^"]+)"'
+        r'\s+source = \{ editable = "\." \}',
+        uv_lock,
+    )
+    cargo_lock_match = re.search(
+        r'\[\[package\]\]\s+name = "openadapt-desktop"\s+version = "([^"]+)"',
+        cargo_lock,
+    )
+    if engine_match is None or lock_match is None or cargo_lock_match is None:
+        raise ValueError("could not read the package version sources")
+    package_lock_version = str(package_lock["version"])
+    if str(package_lock.get("packages", {}).get("", {}).get("version")) != package_lock_version:
+        raise ValueError("package-lock.json root versions differ")
     return {
+        "pyproject.toml": str(pyproject["project"]["version"]),
+        "engine/__init__.py": engine_match.group(1),
+        "uv.lock": lock_match.group(1),
         "package.json": package["version"],
+        "package-lock.json": package_lock_version,
         "src-tauri/tauri.conf.json": tauri["version"],
         "src-tauri/Cargo.toml": cargo["package"]["version"],
+        "src-tauri/Cargo.lock": cargo_lock_match.group(1),
     }
 
 
@@ -266,7 +297,7 @@ def validate_native_tag_order(candidate_tag: str, tags: object) -> str:
 
 
 def set_native_version(version: str, root: Path = ROOT) -> dict[str, str]:
-    """Synchronize every native version source (and lockfiles) to ``version``.
+    """Synchronize every package version source and lockfile to ``version``.
 
     This transformation must be byte-deterministic on every platform, because
     :func:`validate_git_version_transform` reconstructs it and compares the
@@ -277,7 +308,7 @@ def set_native_version(version: str, root: Path = ROOT) -> dict[str, str]:
     """
 
     if not VERSION_PATTERN.fullmatch(version):
-        raise ValueError(f"native version must be X.Y.Z, got {version!r}")
+        raise ValueError(f"package version must be X.Y.Z, got {version!r}")
 
     def read_source(path: Path) -> str:
         return path.read_bytes().decode("utf-8")
@@ -293,6 +324,39 @@ def set_native_version(version: str, root: Path = ROOT) -> dict[str, str]:
     def set_lock_versions(lock: dict) -> None:
         lock["version"] = version
         lock["packages"][""]["version"] = version
+
+    pyproject_path = root / "pyproject.toml"
+    text, replaced = re.subn(
+        r'(\[project\]\s+name = "openadapt-desktop"\s+version = ")[^"]+(")',
+        rf"\g<1>{version}\g<2>",
+        read_source(pyproject_path),
+        count=1,
+    )
+    if replaced != 1:
+        raise ValueError(f"could not rewrite package version in {pyproject_path}")
+    write_source(pyproject_path, text)
+
+    engine_init = root / "engine" / "__init__.py"
+    text, replaced = re.subn(
+        r'(?m)^__version__ = "[^"]+"$',
+        f'__version__ = "{version}"',
+        read_source(engine_init),
+        count=1,
+    )
+    if replaced != 1:
+        raise ValueError(f"could not rewrite package version in {engine_init}")
+    write_source(engine_init, text)
+
+    uv_lock = root / "uv.lock"
+    text, replaced = re.subn(
+        r'(\[\[package\]\]\nname = "openadapt-desktop"\nversion = ")[^"]+(")',
+        rf"\g<1>{version}\g<2>",
+        read_source(uv_lock),
+        count=1,
+    )
+    if replaced != 1:
+        raise ValueError(f"could not rewrite package version in {uv_lock}")
+    write_source(uv_lock, text)
 
     rewrite_json(root / "package.json", lambda data: data.__setitem__("version", version))
     rewrite_json(root / "package-lock.json", set_lock_versions)
@@ -322,11 +386,14 @@ def set_native_version(version: str, root: Path = ROOT) -> dict[str, str]:
 
     synchronized = native_version(root)
     if synchronized != version:
-        raise ValueError(f"native version sources disagree after sync: {native_versions(root)}")
+        raise ValueError(f"package version sources disagree after sync: {native_versions(root)}")
     return native_versions(root)
 
 
 VERSION_TRANSFORM_PATHS = (
+    "pyproject.toml",
+    "engine/__init__.py",
+    "uv.lock",
     "package.json",
     "package-lock.json",
     "src-tauri/Cargo.toml",
@@ -386,7 +453,7 @@ def _git_bytes(root: Path, commit: str, relative_path: str) -> bytes:
 
 
 def native_version_at_ref(ref: str, root: Path = ROOT) -> str:
-    """Return the one native version that ``ref`` records.
+    """Return the one package version that ``ref`` records.
 
     This reads Git objects, so a caller can ask about a commit that is not
     checked out. The three sources must agree, exactly as they must in a
@@ -394,19 +461,46 @@ def native_version_at_ref(ref: str, root: Path = ROOT) -> str:
     """
 
     commit = _resolve_commit(root, ref)
+    pyproject = tomllib.loads(_git_bytes(root, commit, "pyproject.toml").decode("utf-8"))
+    engine_init = _git_bytes(root, commit, "engine/__init__.py").decode("utf-8")
+    uv_lock = _git_bytes(root, commit, "uv.lock").decode("utf-8")
     package = json.loads(_git_bytes(root, commit, "package.json"))
+    package_lock = json.loads(_git_bytes(root, commit, "package-lock.json"))
     tauri = json.loads(_git_bytes(root, commit, "src-tauri/tauri.conf.json"))
     cargo = tomllib.loads(_git_bytes(root, commit, "src-tauri/Cargo.toml").decode("utf-8"))
+    cargo_lock = _git_bytes(root, commit, "src-tauri/Cargo.lock").decode("utf-8")
+    engine_match = re.search(r'^__version__ = "([^"]+)"$', engine_init, flags=re.MULTILINE)
+    lock_match = re.search(
+        r'\[\[package\]\]\s+name = "openadapt-desktop"\s+version = "([^"]+)"'
+        r'\s+source = \{ editable = "\." \}',
+        uv_lock,
+    )
+    cargo_lock_match = re.search(
+        r'\[\[package\]\]\s+name = "openadapt-desktop"\s+version = "([^"]+)"',
+        cargo_lock,
+    )
+    if engine_match is None or lock_match is None or cargo_lock_match is None:
+        raise ValueError(f"could not read package versions at {ref}")
+    package_lock_version = str(package_lock.get("version") or "")
+    if str(package_lock.get("packages", {}).get("", {}).get("version") or "") != (
+        package_lock_version
+    ):
+        raise ValueError(f"package-lock.json root versions differ at {ref}")
     observed = {
+        str(pyproject.get("project", {}).get("version") or ""),
+        engine_match.group(1),
+        lock_match.group(1),
         str(package.get("version") or ""),
+        package_lock_version,
         str(tauri.get("version") or ""),
         str(cargo.get("package", {}).get("version") or ""),
+        cargo_lock_match.group(1),
     }
     if len(observed) != 1:
-        raise ValueError(f"native versions differ at {ref}: {sorted(observed)}")
+        raise ValueError(f"package versions differ at {ref}: {sorted(observed)}")
     version = observed.pop()
     if not VERSION_PATTERN.fullmatch(version):
-        raise ValueError(f"native version at {ref} is invalid: {version!r}")
+        raise ValueError(f"package version at {ref} is invalid: {version!r}")
     return version
 
 
@@ -426,7 +520,7 @@ def validate_git_version_transform(
     """
 
     if not VERSION_PATTERN.fullmatch(version):
-        raise ValueError(f"native version must be X.Y.Z, got {version!r}")
+        raise ValueError(f"package version must be X.Y.Z, got {version!r}")
     base_commit = _resolve_commit(root, base_ref)
     candidate_commit = _resolve_commit(root, candidate_ref)
     changed = subprocess.run(
@@ -437,12 +531,12 @@ def validate_git_version_transform(
         text=True,
     )
     if changed.returncode != 0:
-        raise ValueError("could not compare engine and native tag trees")
+        raise ValueError("could not compare package-version trees")
     changed_paths = {line for line in changed.stdout.splitlines() if line}
     unexpected = changed_paths.difference(VERSION_TRANSFORM_PATHS)
     if unexpected:
         raise ValueError(
-            "native tag contains changes outside the version transformation: "
+            "package-version change contains files outside the exact transformation: "
             + ", ".join(sorted(unexpected))
         )
 
@@ -482,10 +576,12 @@ def validate_git_version_advance(
     """
 
     base_version = native_version_at_ref(base_ref, root=root)
-    if native_tag_tuple(f"{NATIVE_TAG_PREFIX}{version}") <= native_tag_tuple(
-        f"{NATIVE_TAG_PREFIX}{base_version}"
-    ):
-        raise ValueError(f"native version {version} does not advance protected base {base_version}")
+    requested = tuple(int(part) for part in version.split("."))
+    base = tuple(int(part) for part in base_version.split("."))
+    if requested <= base:
+        raise ValueError(
+            f"package version {version} does not advance protected base {base_version}"
+        )
     return validate_git_version_transform(base_ref, candidate_ref, version, root=root)
 
 
@@ -894,8 +990,9 @@ def validate_engine_release(
     engine_tag: str,
     engine_commit: str,
     provenance: dict | None = None,
+    allow_draft: bool = False,
 ) -> dict:
-    """Require one exact, public engine release and immutable tag binding."""
+    """Require one exact engine release identity and immutable tag binding."""
 
     _validate_repository(repository)
     if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", engine_tag):
@@ -914,20 +1011,25 @@ def validate_engine_release(
     if not isinstance(release, dict) or set(release) != expected_keys:
         raise ValueError("engine release does not use the closed identity schema")
     expected_url = f"https://github.com/{repository}/releases/tag/{engine_tag}"
+    expected_draft = bool(allow_draft)
+    published_at = release.get("publishedAt")
     if (
         not isinstance(release.get("author"), dict)
         or release["author"].get("login") != RELEASE_APP_LOGIN
         or release["author"].get("id") != RELEASE_APP_NODE_ID
         or not isinstance(release.get("databaseId"), int)
         or release["databaseId"] <= 0
-        or release.get("isDraft") is not False
+        or release.get("isDraft") is not expected_draft
         or release.get("isPrerelease") is not False
-        or not isinstance(release.get("publishedAt"), str)
-        or not release["publishedAt"]
+        or (
+            (allow_draft and published_at is not None)
+            or (not allow_draft and (not isinstance(published_at, str) or not published_at))
+        )
         or release.get("tagName") != engine_tag
         or release.get("url") != expected_url
     ):
-        raise ValueError("engine release is not the exact published engine release")
+        phase = "draft" if allow_draft else "published"
+        raise ValueError(f"engine release is not the exact {phase} engine release")
     if provenance is not None:
         expected = {
             "engine_tag": engine_tag,
@@ -939,6 +1041,103 @@ def validate_engine_release(
         for key, value in expected.items():
             if provenance.get(key) != value:
                 raise ValueError(f"engine release {key} differs from signed provenance")
+    return release
+
+
+def validate_github_release_api(
+    release_path: Path,
+    *,
+    directory: Path,
+    repository: str,
+    tag: str,
+    phase: str,
+    prerelease: bool,
+    body_marker: str | None = None,
+) -> dict:
+    """Validate one draft or immutable GitHub Release and every uploaded byte."""
+
+    _validate_repository(repository)
+    if not isinstance(tag, str) or not re.fullmatch(
+        r"(?:v|desktop-v)[0-9]+\.[0-9]+\.[0-9]+|ffmpeg-runtime-v[0-9]+\.[0-9]+\.[0-9]+-r[0-9]+|desktop-production-[0-9a-f]{64}",
+        tag,
+    ):
+        raise ValueError(f"invalid release tag: {tag!r}")
+    if phase not in {"draft", "published"}:
+        raise ValueError(f"invalid release phase: {phase!r}")
+    if not directory.is_dir():
+        raise ValueError(f"release upload directory does not exist: {directory}")
+    members = list(directory.iterdir())
+    invalid = [path for path in members if not path.is_file() or path.is_symlink()]
+    if invalid or not members:
+        raise ValueError(f"release upload directory contains invalid files: {invalid}")
+    local = {
+        path.name: {
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "size": path.stat().st_size,
+        }
+        for path in members
+    }
+    if len(local) != len(members):
+        raise ValueError("release upload directory contains duplicate file names")
+
+    release = json.loads(release_path.read_text(encoding="utf-8"))
+    expected_draft = phase == "draft"
+    if (
+        not isinstance(release, dict)
+        or not isinstance(release.get("id"), int)
+        or release["id"] <= 0
+        or release.get("tag_name") != tag
+        or release.get("html_url") != f"https://github.com/{repository}/releases/tag/{tag}"
+        or release.get("draft") is not expected_draft
+        or release.get("prerelease") is not prerelease
+        or release.get("immutable") is not (not expected_draft)
+        or not isinstance(release.get("author"), dict)
+        or release["author"].get("login") != RELEASE_APP_LOGIN
+        or release["author"].get("id") != RELEASE_APP_USER_ID
+    ):
+        raise ValueError(f"GitHub Release is not the exact {phase} release identity")
+    if expected_draft:
+        if release.get("published_at") is not None:
+            raise ValueError("draft GitHub Release already has a publication time")
+    elif not isinstance(release.get("published_at"), str) or not release["published_at"]:
+        raise ValueError("published GitHub Release has no publication time")
+    if body_marker is not None:
+        body = release.get("body")
+        if not isinstance(body, str) or body_marker not in body:
+            raise ValueError("GitHub Release does not contain the required body marker")
+
+    assets = release.get("assets")
+    if not isinstance(assets, list):
+        raise ValueError("GitHub Release assets are not a list")
+    remote: dict[str, dict] = {}
+    for asset in assets:
+        if not isinstance(asset, dict) or not isinstance(asset.get("name"), str):
+            raise ValueError("GitHub Release contains an invalid asset")
+        name = asset["name"]
+        expected_url = f"https://github.com/{repository}/releases/download/{tag}/{name}"
+        if (
+            Path(name).name != name
+            or name in remote
+            or asset.get("state") != "uploaded"
+            or asset.get("browser_download_url") != expected_url
+            or not isinstance(asset.get("uploader"), dict)
+            or asset["uploader"].get("login") != RELEASE_APP_LOGIN
+            or asset["uploader"].get("id") != RELEASE_APP_USER_ID
+            or not isinstance(asset.get("size"), int)
+            or asset["size"] < 0
+            or not isinstance(asset.get("digest"), str)
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", asset["digest"])
+        ):
+            raise ValueError(f"GitHub Release asset identity is invalid: {name!r}")
+        remote[name] = {
+            "sha256": asset["digest"].removeprefix("sha256:"),
+            "size": asset["size"],
+        }
+    if remote != local:
+        raise ValueError(
+            "GitHub Release assets differ from the exact local inventory: "
+            f"remote={sorted(remote)}, local={sorted(local)}"
+        )
     return release
 
 
@@ -962,11 +1161,15 @@ def write_engine_release_provenance(
     that published them.
     """
 
+    raw_release = json.loads(release_path.read_text(encoding="utf-8"))
+    if not isinstance(raw_release, dict) or not isinstance(raw_release.get("isDraft"), bool):
+        raise ValueError("engine release does not declare a draft phase")
     release = validate_engine_release(
         release_path,
         repository=repository,
         engine_tag=engine_tag,
         engine_commit=engine_commit,
+        allow_draft=raw_release["isDraft"],
     )
     _validate_commit(workflow_commit)
     expected_ref = f"{repository}/{ENGINE_RELEASE_WORKFLOW}@refs/tags/{engine_tag}"
@@ -1279,6 +1482,34 @@ def validate_engine_release_inventory(
     return "recovery"
 
 
+def validate_exact_engine_release_inventory(
+    directory: Path,
+    *,
+    release_path: Path,
+    repository: str,
+    engine_tag: str,
+    engine_commit: str,
+) -> str:
+    """Require one immutable engine Release with no native-release assets."""
+
+    state = validate_engine_release_inventory(
+        directory,
+        release_path=release_path,
+        repository=repository,
+        engine_tag=engine_tag,
+        engine_commit=engine_commit,
+    )
+    version = engine_tag.removeprefix("v")
+    expected = expected_exact_engine_release_asset_names(version)
+    actual = {path.name for path in directory.iterdir() if path.is_file()}
+    if state != "engine" or actual != expected:
+        raise ValueError(
+            "immutable engine Release must contain only the package artifacts and receipt: "
+            f"actual={sorted(actual)}, expected={sorted(expected)}"
+        )
+    return "exact-engine"
+
+
 def write_verified_release_index(
     output: Path,
     *,
@@ -1467,7 +1698,7 @@ def write_verified_release_channel(
             )
         prior_sha256 = hashlib.sha256(existing.read_bytes()).hexdigest()
         prior_version = prior["native_version"]
-    engine_base = f"https://github.com/{repository}/releases/download/{index['engine_tag']}"
+    native_base = f"https://github.com/{repository}/releases/download/{index['native_tag']}"
     payload = {
         "schema": VERIFIED_RELEASE_CHANNEL_SCHEMA,
         "repository": repository,
@@ -1485,11 +1716,11 @@ def write_verified_release_channel(
         "verified_index": {
             "name": VERIFIED_RELEASE_INDEX,
             "sha256": hashlib.sha256(index_path.read_bytes()).hexdigest(),
-            "url": f"{engine_base}/{VERIFIED_RELEASE_INDEX}",
+            "url": f"{native_base}/{VERIFIED_RELEASE_INDEX}",
         },
         "checksums": {
             **index["checksums"],
-            "url": f"{engine_base}/SHA256SUMS",
+            "url": f"{native_base}/SHA256SUMS",
         },
         "previous": (
             {"native_version": prior_version, "sha256": prior_sha256}
@@ -1570,7 +1801,11 @@ def validate_verified_release_channel(path: Path) -> dict:
             raise ValueError(f"release channel {field} differs")
     if not isinstance(data.get("engine_release_id"), int) or data["engine_release_id"] <= 0:
         raise ValueError("release channel engine release id is invalid")
-    engine_base = f"https://github.com/{repository}/releases/download/{data['engine_tag']}"
+    if schema == VERIFIED_RELEASE_CHANNEL_SCHEMA:
+        asset_tag = data["native_tag"]
+    else:
+        asset_tag = data["engine_tag"]
+    asset_base = f"https://github.com/{repository}/releases/download/{asset_tag}"
     for field, name in (
         ("verified_index", VERIFIED_RELEASE_INDEX),
         ("checksums", "SHA256SUMS"),
@@ -1581,7 +1816,7 @@ def validate_verified_release_channel(path: Path) -> dict:
             or set(value) != {"name", "sha256", "url"}
             or value.get("name") != name
             or not re.fullmatch(r"[0-9a-f]{64}", str(value.get("sha256") or ""))
-            or value.get("url") != f"{engine_base}/{name}"
+            or value.get("url") != f"{asset_base}/{name}"
         ):
             raise ValueError(f"release channel {field} binding is invalid")
     previous = data.get("previous")
@@ -2245,6 +2480,16 @@ def _parser() -> argparse.ArgumentParser:
     engine_release_parser.add_argument("--engine-commit", required=True)
     engine_release_parser.add_argument("--provenance", type=Path)
     engine_release_parser.add_argument("--github-output", type=Path)
+    engine_release_parser.add_argument("--allow-draft", action="store_true")
+
+    github_release_parser = subparsers.add_parser("validate-github-release")
+    github_release_parser.add_argument("--file", type=Path, required=True)
+    github_release_parser.add_argument("--directory", type=Path, required=True)
+    github_release_parser.add_argument("--repository", required=True)
+    github_release_parser.add_argument("--tag", required=True)
+    github_release_parser.add_argument("--phase", choices=("draft", "published"), required=True)
+    github_release_parser.add_argument("--prerelease", action="store_true")
+    github_release_parser.add_argument("--body-marker")
 
     engine_provenance_parser = subparsers.add_parser("write-engine-provenance")
     engine_provenance_parser.add_argument("--output", type=Path, required=True)
@@ -2276,6 +2521,13 @@ def _parser() -> argparse.ArgumentParser:
     engine_inventory_parser.add_argument("--local-engine-directory", type=Path)
     engine_inventory_parser.add_argument("--native-directory", type=Path)
     engine_inventory_parser.add_argument("--require-index", action="store_true")
+
+    exact_engine_inventory_parser = subparsers.add_parser("validate-exact-engine-inventory")
+    exact_engine_inventory_parser.add_argument("--directory", type=Path, required=True)
+    exact_engine_inventory_parser.add_argument("--release", type=Path, required=True)
+    exact_engine_inventory_parser.add_argument("--repository", required=True)
+    exact_engine_inventory_parser.add_argument("--engine-tag", required=True)
+    exact_engine_inventory_parser.add_argument("--engine-commit", required=True)
 
     index_parser = subparsers.add_parser("write-verified-index")
     index_parser.add_argument("--output", type=Path, required=True)
@@ -2482,6 +2734,7 @@ def main() -> int:
                 engine_tag=args.engine_tag,
                 engine_commit=args.engine_commit,
                 provenance=provenance,
+                allow_draft=args.allow_draft,
             )
             _write_github_output(
                 args.github_output,
@@ -2490,6 +2743,17 @@ def main() -> int:
                 },
             )
             print(f"Validated engine release {args.engine_tag} ({release['databaseId']})")
+        elif args.command == "validate-github-release":
+            release = validate_github_release_api(
+                args.file,
+                directory=args.directory,
+                repository=args.repository,
+                tag=args.tag,
+                phase=args.phase,
+                prerelease=args.prerelease,
+                body_marker=args.body_marker,
+            )
+            print(f"Validated {args.phase} GitHub Release {args.tag} ({release['id']})")
         elif args.command == "write-engine-provenance":
             print(
                 write_engine_release_provenance(
@@ -2529,6 +2793,15 @@ def main() -> int:
                 local_engine_directory=args.local_engine_directory,
                 native_directory=args.native_directory,
                 require_index=args.require_index,
+            )
+            print(f"Validated {state} engine Release inventory")
+        elif args.command == "validate-exact-engine-inventory":
+            state = validate_exact_engine_release_inventory(
+                args.directory,
+                release_path=args.release,
+                repository=args.repository,
+                engine_tag=args.engine_tag,
+                engine_commit=args.engine_commit,
             )
             print(f"Validated {state} engine Release inventory")
         elif args.command == "write-verified-index":

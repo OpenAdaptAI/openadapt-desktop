@@ -19,6 +19,7 @@ permissions:
   contents: read
 
 env:
+  RELEASE_DISPATCH_ACTOR_ID: "774615"
   RELEASE_APP_ID: "4730708"
   RELEASE_APP_ACTOR_ID: "321543906"
   RELEASE_APP_INSTALLATION_ID: "156835568"
@@ -38,11 +39,13 @@ jobs:
     steps:
       - name: Require the exact repository, main ref, and stable version input
         env:
+          EVENT_ACTOR_ID: ${{ github.actor_id }}
           REQUESTED_VERSION: ${{ inputs.version }}
         shell: bash
         run: |
           set -euo pipefail
           if [ "${GITHUB_EVENT_NAME}" != "workflow_dispatch" ] || \
+             [ "${EVENT_ACTOR_ID}" != "${RELEASE_DISPATCH_ACTOR_ID}" ] || \
              [ "${GITHUB_REPOSITORY}" != "OpenAdaptAI/openadapt-desktop" ] || \
              [ "${GITHUB_REF}" != "refs/heads/main" ] || \
              [ "${GITHUB_REF_TYPE}" != "branch" ] || \
@@ -169,6 +172,7 @@ jobs:
           private-key: ${{ secrets.OPENADAPT_RELEASE_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
+          permission-administration: read
           permission-contents: write
           permission-metadata: read
 
@@ -184,6 +188,7 @@ jobs:
           CONFIGURED_RELEASE_APP_ID: ${{ vars.OPENADAPT_RELEASE_APP_ID }}
           CONFIGURED_RELEASE_ACTOR_ID: ${{ vars.OPENADAPT_RELEASE_ACTOR_ID }}
           CONFIGURED_RELEASE_APP_INSTALLATION_ID: ${{ vars.OPENADAPT_RELEASE_APP_INSTALLATION_ID }}
+          GH_TOKEN: ${{ steps.release_app.outputs.token }}
           RELEASE_APP_SLUG: ${{ steps.release_app.outputs.app-slug }}
           TOKEN_INSTALLATION_ID: ${{ steps.release_app.outputs['installation-id'] }}
         shell: bash
@@ -196,6 +201,10 @@ jobs:
             echo "error: release token does not match the admitted App identity" >&2
             exit 1
           fi
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/immutable-releases" > immutable-releases.json
+          python scripts/production_release_contract.py validate-immutable-releases \
+            --file immutable-releases.json
 
       - name: Create only the exact native candidate tag
         env:
@@ -381,6 +390,25 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          draft_id="$(gh release view "${NATIVE_TAG}" \
+            --json databaseId,isDraft \
+            --jq 'select(.isDraft == true) | .databaseId' 2>/dev/null || true)"
+          if [ -n "${draft_id}" ]; then
+            gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/${GITHUB_REPOSITORY}/releases/${draft_id}" > native-release.json
+            if ! jq -e --arg tag "${NATIVE_TAG}" \
+              '.tag_name == $tag and .draft == true and .prerelease == true and
+               .immutable == false and .published_at == null and
+               .author.login == "openadapt-release[bot]" and
+               .author.id == 321543906 and
+               (.body | contains("<!-- installer-release -->"))' \
+              native-release.json >/dev/null; then
+              echo "error: existing native draft has the wrong identity" >&2
+              exit 1
+            fi
+            echo "found=draft" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
           status="$(curl --show-error --silent --location \
             --header 'Accept: application/vnd.github+json' \
             --header "Authorization: Bearer ${GH_TOKEN}" \
@@ -398,6 +426,7 @@ jobs:
           fi
           if ! jq -e --arg tag "${NATIVE_TAG}" \
             '.tag_name == $tag and .draft == false and .prerelease == true and
+             .immutable == true and
              .author.login == "openadapt-release[bot]" and
              .author.id == 321543906 and
              (.body | contains("<!-- installer-release -->"))' \
@@ -407,7 +436,7 @@ jobs:
           fi
           echo "found=true" >> "${GITHUB_OUTPUT}"
 
-      - name: Authenticate a complete public set or request partial recovery
+      - name: Authenticate the complete immutable public release
         id: published
         if: steps.release.outputs.found == 'true'
         shell: bash
@@ -434,41 +463,59 @@ jobs:
               --pattern "${name}"
           done < published-assets.txt
 
+          python scripts/native_release.py validate-github-release \
+            --file native-release.json \
+            --directory published-assets \
+            --repository "${GITHUB_REPOSITORY}" \
+            --tag "${NATIVE_TAG}" \
+            --phase published \
+            --prerelease \
+            --body-marker '<!-- installer-release -->'
+          mkdir published-authority
+          mv published-assets/openadapt-desktop-verified-release.json published-authority/
+          mv published-assets/openadapt-desktop-channel.json published-authority/
           provenance=published-assets/openadapt-desktop-native-release-provenance.json
           identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/native-release.yml@refs/tags/${NATIVE_TAG}"
-          if [ -f published-assets/SHA256SUMS ] && \
-             python scripts/native_release.py verify-checksums \
-               --directory published-assets \
-               --manifest published-assets/SHA256SUMS && \
-             python scripts/native_release.py validate-set --directory published-assets && \
-             python scripts/native_release.py validate-sbom \
-               --file "published-assets/OpenAdapt-Desktop-${NATIVE_TAG}.cyclonedx.json" && \
-             python scripts/native_release.py validate-website-manifest \
-               --file published-assets/openadapt-desktop-release-manifest.json \
-               --checksums published-assets/SHA256SUMS && \
-             gh attestation verify "${provenance}" \
-               --repo "${GITHUB_REPOSITORY}" \
-               --cert-identity "${identity}" \
-               --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
-               --deny-self-hosted-runners \
-               --format json > public-attestation.json && \
-             gh attestation verify published-assets/SHA256SUMS \
-               --repo "${GITHUB_REPOSITORY}" \
-               --cert-identity "${identity}" \
-               --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
-               --deny-self-hosted-runners && \
-             python scripts/native_release.py validate-attestation \
-               --file public-attestation.json \
-               --directory published-assets \
-               --checksums published-assets/SHA256SUMS \
-               --provenance "${provenance}" \
-               --repository "${GITHUB_REPOSITORY}" \
-               --tag "${NATIVE_TAG}" \
-               --source-commit "${SOURCE_COMMIT}"; then
-            echo "state=complete" >> "${GITHUB_OUTPUT}"
-          else
-            echo "state=partial" >> "${GITHUB_OUTPUT}"
-          fi
+          python scripts/native_release.py verify-checksums \
+            --directory published-assets \
+            --manifest published-assets/SHA256SUMS
+          python scripts/native_release.py validate-set --directory published-assets
+          python scripts/native_release.py validate-sbom \
+            --file "published-assets/OpenAdapt-Desktop-${NATIVE_TAG}.cyclonedx.json"
+          python scripts/native_release.py validate-website-manifest \
+            --file published-assets/openadapt-desktop-release-manifest.json \
+            --checksums published-assets/SHA256SUMS
+          python scripts/native_release.py validate-verified-index \
+            --file published-authority/openadapt-desktop-verified-release.json
+          python scripts/native_release.py validate-release-channel \
+            --file published-authority/openadapt-desktop-channel.json
+          gh attestation verify "${provenance}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --cert-identity "${identity}" \
+            --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --deny-self-hosted-runners \
+            --format json > public-attestation.json
+          gh attestation verify published-assets/SHA256SUMS \
+            --repo "${GITHUB_REPOSITORY}" \
+            --cert-identity "${identity}" \
+            --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --deny-self-hosted-runners
+          for authority in published-authority/*.json; do
+            gh attestation verify "${authority}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --cert-identity "${identity}" \
+              --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
+              --deny-self-hosted-runners
+          done
+          python scripts/native_release.py validate-attestation \
+            --file public-attestation.json \
+            --directory published-assets \
+            --checksums published-assets/SHA256SUMS \
+            --provenance "${provenance}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --tag "${NATIVE_TAG}" \
+            --source-commit "${SOURCE_COMMIT}"
+          echo "state=complete" >> "${GITHUB_OUTPUT}"
 
       - name: Download the original attested set for partial recovery
         if: steps.published.outputs.state == 'partial'
@@ -547,6 +594,8 @@ jobs:
             echo "state=partial" >> "${GITHUB_OUTPUT}"
           elif [ "${PUBLISHED_STATE}" = "complete" ]; then
             echo "state=${PUBLISHED_STATE}" >> "${GITHUB_OUTPUT}"
+          elif [ "${FOUND}" = "draft" ]; then
+            echo "state=draft" >> "${GITHUB_OUTPUT}"
           elif [ "${FOUND}" = "false" ]; then
             echo "state=absent" >> "${GITHUB_OUTPUT}"
           else
@@ -557,7 +606,9 @@ jobs:
   build-macos:
     name: macOS ${{ matrix.architecture }}
     needs: [validate, recover-published-native]
-    if: needs.recover-published-native.outputs.state == 'absent'
+    if: >-
+      needs.recover-published-native.outputs.state == 'absent' ||
+      needs.recover-published-native.outputs.state == 'draft'
     runs-on: ${{ matrix.os }}
     # The protected environment owns the Developer ID identity and notary
     # credentials. A native release cannot fall back to an ad-hoc artifact.
@@ -715,7 +766,9 @@ jobs:
   build-windows:
     name: Windows x86_64
     needs: [validate, recover-published-native]
-    if: needs.recover-published-native.outputs.state == 'absent'
+    if: >-
+      needs.recover-published-native.outputs.state == 'absent' ||
+      needs.recover-published-native.outputs.state == 'draft'
     runs-on: windows-2022
     # The protected environment owns either Azure Trusted Signing or the PFX
     # identity. A native release cannot fall back to unsigned installers.
@@ -905,7 +958,9 @@ jobs:
   build-linux:
     name: Linux x86_64 (GitHub-attested bytes)
     needs: [validate, recover-published-native]
-    if: needs.recover-published-native.outputs.state == 'absent'
+    if: >-
+      needs.recover-published-native.outputs.state == 'absent' ||
+      needs.recover-published-native.outputs.state == 'draft'
     runs-on: ubuntu-22.04
     # DEB and AppImage have no one shared native signing format. The attest job
     # below uses GitHub OIDC to sign provenance for the exact staged bytes and
@@ -1164,6 +1219,35 @@ jobs:
           --file release-assets/openadapt-desktop-release-manifest.json
           --checksums release-assets/SHA256SUMS
 
+      - name: Write exact version-scoped release authority
+        env:
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir release-authority
+          python scripts/native_release.py write-verified-index \
+            --output release-authority/openadapt-desktop-verified-release.json \
+            --directory release-assets \
+            --checksums release-assets/SHA256SUMS \
+            --provenance release-assets/openadapt-desktop-native-release-provenance.json \
+            --repository "${GITHUB_REPOSITORY}" \
+            --tag "${NATIVE_TAG}" \
+            --source-commit "${SOURCE_COMMIT}" \
+            --engine-release engine-release.json
+          python scripts/native_release.py write-release-channel \
+            --output release-authority/openadapt-desktop-channel.json \
+            --index release-authority/openadapt-desktop-verified-release.json \
+            --repository "${GITHUB_REPOSITORY}" \
+            --workflow-ref "${WORKFLOW_REF}" \
+            --workflow-commit "${SOURCE_COMMIT}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}"
+          python scripts/native_release.py validate-verified-index \
+            --file release-authority/openadapt-desktop-verified-release.json
+          python scripts/native_release.py validate-release-channel \
+            --file release-authority/openadapt-desktop-channel.json
+
       - name: Attest the exact files named by SHA256SUMS
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
@@ -1173,6 +1257,11 @@ jobs:
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-path: release-assets/SHA256SUMS
+
+      - name: Attest the exact version-scoped release authority
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: release-authority/*.json
 
       - name: Verify the signed workflow and exact subject inventory before upload
         env:
@@ -1210,6 +1299,14 @@ jobs:
           if-no-files-found: error
           overwrite: true
 
+      - name: Upload exact attested release authority
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-release-authority-${{ needs.validate.outputs.native_tag }}
+          path: release-authority/*
+          if-no-files-found: error
+          overwrite: true
+
   publish-native:
     name: Publish the verified candidate prerelease
     needs: [validate, recover-published-native, attest]
@@ -1217,7 +1314,8 @@ jobs:
       always() &&
       needs.validate.result == 'success' &&
       needs.recover-published-native.result == 'success' &&
-      ((needs.recover-published-native.outputs.state == 'absent' &&
+      (((needs.recover-published-native.outputs.state == 'absent' ||
+         needs.recover-published-native.outputs.state == 'draft') &&
         needs.attest.result == 'success') ||
        needs.recover-published-native.outputs.state == 'partial')
     runs-on: ubuntu-22.04
@@ -1244,6 +1342,12 @@ jobs:
           name: native-release-${{ needs.validate.outputs.native_tag }}
           path: release-assets
 
+      - name: Download exact attested release authority
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: native-release-authority-${{ needs.validate.outputs.native_tag }}
+          path: release-authority
+
       - name: Reverify exact bytes before upload
         shell: bash
         run: |
@@ -1264,6 +1368,17 @@ jobs:
             --cert-identity "${identity}" \
             --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
             --deny-self-hosted-runners
+          for authority in release-authority/*.json; do
+            gh attestation verify "${authority}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --cert-identity "${identity}" \
+              --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
+              --deny-self-hosted-runners
+          done
+          python scripts/native_release.py validate-verified-index \
+            --file release-authority/openadapt-desktop-verified-release.json
+          python scripts/native_release.py validate-release-channel \
+            --file release-authority/openadapt-desktop-channel.json
           python scripts/native_release.py validate-attestation \
             --file attestation.json \
             --directory release-assets \
@@ -1281,6 +1396,7 @@ jobs:
           private-key: ${{ secrets.OPENADAPT_RELEASE_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
+          permission-administration: read
           permission-contents: write
           permission-metadata: read
 
@@ -1289,6 +1405,7 @@ jobs:
           CONFIGURED_RELEASE_APP_ID: ${{ vars.OPENADAPT_RELEASE_APP_ID }}
           CONFIGURED_RELEASE_ACTOR_ID: ${{ vars.OPENADAPT_RELEASE_ACTOR_ID }}
           CONFIGURED_RELEASE_APP_INSTALLATION_ID: ${{ vars.OPENADAPT_RELEASE_APP_INSTALLATION_ID }}
+          GH_TOKEN: ${{ steps.release_app.outputs.token }}
           RELEASE_APP_SLUG: ${{ steps.release_app.outputs.app-slug }}
           TOKEN_INSTALLATION_ID: ${{ steps.release_app.outputs['installation-id'] }}
         shell: bash
@@ -1301,6 +1418,10 @@ jobs:
             echo "error: release token does not match the admitted App identity" >&2
             exit 1
           fi
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/immutable-releases" > immutable-releases.json
+          python scripts/production_release_contract.py validate-immutable-releases \
+            --file immutable-releases.json
 
       - name: Create or safely resume the immutable public prerelease
         env:
@@ -1329,52 +1450,76 @@ jobs:
             --candidate-tag "${NATIVE_TAG}" \
             --tags remote-native-tags.txt
           title="OpenAdapt Desktop release candidate ${NATIVE_TAG#desktop-v}"
-          if gh release view "${NATIVE_TAG}" \
-            --json assets,author,body,isDraft,isPrerelease,tagName > native-release.json 2>/dev/null; then
-            if ! jq -e --arg tag "${NATIVE_TAG}" \
-              '.tagName == $tag and .isDraft == false and .isPrerelease == true and
-               .author.login == "openadapt-release[bot]" and
-               .author.id == "BOT_kgDOEype4g" and
+          mkdir release-upload
+          cp release-assets/* release-authority/* release-upload/
+          release_id="$(gh release view "${NATIVE_TAG}" --json databaseId --jq .databaseId 2>/dev/null || true)"
+          if [ -n "${release_id}" ]; then
+            gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/${GITHUB_REPOSITORY}/releases/${release_id}" > existing-release-api.json
+            if ! jq -e \
+              '.draft == true and .prerelease == true and .immutable == false and
+               .author.login == "openadapt-release[bot]" and .author.id == 321543906 and
                (.body | contains("<!-- installer-release -->"))' \
-              native-release.json >/dev/null; then
-              echo "error: existing native release has the wrong public identity" >&2
+              existing-release-api.json >/dev/null; then
+              echo "error: existing native release is not the recoverable App draft" >&2
               exit 1
             fi
-            mkdir existing-release-assets
-            jq -r '.assets[].name' native-release.json > existing-assets.txt
-            while IFS= read -r name; do
-              if [ -z "${name}" ]; then
-                continue
-              fi
-              if [ "$(basename "${name}")" != "${name}" ] || \
-                 [ ! -f "release-assets/${name}" ]; then
-                echo "error: existing release has an unexpected asset: ${name}" >&2
-                exit 1
-              fi
-              gh release download "${NATIVE_TAG}" --dir existing-release-assets \
-                --pattern "${name}"
-              cmp "release-assets/${name}" "existing-release-assets/${name}"
-            done < existing-assets.txt
-            for path in release-assets/*; do
-              name="$(basename "${path}")"
-              if ! grep -qxF "${name}" existing-assets.txt; then
-                gh release upload "${NATIVE_TAG}" "${path}"
-              fi
-            done
           else
             gh release create "${NATIVE_TAG}" \
+              --draft \
               --verify-tag \
               --prerelease \
               --title "${title}" \
-              --notes-file docs/RELEASE_CANDIDATE_INSTALLERS.md \
-              release-assets/*
+              --notes-file docs/RELEASE_CANDIDATE_INSTALLERS.md
           fi
+          gh release upload "${NATIVE_TAG}" release-upload/* --clobber
+          release_id="$(gh release view "${NATIVE_TAG}" --json databaseId --jq .databaseId)"
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/releases/${release_id}" > draft-release-api.json
+          python scripts/native_release.py validate-github-release \
+            --file draft-release-api.json \
+            --directory release-upload \
+            --repository "${GITHUB_REPOSITORY}" \
+            --tag "${NATIVE_TAG}" \
+            --phase draft \
+            --prerelease \
+            --body-marker '<!-- installer-release -->'
+          gh release edit "${NATIVE_TAG}" --draft=false --prerelease
           mkdir published-release-assets
           gh release download "${NATIVE_TAG}" --dir published-release-assets --pattern '*'
-          cmp release-assets/SHA256SUMS published-release-assets/SHA256SUMS
+          for attempt in $(seq 1 30); do
+            gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+              > published-release-api.json
+            if jq -e \
+              '.immutable == true and (.assets | all(.digest | type == "string"))' \
+              published-release-api.json >/dev/null; then
+              break
+            fi
+            echo "Waiting for immutable native release metadata (${attempt}/30)."
+            sleep 2
+          done
+          jq -e '.immutable == true and (.assets | all(.digest | type == "string"))' \
+            published-release-api.json >/dev/null
+          python scripts/native_release.py validate-github-release \
+            --file published-release-api.json \
+            --directory published-release-assets \
+            --repository "${GITHUB_REPOSITORY}" \
+            --tag "${NATIVE_TAG}" \
+            --phase published \
+            --prerelease \
+            --body-marker '<!-- installer-release -->'
+          mv published-release-assets/openadapt-desktop-verified-release.json \
+            published-release-index.json
+          mv published-release-assets/openadapt-desktop-channel.json \
+            published-release-channel.json
           python scripts/native_release.py verify-checksums \
             --directory published-release-assets \
             --manifest published-release-assets/SHA256SUMS
+          python scripts/native_release.py validate-verified-index \
+            --file published-release-index.json
+          python scripts/native_release.py validate-release-channel \
+            --file published-release-channel.json
 
   verify-published-release:
     name: Verify the published native release
@@ -1426,18 +1571,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          gh release view "${NATIVE_TAG}" \
-            --json author,isDraft,isPrerelease,tagName > native-release-identity.json
-          if ! jq -e --arg tag "${NATIVE_TAG}" \
-            '.tagName == $tag and .isDraft == false and .isPrerelease == true and
-             .author.login == "openadapt-release[bot]" and
-             .author.id == "BOT_kgDOEype4g"' \
-            native-release-identity.json >/dev/null; then
-            echo "error: published native release has the wrong App identity" >&2
-            exit 1
-          fi
           mkdir release-assets
           gh release download "${NATIVE_TAG}" --dir release-assets --pattern '*'
+          release_id="$(gh release view "${NATIVE_TAG}" --json databaseId --jq .databaseId)"
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/releases/${release_id}" > native-release-api.json
+          python scripts/native_release.py validate-github-release \
+            --file native-release-api.json \
+            --directory release-assets \
+            --repository "${GITHUB_REPOSITORY}" \
+            --tag "${NATIVE_TAG}" \
+            --phase published \
+            --prerelease \
+            --body-marker '<!-- installer-release -->'
+          mkdir release-authority
+          mv release-assets/openadapt-desktop-verified-release.json release-authority/
+          mv release-assets/openadapt-desktop-channel.json release-authority/
           git fetch --force origin "refs/tags/${NATIVE_TAG}:refs/tags/${NATIVE_TAG}"
           observed="$(git rev-parse --verify "${NATIVE_TAG}^{commit}")"
           if [ "${observed}" != "${SOURCE_COMMIT}" ]; then
@@ -1466,6 +1615,17 @@ jobs:
             --cert-identity "${identity}" \
             --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
             --deny-self-hosted-runners
+          for authority in release-authority/*.json; do
+            gh attestation verify "${authority}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --cert-identity "${identity}" \
+              --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
+              --deny-self-hosted-runners
+          done
+          python scripts/native_release.py validate-verified-index \
+            --file release-authority/openadapt-desktop-verified-release.json
+          python scripts/native_release.py validate-release-channel \
+            --file release-authority/openadapt-desktop-channel.json
           python scripts/native_release.py validate-attestation \
             --file attestation.json \
             --directory release-assets \

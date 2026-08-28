@@ -29,6 +29,7 @@ permissions:
   contents: read
 
 env:
+  RELEASE_DISPATCH_ACTOR_ID: "774615"
   RELEASE_APP_ID: "4730708"
   RELEASE_APP_ACTOR_ID: "321543906"
   RELEASE_APP_INSTALLATION_ID: "156835568"
@@ -56,14 +57,16 @@ jobs:
       - name: Resolve current protected-main commits
         id: refs
         env:
+          EVENT_ACTOR_ID: ${{ github.actor_id }}
           REQUESTED_CENTRAL_COMMIT: ${{ inputs.central_commit }}
           OPERATION: ${{ inputs.operation }}
         shell: bash
         run: |
           set -euo pipefail
           if [ "${GITHUB_EVENT_NAME}" = workflow_dispatch ] && \
-             [ "${GITHUB_REF}" != refs/heads/main ]; then
-            echo "error: dispatch source is not protected Desktop main" >&2
+             { [ "${GITHUB_REF}" != refs/heads/main ] || \
+               [ "${EVENT_ACTOR_ID}" != "${RELEASE_DISPATCH_ACTOR_ID}" ]; }; then
+            echo "error: dispatch requires the admitted human actor on protected Desktop main" >&2
             exit 1
           fi
           desktop_commit="$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq .sha)"
@@ -420,6 +423,7 @@ jobs:
           private-key: ${{ secrets.OPENADAPT_RELEASE_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
+          permission-administration: read
           permission-contents: write
           permission-metadata: read
 
@@ -428,6 +432,7 @@ jobs:
           CONFIGURED_RELEASE_APP_ID: ${{ vars.OPENADAPT_RELEASE_APP_ID }}
           CONFIGURED_RELEASE_ACTOR_ID: ${{ vars.OPENADAPT_RELEASE_ACTOR_ID }}
           CONFIGURED_RELEASE_APP_INSTALLATION_ID: ${{ vars.OPENADAPT_RELEASE_APP_INSTALLATION_ID }}
+          GH_TOKEN: ${{ steps.release_app.outputs.token }}
           RELEASE_APP_SLUG: ${{ steps.release_app.outputs.app-slug }}
           TOKEN_INSTALLATION_ID: ${{ steps.release_app.outputs['installation-id'] }}
         shell: bash
@@ -440,6 +445,10 @@ jobs:
             echo "error: release token does not match the admitted App identity" >&2
             exit 1
           fi
+          gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/immutable-releases" > immutable-releases.json
+          python scripts/production_release_contract.py validate-immutable-releases \
+            --file immutable-releases.json
 
       - name: Publish once and verify the derived cache
         env:

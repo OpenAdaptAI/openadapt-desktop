@@ -198,17 +198,18 @@ def validate_channel(
         raise ValueError("release channel URL is invalid")
     if not isinstance(data.get("engine_release_id"), int) or data["engine_release_id"] <= 0:
         raise ValueError("release channel engine release id is invalid")
-    engine_assets = f"https://github.com/{repository}/releases/download/{engine_tag}"
+    asset_tag = native_tag if schema == CHANNEL_SCHEMA else engine_tag
+    release_assets = f"https://github.com/{repository}/releases/download/{asset_tag}"
     _validate_hash_binding(
         data.get("verified_index"),
         name=INDEX_NAME,
-        url=f"{engine_assets}/{INDEX_NAME}",
+        url=f"{release_assets}/{INDEX_NAME}",
         label="release channel index",
     )
     _validate_hash_binding(
         data.get("checksums"),
         name="SHA256SUMS",
-        url=f"{engine_assets}/SHA256SUMS",
+        url=f"{release_assets}/SHA256SUMS",
         label="release channel checksum",
     )
     previous = data.get("previous")
