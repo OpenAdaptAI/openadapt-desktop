@@ -70,6 +70,19 @@ def test_exact_tray_client_uses_the_desktop_protocol(tmp_path: Path) -> None:
     server.start()
     client = IPCClient.from_discovery(discovery)
     assert client is not None
+    incompatible = tmp_path / "incompatible_desktop_ipc.json"
+    incompatible.write_text(
+        json.dumps(
+            {
+                "protocol_version": IPC_PROTOCOL_VERSION + 1,
+                "host": server.host,
+                "port": server.port,
+                "token": server.token,
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert IPCClient.from_discovery(incompatible) is None
 
     status_received = threading.Event()
     compile_received = threading.Event()
@@ -98,22 +111,21 @@ def test_exact_tray_client_uses_the_desktop_protocol(tmp_path: Path) -> None:
 
     try:
         assert client.connect() is True
-        assert client.send_get_status() is True
         assert status_received.wait(5)
-        assert observed["status"]["state"] == "RECORDING"
-        assert observed["status"]["name"] == "capture-1"
+        assert observed["status"]["recording"] is True
+        assert observed["status"]["capture_id"] == "capture-1"
 
         server._broadcast(
             "compile_progress",
             {"state": "compiled", "capture_id": "capture-1"},
         )
         assert compile_received.wait(5)
-        assert observed["compile"]["done"] is True
-        assert observed["compile"]["name"] == "capture-1"
+        assert observed["compile"]["state"] == "compiled"
+        assert observed["compile"]["capture_id"] == "capture-1"
 
         server._broadcast("recording_started", {"capture_id": "capture-1"})
         assert recording_received.wait(5)
-        assert observed["recording"]["name"] == "capture-1"
+        assert observed["recording"]["capture_id"] == "capture-1"
 
         dispatcher.event_received.clear()
         assert client.send_open_workflow_library() is True

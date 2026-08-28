@@ -203,7 +203,7 @@ def test_qualification_pins_and_runs_the_exact_tray_protocol_peer() -> None:
     assert checkout["uses"] == ("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1")
     assert checkout["with"] == {
         "repository": "OpenAdaptAI/openadapt-tray",
-        "ref": "3dc385c2955f093660fddda76ca77dd53a24cad6",
+        "ref": "debe280ae7b1bd81d1c353809056599f094b2f64",
         "path": ".integration/openadapt-tray",
         "persist-credentials": False,
     }
