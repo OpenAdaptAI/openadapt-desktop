@@ -26,6 +26,13 @@ openadapt quickstart
 [Which release to download](RELEASES.md) ·
 [Implementation status](docs/IMPLEMENTATION_STATUS.md)
 
+> **Role: installed authoring and operation companion.** The compiler and the
+> governed runtime are `openadapt-flow`; this repository publishes release
+> candidates around them. A release becomes the
+> active Production default only while the canonical signed lifecycle ledger
+> holds a current admission for its exact artifacts. Absent, inactive, expired,
+> or revoked, and that release is **not actively admitted**.
+
 ## What the cockpit does
 
 Start without an account, or connect a Cloud workspace with system-browser PKCE
@@ -185,9 +192,11 @@ Area-by-area detail, including the substrate evidence boundaries:
 ## Native installers
 
 Native packages ship under a `desktop-vX.Y.Z` prerelease channel, separate from
-the engine's `vX.Y.Z` PyPI and GitHub releases, with the native version
-synchronized to the engine release CI built it from. Every filename encodes its
-platform, architecture, and signing state. New release filenames require
+the engine's `vX.Y.Z` PyPI and GitHub releases. CI keeps the native version
+synchronized to each engine release, so a native prerelease mirrors the engine
+it was built from. It's packaging evidence, and
+not a separate supported desktop release. Every filename encodes its platform,
+architecture, and signing state. New release filenames require
 `developer-id-notarized` on macOS, `authenticode` on Windows, and
 `github-attested` for the exact Linux bytes.
 
