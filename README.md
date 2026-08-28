@@ -9,17 +9,19 @@ halt. It's a Tauri shell driving a frozen Python engine, and the engine embeds
 the exact `openadapt-flow` runtime it was built against, so there's no separate
 Python to install.
 
-**There is no signed build to download right now.** The next native release is
-blocked until macOS has Developer ID plus notarization, Windows has
+**There is no trusted signed build to download right now.** The next native
+release is blocked until macOS has Developer ID plus notarization, Windows has
 Authenticode, and the exact Linux bytes verify under GitHub OIDC attestation.
 The latest published prerelease predates that gate and keeps its original
-unsigned labels. If you want to run an OpenAdapt workflow today, use the
+ad-hoc and unsigned labels. If you want to run an OpenAdapt workflow today, use the
 launcher instead:
 
 ```bash
 pip install 'openadapt[browser]'
 openadapt quickstart
 ```
+
+On Windows `cmd.exe`, use double quotes: `pip install "openadapt[browser]"`.
 
 [Documentation](https://docs.openadapt.ai) ·
 [openadapt-flow](https://github.com/OpenAdaptAI/openadapt-flow) ·
@@ -44,8 +46,11 @@ cockpit over the live engine:
 | Workflows | The library: what you recorded, what compiled, where each one stands |
 | Record & review | Start and stop a capture, then step through the local review gate before anything leaves the machine |
 | Runner | Pick Browser, Windows, macOS, Linux, RDP, or Citrix, give it only that target's connection details, and watch the live rail, the step log, and the halt evidence |
-| Teach | Resolve a halted step and write a governed repair back toward the workflow |
+| Phone | Pair a phone with a QR code and answer a halted step from it |
 | Settings | Host, deployment lane, credentials, local preferences |
+
+Teach is not on the rail. It opens from a workflow in the library: resolve a
+halted step and write a governed repair back toward the workflow.
 
 Recording and sync are two independent status channels on the rail, alongside
 the needs-attention break count. In a plain dev checkout the shell shows an
@@ -85,11 +90,12 @@ escalation, and terminal receipts, is in
 ```text
 Desktop authoring/teaching cockpit (Tauri + React)
         |
-        | local IPC (JSON lines over sidecar stdio; token-authenticated
-        | loopback socket for the tray)
+        | local IPC (JSON lines over sidecar stdio)
         v
 Frozen Python engine sidecar (capture, review, auth, sync, FlowBridge,
                               pinned openadapt-flow runtime)
+        |     ^
+        |     | token-authenticated loopback socket (openadapt-tray)
         |
         | isolated subprocess mode in the same signed executable
         v
@@ -99,7 +105,7 @@ openadapt-flow
 
 The engine owns consent, OS permissions, recording and review, hosted
 authentication and push, and a `FlowBridge` that runs the pinned Flow build as
-an isolated subprocess. The shell also runs a token-authenticated loopback
+an isolated subprocess. The engine also runs a token-authenticated loopback
 socket so [`openadapt-tray`](https://github.com/OpenAdaptAI/openadapt-tray) can
 mirror status and send local commands.
 
@@ -108,7 +114,9 @@ and this repository is the cockpit and the local wiring around it.
 
 ## The engine CLI
 
-The Python engine runs from a plain checkout, without the shell:
+The Python engine runs from a plain checkout, without the shell. A source
+checkout resolves Flow from the locked build extra; native packages embed the
+exact runtime.
 
 | Command | Purpose |
 |---|---|
