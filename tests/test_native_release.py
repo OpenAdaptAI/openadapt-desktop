@@ -37,6 +37,7 @@ from scripts.native_release import (
     validate_engine_release_provenance,
     validate_git_version_advance,
     validate_git_version_transform,
+    validate_github_release_api,
     validate_native_tag_order,
     validate_release_attestation,
     validate_release_provenance,
@@ -250,7 +251,7 @@ def test_existing_native_prerelease_skips_rebuild_only_after_authentication() ->
     lookup = steps["Resolve the exact release without treating API failure as absence"]["run"]
     assert 'if [ "${status}" = "404" ]' in lookup
     assert "refusing a rebuild" in lookup
-    public_proof = steps["Authenticate a complete public set or request partial recovery"]["run"]
+    public_proof = steps["Authenticate the complete immutable public release"]["run"]
     for contract in (
         "verify-checksums",
         "validate-set",
@@ -272,7 +273,10 @@ def test_existing_native_prerelease_skips_rebuild_only_after_authentication() ->
 
     for name in ("build-macos", "build-windows", "build-linux"):
         assert set(jobs[name]["needs"]) == {"validate", "recover-published-native"}
-        assert jobs[name]["if"] == ("needs.recover-published-native.outputs.state == 'absent'")
+        assert jobs[name]["if"] == (
+            "needs.recover-published-native.outputs.state == 'absent' || "
+            "needs.recover-published-native.outputs.state == 'draft'"
+        )
     publisher = jobs["publish-native"]
     assert set(publisher["needs"]) == {
         "validate",
@@ -321,7 +325,7 @@ def test_complete_native_recovery_does_not_require_an_unexpired_actions_artifact
     recovery = _workflow("native-release.yml")["jobs"]["recover-published-native"]
     steps = recovery["steps"]
     names = [str(step.get("name") or step.get("uses")) for step in steps]
-    public_index = names.index("Authenticate a complete public set or request partial recovery")
+    public_index = names.index("Authenticate the complete immutable public release")
     artifact_index = names.index("Download the original attested set for partial recovery")
     assert public_index < artifact_index
 
@@ -375,10 +379,13 @@ def test_engine_and_native_release_form_one_attested_acceptance_chain() -> None:
     assert engine_steps["Attest the engine release receipt"]["with"] == {
         "subject-path": ENGINE_RELEASE_PROVENANCE
     }
-    published_receipt = engine_steps["Publish and reverify the engine release receipt"]["run"]
-    assert 'gh release upload "${engine_tag}" "${subject}"' in published_receipt
-    assert "validate-engine-provenance" in published_receipt
-    assert "@refs/tags/${engine_tag}" in published_receipt
+    published_receipt = engine_steps["Assemble and publish the immutable engine release"]["run"]
+    assert 'gh release upload "${engine_tag}" release-upload/* --clobber' in published_receipt
+    assert "--phase draft" in published_receipt
+    immutable_proof = engine_steps["Verify the exact immutable engine release"]["run"]
+    assert "validate-engine-provenance" in immutable_proof
+    assert "validate-exact-engine-inventory" in immutable_proof
+    assert "@refs/tags/${engine_tag}" in immutable_proof
 
     validate = _job_steps(native["jobs"]["validate"])[
         "Bind the event, ref, version, tag, and signed engine receipt"
@@ -591,7 +598,7 @@ def test_native_version_pr_guard_never_skips_and_judges_content() -> None:
     assert "version --ref" in script
     # A version change is reserved to this repository's automation branch.
     assert 'if [ "${HEAD_REPOSITORY}" != "${GITHUB_REPOSITORY}" ]' in script
-    assert "native-version/v*) ;;" in script
+    assert "release-version/v*) ;;" in script
     # One refusal for a fork head, one for an unreserved branch, one for a
     # stale base. No path through the step falls through to success.
     assert script.count("exit 1") == 3
@@ -637,7 +644,10 @@ def test_every_github_release_mutation_uses_only_the_scoped_release_app(
     """The workflow token stays read-only when a job mutates a GitHub Release."""
 
     workflow = _workflow(workflow_name)
-    mutation = re.compile(r"\bgh release (?:create|edit|upload|delete)\b")
+    mutation = re.compile(
+        r"\bgh release (?:create|edit|upload|delete)\b"
+        r"|\bgh api --method (?:POST|PATCH|DELETE)\b"
+    )
     found = 0
     for job in workflow["jobs"].values():
         mutating_steps = [
@@ -658,6 +668,7 @@ def test_every_github_release_mutation_uses_only_the_scoped_release_app(
             "private-key": "${{ secrets.OPENADAPT_RELEASE_APP_PRIVATE_KEY }}",
             "owner": "${{ github.repository_owner }}",
             "repositories": "${{ github.event.repository.name }}",
+            "permission-administration": "read",
             "permission-contents": "write",
             "permission-metadata": "read",
         }
@@ -688,11 +699,15 @@ def test_every_release_app_token_binds_exact_app_actor_and_installation(
     workflow_name: str,
 ) -> None:
     workflow = _workflow(workflow_name)
-    assert workflow["env"] | {
-        "RELEASE_APP_ID": "4730708",
-        "RELEASE_APP_ACTOR_ID": "321543906",
-        "RELEASE_APP_INSTALLATION_ID": "156835568",
-    } == workflow["env"]
+    assert (
+        workflow["env"]
+        | {
+            "RELEASE_APP_ID": "4730708",
+            "RELEASE_APP_ACTOR_ID": "321543906",
+            "RELEASE_APP_INSTALLATION_ID": "156835568",
+        }
+        == workflow["env"]
+    )
 
     found = 0
     for job in workflow["jobs"].values():
@@ -714,19 +729,19 @@ def test_every_release_app_token_binds_exact_app_actor_and_installation(
                 "CONFIGURED_RELEASE_APP_INSTALLATION_ID": (
                     "${{ vars.OPENADAPT_RELEASE_APP_INSTALLATION_ID }}"
                 ),
+                "GH_TOKEN": f"${{{{ steps.{app_id}.outputs.token }}}}",
                 "RELEASE_APP_SLUG": f"${{{{ steps.{app_id}.outputs.app-slug }}}}",
-                "TOKEN_INSTALLATION_ID": (
-                    f"${{{{ steps.{app_id}.outputs['installation-id'] }}}}"
-                ),
+                "TOKEN_INSTALLATION_ID": (f"${{{{ steps.{app_id}.outputs['installation-id'] }}}}"),
             }
             script = identity["run"]
             assert '"${CONFIGURED_RELEASE_APP_ID}" != "${RELEASE_APP_ID}"' in script
             assert '"${CONFIGURED_RELEASE_ACTOR_ID}" != "${RELEASE_APP_ACTOR_ID}"' in script
             assert (
-                '"${CONFIGURED_RELEASE_APP_INSTALLATION_ID}" '
-                '!= "${RELEASE_APP_INSTALLATION_ID}"'
+                '"${CONFIGURED_RELEASE_APP_INSTALLATION_ID}" != "${RELEASE_APP_INSTALLATION_ID}"'
             ) in script
             assert '"${TOKEN_INSTALLATION_ID}" != "${RELEASE_APP_INSTALLATION_ID}"' in script
+            assert "immutable-releases" in script
+            assert "validate-immutable-releases" in script
     assert found > 0
 
 
@@ -755,16 +770,27 @@ def test_every_release_app_token_checks_its_slug_before_any_write() -> None:
             assert app_index < identity_index < min(writes)
 
 
-def test_no_release_asset_write_uses_an_unrecoverable_clobber() -> None:
-    workflow = _workflow("native-release.yml")
+def test_release_asset_clobber_is_limited_to_an_authenticated_draft() -> None:
+    workflows = (
+        _workflow("release.yml"),
+        _workflow("native-release.yml"),
+        _workflow("ffmpeg-runtime.yml"),
+    )
     clobber_steps = [
         step
+        for workflow in workflows
         for job in workflow["jobs"].values()
         for step in job["steps"]
         if "--clobber" in str(step.get("run", ""))
     ]
 
-    assert clobber_steps == []
+    assert len(clobber_steps) == 3
+    for step in clobber_steps:
+        script = step["run"]
+        assert ".draft == true" in script or "--phase draft" in script
+        assert ".immutable == false" in script or "--phase draft" in script
+        assert "--phase draft" in script
+        assert "--draft=false" in script
 
 
 def test_moving_channel_revalidates_races_and_recovers_each_partial_state() -> None:
@@ -874,6 +900,17 @@ def _write_source(path: Path, text: str) -> None:
 
 def _write_native_version_fixture(root: Path, version: str) -> None:
     (root / "src-tauri").mkdir()
+    (root / "engine").mkdir()
+    _write_source(
+        root / "pyproject.toml",
+        f'[project]\nname = "openadapt-desktop"\nversion = "{version}"\n',
+    )
+    _write_source(root / "engine/__init__.py", f'__version__ = "{version}"\n')
+    _write_source(
+        root / "uv.lock",
+        'version = 1\n\n[[package]]\nname = "openadapt-desktop"\n'
+        f'version = "{version}"\nsource = {{ editable = "." }}\n',
+    )
     _write_source(
         root / "package.json",
         json.dumps({"name": "openadapt-desktop", "version": version}, indent=2) + "\n",
@@ -916,6 +953,7 @@ def test_set_native_version_synchronizes_every_source_and_lockfile(tmp_path: Pat
 
     versions = set_native_version("0.5.0", tmp_path)
 
+    assert set(versions) == set(VERSION_TRANSFORM_PATHS)
     assert set(versions.values()) == {"0.5.0"}
     assert native_version(tmp_path) == "0.5.0"
     lock = json.loads((tmp_path / "package-lock.json").read_text())
@@ -945,6 +983,9 @@ def test_set_native_version_writes_utf8_lf_bytes_on_every_platform(tmp_path: Pat
     set_native_version("0.5.0", tmp_path)
 
     for relative in (
+        "pyproject.toml",
+        "engine/__init__.py",
+        "uv.lock",
         "package.json",
         "package-lock.json",
         "src-tauri/Cargo.toml",
@@ -1005,7 +1046,7 @@ def test_git_version_transform_requires_the_exact_reconstructed_tree(tmp_path: P
     _git(tmp_path, "add", ".")
     _git(tmp_path, "commit", "-qm", "exact version transform")
     exact = _git(tmp_path, "rev-parse", "HEAD")
-    assert validate_git_version_transform(base, exact, "0.5.0", root=tmp_path) == 5
+    assert validate_git_version_transform(base, exact, "0.5.0", root=tmp_path) == 8
 
     package = json.loads((tmp_path / "package.json").read_text())
     package["scripts"] = {"postinstall": "run-unreviewed-code"}
@@ -1020,7 +1061,7 @@ def test_git_version_transform_requires_the_exact_reconstructed_tree(tmp_path: P
     _git(tmp_path, "add", "unexpected.py")
     _git(tmp_path, "commit", "-qm", "tamper outside allowed files")
     unexpected = _git(tmp_path, "rev-parse", "HEAD")
-    with pytest.raises(ValueError, match="outside the version transformation"):
+    with pytest.raises(ValueError, match="outside the exact transformation"):
         validate_git_version_transform(base, unexpected, "0.5.0", root=tmp_path)
 
 
@@ -1041,7 +1082,7 @@ def test_git_version_advance_refuses_a_stale_or_equal_target(tmp_path: Path) -> 
     _git(tmp_path, "add", ".")
     _git(tmp_path, "commit", "-qm", "advance")
     candidate = _git(tmp_path, "rev-parse", "HEAD")
-    assert validate_git_version_advance(base, candidate, "1.5.0", root=tmp_path) == 5
+    assert validate_git_version_advance(base, candidate, "1.5.0", root=tmp_path) == 8
 
     for stale in ("1.4.0", "1.3.9"):
         with pytest.raises(ValueError, match="does not advance protected base"):
@@ -1897,6 +1938,83 @@ def test_engine_release_requires_exact_published_identity(tmp_path: Path) -> Non
         )
 
 
+def _github_release_api_file(
+    tmp_path: Path,
+    directory: Path,
+    *,
+    phase: str = "published",
+    tag: str | None = None,
+) -> Path:
+    tag = tag or f"desktop-v{native_version()}"
+    draft = phase == "draft"
+    payload = {
+        "id": 123456,
+        "tag_name": tag,
+        "html_url": f"https://github.com/OpenAdaptAI/openadapt-desktop/releases/tag/{tag}",
+        "draft": draft,
+        "prerelease": True,
+        "immutable": not draft,
+        "published_at": None if draft else "2026-08-27T12:00:00Z",
+        "body": "<!-- installer-release -->",
+        "author": {"login": "openadapt-release[bot]", "id": 321543906},
+        "assets": [],
+    }
+    for index, item in enumerate(sorted(directory.iterdir()), start=1):
+        payload["assets"].append(
+            {
+                "id": index,
+                "name": item.name,
+                "state": "uploaded",
+                "size": item.stat().st_size,
+                "digest": f"sha256:{hashlib.sha256(item.read_bytes()).hexdigest()}",
+                "browser_download_url": (
+                    "https://github.com/OpenAdaptAI/openadapt-desktop/releases/download/"
+                    f"{tag}/{item.name}"
+                ),
+                "uploader": {"login": "openadapt-release[bot]", "id": 321543906},
+            }
+        )
+    path = tmp_path / f"{phase}-release-api.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+@pytest.mark.parametrize("phase", ["draft", "published"])
+def test_github_release_api_binds_phase_author_uploader_and_digests(
+    tmp_path: Path,
+    phase: str,
+) -> None:
+    upload = tmp_path / "upload"
+    upload.mkdir()
+    (upload / "artifact.bin").write_bytes(b"exact")
+    release = _github_release_api_file(tmp_path, upload, phase=phase)
+
+    validated = validate_github_release_api(
+        release,
+        directory=upload,
+        repository="OpenAdaptAI/openadapt-desktop",
+        tag=f"desktop-v{native_version()}",
+        phase=phase,
+        prerelease=True,
+        body_marker="<!-- installer-release -->",
+    )
+    assert validated["immutable"] is (phase == "published")
+
+    payload = json.loads(release.read_text(encoding="utf-8"))
+    payload["assets"][0]["uploader"]["id"] = 1
+    release.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="asset identity"):
+        validate_github_release_api(
+            release,
+            directory=upload,
+            repository="OpenAdaptAI/openadapt-desktop",
+            tag=f"desktop-v{native_version()}",
+            phase=phase,
+            prerelease=True,
+            body_marker="<!-- installer-release -->",
+        )
+
+
 def test_engine_release_provenance_binds_tag_workflow_and_exact_artifacts(
     tmp_path: Path,
 ) -> None:
@@ -2293,6 +2411,10 @@ def test_candidate_channel_accepts_the_legacy_selector_for_one_way_migration(
         f"{DESKTOP_REPOSITORY}/.github/workflows/native-release.yml@refs/heads/main"
     )
     legacy_value["promotion"]["event"] = "workflow_dispatch"
+    for field in ("verified_index", "checksums"):
+        legacy_value[field]["url"] = legacy_value[field]["url"].replace(
+            f"/desktop-v{native_version()}/", f"/v{native_version()}/"
+        )
     legacy = tmp_path / "legacy" / VERIFIED_RELEASE_CHANNEL
     legacy.parent.mkdir()
     legacy.write_text(json.dumps(legacy_value), encoding="utf-8")
@@ -2634,7 +2756,9 @@ def test_public_download_verifier_checks_the_retained_prior_descriptor(
     prior["promotion"]["workflow_ref"] = _native_workflow_ref("desktop-v0.1.0")
     for field in ("verified_index", "checksums"):
         prior[field] = dict(prior[field])
-        prior[field]["url"] = prior[field]["url"].replace(f"/v{native_version()}/", "/v0.1.0/")
+        prior[field]["url"] = prior[field]["url"].replace(
+            f"/desktop-v{native_version()}/", "/desktop-v0.1.0/"
+        )
     prior["previous"] = None
     prior_path = tmp_path / "prior" / VERIFIED_RELEASE_CHANNEL
     prior_path.parent.mkdir()
@@ -2852,8 +2976,8 @@ def test_release_workflow_never_swallows_the_existing_index_download() -> None:
     assert "grep -qxF 'openadapt-desktop-verified-release.json'" in step
 
 
-def test_native_publish_only_resumes_identical_bytes_and_never_clobbers() -> None:
-    """A failed attempt can fill missing assets, but cannot replace one byte."""
+def test_native_publish_clobbers_only_the_authenticated_draft() -> None:
+    """A failed attempt can replace draft bytes before one immutable publish."""
 
     body = (ROOT / ".github/workflows/native-release.yml").read_text()
     step = body.split("Create or safely resume the immutable public prerelease", 1)[1].split(
@@ -2862,11 +2986,12 @@ def test_native_publish_only_resumes_identical_bytes_and_never_clobbers() -> Non
 
     assert 'git ls-remote --exit-code --tags origin "refs/tags/${NATIVE_TAG}"' in step
     assert 'gh release view "${NATIVE_TAG}"' in step
-    assert 'cmp "release-assets/${name}" "existing-release-assets/${name}"' in step
-    assert "existing release has an unexpected asset" in step
-    assert "--clobber" not in step
-    assert "--draft" not in step
-    assert "--prerelease" in step
+    assert ".draft == true" in step
+    assert ".immutable == false" in step
+    assert 'gh release upload "${NATIVE_TAG}" release-upload/* --clobber' in step
+    assert "--phase draft" in step
+    assert 'gh release edit "${NATIVE_TAG}" --draft=false --prerelease' in step
+    assert "--phase published" in step
 
 
 def test_standalone_verifier_states_the_same_asset_contract() -> None:
@@ -3261,6 +3386,7 @@ def test_production_workflow_keeps_normal_publication_unadmitted() -> None:
         "private-key": "${{ secrets.OPENADAPT_RELEASE_APP_PRIVATE_KEY }}",
         "owner": "${{ github.repository_owner }}",
         "repositories": "${{ github.event.repository.name }}",
+        "permission-administration": "read",
         "permission-contents": "write",
         "permission-metadata": "read",
     }

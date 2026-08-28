@@ -1,28 +1,21 @@
 {
   "$comment": [
-    "Input to scripts/check_release_health.py. One entry per RELEASE LANE:",
-    "a tag namespace plus the workflow that is supposed to publish it.",
-    "The native lane is the one that failed four times in silence:",
-    "desktop-v0.12.0 (failed macOS x86_64 build, run 30169968004),",
-    "desktop-v0.8.0 (ungranted native-release environment approval, run",
-    "29799291231), desktop-v0.7.0 (wholly cancelled run 29756479649), and",
-    "desktop-v0.1.0 (ModuleNotFoundError: tomllib on a pre-3.11 runner, run",
-    "29514474536). Each left an immutable public tag promising installers that",
-    "were never published, and native-release.yml has no failure notifier at",
-    "all -- nor could one see `cancelled` or `skipped`.",
-    "The target-state workflows create only an annotated tag from the exact",
-    "reviewed main candidate. Publication then runs from that protected tag.",
-    "For a failed tag run, rerun only its failed jobs with the same run ID.",
-    "Do not rerun all jobs after a public prerelease exists.",
-    "The historical failures remain detector fixtures."
+    "Input to scripts/check_release_health.py. Desktop has one package lane:",
+    "one vX.Y.Z tag and one immutable GitHub Release with all installers,",
+    "verification metadata, wheel, sdist, SBOM, and checksums. The same wheel",
+    "and sdist bytes publish to PyPI. The release workflow creates the complete",
+    "App-authored draft before it creates the tag. It publishes only after the",
+    "central release admission verifies that exact draft and artifact inventory.",
+    "Historical desktop-v* failures remain detector fixtures in the checker.",
+    "They do not define a current release lane."
   ],
   "repository": "OpenAdaptAI/openadapt-desktop",
   "branch": "main",
   "ci_workflows": ["test.yml"],
   "lanes": [
     {
-      "id": "engine",
-      "name": "PyPI package",
+      "id": "desktop-package",
+      "name": "Desktop package",
       "tag_pattern": "^v(\\d+\\.\\d+\\.\\d+)$",
       "release_workflows": ["release.yml"],
       "pypi_package": "openadapt-desktop",
@@ -30,16 +23,7 @@
       "unreleased_grace_hours": 4,
       "tag_without_release_grace_hours": 1,
       "pypi_lag_grace_minutes": 30,
-      "remediation": "# Prepare and merge the complete reviewed candidate first.\ngh workflow run release.yml --repo OpenAdaptAI/openadapt-desktop --ref main -f version=X.Y.Z\n# Approve release-identity for tag creation and pypi for the exact tag run."
-    },
-    {
-      "id": "native",
-      "name": "Native installers",
-      "tag_pattern": "^desktop-v(\\d+\\.\\d+\\.\\d+)$",
-      "release_workflows": ["native-release.yml"],
-      "tracks_main": false,
-      "tag_without_release_grace_hours": 6,
-      "remediation": "# Create the native tag after the reviewed candidate and vX.Y.Z release exist.\ngh workflow run native-release.yml --repo OpenAdaptAI/openadapt-desktop --ref main -f version=X.Y.Z\n# Approve release-identity for tag creation and native-release for the tag run.\n# If the tag run fails, keep its run ID and rerun only the failed jobs.\ngh run rerun RUN_ID --failed --repo OpenAdaptAI/openadapt-desktop\n# Do not rerun all jobs after the public prerelease exists."
+      "remediation": "# Stage the complete reviewed package from current main.\ngh workflow run release.yml --repo OpenAdaptAI/openadapt-desktop --ref main -f operation=stage -f version=X.Y.Z\n# Obtain the exact active central admission for that draft and inventory.\n# Publish the same draft and bytes.\ngh workflow run release.yml --repo OpenAdaptAI/openadapt-desktop --ref main -f operation=publish -f version=X.Y.Z -f admission_reference_json='REFERENCE_JSON'"
     }
   ]
 }
