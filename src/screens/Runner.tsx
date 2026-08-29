@@ -35,6 +35,8 @@ function stateLabel(state: RunnerStatus["state"]): string {
       return "Online. Waiting for work.";
     case "running":
       return "Running an admitted workflow";
+    case "stopping":
+      return "Stopping after the current run";
     case "reauth_required":
       return "Sign-in required";
     case "incompatible":
@@ -114,7 +116,7 @@ export function Runner() {
             <span className="page-sub mono">{status.runner_id}</span>
           )}
           <span className="spacer" />
-          <Button onClick={toggle} disabled={busy}>
+          <Button onClick={toggle} disabled={busy || status.state === "stopping"}>
             {status.enabled ? "Disable runner" : "Enable runner"}
           </Button>
         </div>

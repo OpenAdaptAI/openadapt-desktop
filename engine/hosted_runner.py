@@ -104,6 +104,7 @@ DEFAULT_WAIT_S = 25
 DEFAULT_LEASE_S = 900
 BACKOFF_BASE_S = 1.0
 BACKOFF_CAP_S = 60.0
+STOP_JOIN_TIMEOUT_S = 2.0
 
 _SAFE_LOCAL_ID = re.compile(r"[A-Za-z0-9_.:-]{1,200}")
 _UUID_V1_8 = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
@@ -913,6 +914,12 @@ class RunnerService:
         }
 
     def enable(self) -> dict[str, Any]:
+        if self._thread and self._thread.is_alive() and self._stop.is_set():
+            self._set_error(
+                "The hosted runner is stopping after the current run reaches a terminal boundary.",
+                state="stopping",
+            )
+            return self.status()
         self.config.runner_enabled = True
         if self.config.storage_mode == "air-gapped":
             self.config.runner_enabled = False
@@ -928,8 +935,8 @@ class RunnerService:
 
     def disable(self) -> dict[str, Any]:
         self.config.runner_enabled = False
-        self.stop()
-        self._set_state("disabled")
+        if self.stop():
+            self._set_state("disabled")
         return self.status()
 
     def deregister(self) -> None:
@@ -949,23 +956,44 @@ class RunnerService:
             )
             self._thread.start()
 
-    def stop(self) -> None:
-        self._stop.set()
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=2.0)
+    def _close_transport(self) -> None:
         transport = self._transport
+        self._transport = None
         close = getattr(transport, "close", None)
         if callable(close):
-            close()
-        self._transport = None
+            try:
+                close()
+            except Exception:
+                logger.exception("hosted runner transport close failed")
+
+    def stop(self) -> bool:
+        """Request a boundary-safe stop and report whether the loop has exited."""
+
+        self._stop.set()
+        thread = self._thread
+        if thread and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=STOP_JOIN_TIMEOUT_S)
+        if thread and thread.is_alive():
+            self._set_state("stopping")
+            return False
+        self._close_transport()
+        return True
 
     def _thread_main(self) -> None:
-        while not self._stop.is_set():
-            delay = self.tick()
-            if delay is None:
-                return
-            if delay > 0:
-                self._stop.wait(delay)
+        try:
+            while not self._stop.is_set():
+                delay = self.tick()
+                if delay is None:
+                    return
+                if delay > 0:
+                    self._stop.wait(delay)
+        finally:
+            self._close_transport()
+            with self._lifecycle_lock:
+                if self._thread is threading.current_thread():
+                    self._thread = None
+            if self._stop.is_set() and not self.config.runner_enabled:
+                self._set_state("disabled")
 
     def tick(self) -> float | None:
         """Poll and handle at most one dispatch. Tests call this directly."""

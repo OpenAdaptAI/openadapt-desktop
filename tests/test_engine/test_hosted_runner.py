@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import stat
+import threading
 from base64 import b64encode
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
@@ -401,6 +402,41 @@ def _service(
     if registered:
         service._registration = dict(registration)
     return service
+
+
+def test_disable_reports_stopping_until_current_tick_reaches_a_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = FakeAdapter()
+    transport = FakeTransport()
+    service = _service(tmp_path, monkeypatch, transport=transport, adapter=adapter)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocking_tick() -> None:
+        entered.set()
+        release.wait(timeout=5)
+        return None
+
+    monkeypatch.setattr(hosted_runner, "STOP_JOIN_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(service, "tick", blocking_tick)
+    service._transport = transport
+    service.start()
+    assert entered.wait(timeout=1)
+    active_thread = service._thread
+
+    status = service.disable()
+
+    assert status["enabled"] is False
+    assert status["state"] == "stopping"
+    assert transport.closed is False
+    release.set()
+    assert active_thread is not None
+    active_thread.join(timeout=1)
+    assert service.status()["state"] == "disabled"
+    assert service._thread is None
+    assert transport.closed is True
 
 
 @pytest.mark.parametrize(

@@ -731,6 +731,7 @@ export interface PresentationExportResult {
 
 export type RunnerState =
   | "disabled"
+  | "stopping"
   | "offline"
   | "polling"
   | "running"
