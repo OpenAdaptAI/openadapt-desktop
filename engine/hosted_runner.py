@@ -468,9 +468,7 @@ class HttpHostedRunnerTransport:
         self._audit = audit
         if client is not None:
             try:
-                client_origin = canonical_https_origin(
-                    str(client.base_url).removesuffix("/")
-                )
+                client_origin = canonical_https_origin(str(client.base_url).removesuffix("/"))
             except RunnerTransportError as exc:
                 raise RunnerTransportError(
                     "The hosted runner HTTP client has no exact protected origin."
@@ -696,6 +694,7 @@ class RunnerService:
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._lifecycle_lock = threading.Lock()
+        self._lifecycle_generation = 0
         self._tick_lock = threading.Lock()
         self._contract: Any = None
         self._adapter: Any = None
@@ -948,6 +947,7 @@ class RunnerService:
             if self._thread and self._thread.is_alive():
                 return
             self._stop.clear()
+            self._lifecycle_generation += 1
             self._set_state("offline")
             self._thread = threading.Thread(
                 target=self._thread_main,
@@ -969,8 +969,10 @@ class RunnerService:
     def stop(self) -> bool:
         """Request a boundary-safe stop and report whether the loop has exited."""
 
-        self._stop.set()
-        thread = self._thread
+        with self._lifecycle_lock:
+            self._stop.set()
+            self._lifecycle_generation += 1
+            thread = self._thread
         if thread and thread.is_alive() and thread is not threading.current_thread():
             thread.join(timeout=STOP_JOIN_TIMEOUT_S)
         if thread and thread.is_alive():
@@ -1013,12 +1015,27 @@ class RunnerService:
                 if transport is None:
                     raise RunnerTransportError("The hosted runner transport is absent.")
                 self._set_state("polling")
+                with self._lifecycle_lock:
+                    poll_generation = self._lifecycle_generation
                 dispatch = transport.poll(self._poll_request(contract, registration))
                 self._last_seen_at = datetime.now(timezone.utc).isoformat()
                 self._attempt = 0
                 self._last_error = None
                 if dispatch is None:
                     return 0.0
+                with self._lifecycle_lock:
+                    accept_dispatch = (
+                        poll_generation == self._lifecycle_generation
+                        and not self._stop.is_set()
+                        and self.config.runner_enabled
+                    )
+                if not accept_dispatch:
+                    self.services.audit.log(
+                        "hosted_runner_stale_dispatch_refused",
+                        dispatch_id=str(dispatch.dispatch_id),
+                        run_id=str(dispatch.run_id),
+                    )
+                    return None
                 self._handle_dispatch(contract, adapter, transport, dispatch)
                 return 0.0
             except HostedRunnerAdapterUnavailableError as exc:

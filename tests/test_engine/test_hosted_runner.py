@@ -439,6 +439,52 @@ def test_disable_reports_stopping_until_current_tick_reaches_a_boundary(
     assert transport.closed is True
 
 
+def test_disable_during_poll_refuses_stale_dispatch_without_execution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = FakeAdapter()
+    transport = FakeTransport()
+    dispatch = _dispatch("disable-during-poll")
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocking_poll(request: WireModel) -> WireModel:
+        transport.poll_requests.append(request)
+        entered.set()
+        assert release.wait(timeout=5)
+        return dispatch
+
+    monkeypatch.setattr(hosted_runner, "STOP_JOIN_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(transport, "poll", blocking_poll)
+    service = _service(tmp_path, monkeypatch, transport=transport, adapter=adapter)
+    service.start()
+    assert entered.wait(timeout=1)
+    active_thread = service._thread
+
+    status = service.disable()
+
+    assert status["enabled"] is False
+    assert status["state"] == "stopping"
+    release.set()
+    assert active_thread is not None
+    active_thread.join(timeout=1)
+    assert adapter.execute_calls == []
+    assert adapter.actuations == []
+    assert transport.callback_requests == []
+    assert service.journal.get(str(dispatch.dispatch_id)) is None
+    assert service.services.audit.entries[-1] == (
+        "hosted_runner_stale_dispatch_refused",
+        {
+            "dispatch_id": str(dispatch.dispatch_id),
+            "run_id": str(dispatch.run_id),
+        },
+    )
+    assert service.status()["state"] == "disabled"
+    assert service._thread is None
+    assert transport.closed is True
+
+
 @pytest.mark.parametrize(
     "fault",
     ["backend-response-lost", "delivery-ack-lost", "receipt-unavailable"],
