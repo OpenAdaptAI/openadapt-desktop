@@ -212,6 +212,8 @@ def test_dev_semantic_release_floor_matches_the_pinned_v10_action() -> None:
     assert "# v10.6.1" in workflow
     assert "python-semantic-release>=9" not in "\n".join(dev)
     assert "  push:" not in workflow[workflow.index("\non:\n") : workflow.index("\njobs:\n")]
+    uv = pyproject["tool"]["uv"]
+    assert "click>=8.3.3" in uv["constraint-dependencies"]
 
 
 def test_pyinstaller_build_floor_matches_the_reviewed_bootloader_pin() -> None:
