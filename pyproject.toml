@@ -61,7 +61,7 @@ dependencies = [
     # Pure-Python, dependency-free, BSD-licensed QR encoder. The mobile
     # decision portal renders its one-use pairing link locally; nothing about
     # a pairing ever leaves this machine to be encoded elsewhere.
-    "segno>=1.6",
+    "segno>=1.6.6",
     "tqdm",
 ]
 
