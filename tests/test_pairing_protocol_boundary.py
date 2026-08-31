@@ -21,10 +21,14 @@ def test_single_instance_precedes_deep_link_and_handoff_is_fixed() -> None:
     deep_link = main.index(".plugin(tauri_plugin_deep_link::init())")
     assert single < deep_link
     assert 'command: "connect_uri"' in pairing
+    assert 'command: "claim_runner_uri"' in pairing
     assert 'json!({ "uri": action.uri })' in pairing
     assert "std::process::Command" not in pairing
     assert "open_external" not in pairing
     assert "ShellExt" not in pairing
+    assert 'Some("connect") => connect_action' in pairing
+    assert 'Some("runner") => runner_action' in pairing
+    assert "pack" not in pairing.split("fn connect_action", 1)[1].split("fn runner_action", 1)[0]
 
 
 def test_python_pairing_action_has_no_shell_or_navigation_escape_hatch() -> None:
@@ -43,3 +47,19 @@ def test_python_pairing_action_has_no_shell_or_navigation_escape_hatch() -> None
     assert "write_text" not in pairing + store
     assert "open(" not in pairing + store
     assert "logger." not in pairing
+
+
+def test_python_runner_bind_is_parse_only() -> None:
+    runner_bind = (ROOT / "engine/auth/runner_bind.py").read_text()
+    assert "def parse_runner_uri" in runner_bind
+    assert "httpx" not in runner_bind
+    assert "keyring" not in runner_bind
+    assert "subprocess" not in runner_bind
+    assert "webbrowser" not in runner_bind
+    assert "os.system" not in runner_bind
+    assert "wait_seconds" not in runner_bind
+    assert "DEFAULT_WAIT_S" not in runner_bind
+    assert "oar_" in runner_bind
+    assert "oap_" in runner_bind
+    assert "oab_" in runner_bind
+    assert "oals_" in runner_bind
