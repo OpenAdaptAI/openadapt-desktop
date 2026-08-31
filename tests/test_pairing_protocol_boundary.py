@@ -36,6 +36,7 @@ def test_python_pairing_action_has_no_shell_or_navigation_escape_hatch() -> None
     store = (ROOT / "engine/auth/store.py").read_text()
     dispatch = (ROOT / "engine/dispatch.py").read_text()
     assert '"connect_uri": self.connect_uri' in dispatch
+    assert '"claim_runner_uri": self.claim_runner_uri' in dispatch
     assert "subprocess" not in pairing
     assert "shell=" not in pairing
     assert "webbrowser" not in pairing

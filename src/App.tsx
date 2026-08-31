@@ -170,6 +170,12 @@ export default function App() {
   const [sync, setSync] = useState<SyncState>({ state: "synced", queued: 0 });
   const [breaks, setBreaks] = useState(0);
   const [pairing, setPairing] = useState<PairingState | null>(null);
+  const [authoring, setAuthoring] = useState<{
+    status: string;
+    client_display?: string;
+    prompt?: string;
+    error?: string;
+  } | null>(null);
   const [firstRunPersistencePending, setFirstRunPersistencePending] =
     useState(false);
   const [firstWorkflowRunning, setFirstWorkflowRunning] = useState(false);
@@ -312,6 +318,17 @@ export default function App() {
           });
         }
       }),
+      onEngineEvent(
+        EVT.AUTHORING_STATE,
+        (state: {
+          status: string;
+          client_display?: string;
+          prompt?: string;
+          error?: string;
+        }) => {
+          setAuthoring(state);
+        },
+      ),
     ];
     return () => unsubs.forEach((p) => p.then((u) => u()).catch(() => {}));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -341,6 +358,60 @@ export default function App() {
       )}
     </div>
   ) : null;
+  const authoringNotice =
+    authoring &&
+    (authoring.status === "pending_allow" ||
+      authoring.status === "replace_allow" ||
+      authoring.status === "error") ? (
+      <div
+        className={`pairing-notice ${authoring.status === "error" ? "error" : ""}`}
+        role={authoring.status === "error" ? "alert" : "status"}
+      >
+        <span>
+          {authoring.status === "error"
+            ? authoring.error || "The authoring bind could not be completed."
+            : authoring.prompt ||
+              (authoring.status === "replace_allow"
+                ? `A different ${authoring.client_display || "ChatGPT"} account is asking. Allow it to replace the current one?`
+                : `Allow ${authoring.client_display || "ChatGPT"} to drive this job`)}
+        </span>
+        {authoring.status !== "error" && (
+          <span className="allow-actions">
+            <button
+              type="button"
+              onClick={() => {
+                void engineTry(
+                  CMD.AUTHORING_ALLOW,
+                  { replace: authoring.status === "replace_allow" },
+                  {},
+                ).then(() => setAuthoring(null));
+              }}
+            >
+              Allow
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                void engineTry(CMD.AUTHORING_DENY, {}, {}).then(() =>
+                  setAuthoring(null),
+                );
+              }}
+            >
+              Not now
+            </button>
+          </span>
+        )}
+        {authoring.status === "error" && (
+          <button
+            type="button"
+            aria-label="Dismiss authoring notice"
+            onClick={() => setAuthoring(null)}
+          >
+            ×
+          </button>
+        )}
+      </div>
+    ) : null;
   const firstWorkflowStageNotice = firstWorkflowStageError ? (
     <div className="pairing-notice error" role="alert">
       <span>{firstWorkflowStageError}</span>
@@ -358,6 +429,7 @@ export default function App() {
     return (
       <>
         {pairingNotice}
+        {authoringNotice}
         {firstWorkflowStageNotice}
         <DesktopEntryShell>
           <div className="center-stage"><span className="page-sub">Loading…</span></div>
@@ -370,6 +442,7 @@ export default function App() {
     return (
       <>
         {pairingNotice}
+        {authoringNotice}
         {firstWorkflowStageNotice}
         <DesktopEntryShell>
           <Login
@@ -390,6 +463,7 @@ export default function App() {
     return (
       <>
         {pairingNotice}
+        {authoringNotice}
         {firstWorkflowStageNotice}
         <DesktopEntryShell>
           <Onboarding
@@ -430,6 +504,7 @@ export default function App() {
   return (
     <>
       {pairingNotice}
+      {authoringNotice}
       {firstWorkflowStageNotice}
       <div className="app">
         <header className="desktop-shell">
