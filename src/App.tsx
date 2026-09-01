@@ -231,47 +231,52 @@ export default function App() {
   }
 
   // Bootstrap: auth status, sidecar liveness, and the status channels.
+  // Authoring bind is optional — a missing status must not leave the shell
+  // on Loading, or first-workflow navigation never mounts.
   useEffect(() => {
     (async () => {
-      setEngineUp(await sidecarRunning());
-      const a = await engineTry<AuthStatus>(
-        CMD.GET_AUTH_STATUS,
-        {},
-        { authenticated: false },
-      );
-      setAuth(a);
-      const [wf, firstWorkflow] = await Promise.all([
-        engineTry<Workflow[]>(CMD.GET_WORKFLOWS, {}, []),
-        engineTry<FirstWorkflowStateResponse>(
-          CMD.GET_FIRST_WORKFLOW_STATE,
+      try {
+        setEngineUp(await sidecarRunning());
+        const a = await engineTry<AuthStatus>(
+          CMD.GET_AUTH_STATUS,
           {},
-          { ok: true, state: null },
-        ),
-      ]);
-      const resumedRoute = routeForFirstWorkflow(firstWorkflow.state);
-      setFirstWorkflowState(firstWorkflow.state);
-      setOnboarded(wf.length > 0 || resumedRoute !== null);
-      if (resumedRoute) setRoute(resumedRoute);
-      const na = await engineTry<NeedsAttention>(
-        CMD.GET_NEEDS_ATTENTION,
-        {},
-        { count: 0, open_halts: 0, failed_runs: 0 },
-      );
-      setBreaks(na.count);
-      const ss = await engineTry<SyncState>(CMD.GET_SYNC_STATE, {}, sync);
-      setSync(ss);
-      const authoringStatus = await engineTry<{
-        status: string;
-        client_display?: string;
-        prompt?: string;
-        error?: string;
-        allowed?: boolean;
-        coach_only?: boolean;
-      }>(CMD.AUTHORING_STATUS, {}, { status: "idle" });
-      if (authoringStatus.status && authoringStatus.status !== "idle") {
-        setAuthoring(authoringStatus);
+          { authenticated: false },
+        );
+        setAuth(a);
+        const [wf, firstWorkflow] = await Promise.all([
+          engineTry<Workflow[]>(CMD.GET_WORKFLOWS, {}, []),
+          engineTry<FirstWorkflowStateResponse>(
+            CMD.GET_FIRST_WORKFLOW_STATE,
+            {},
+            { ok: true, state: null },
+          ),
+        ]);
+        const resumedRoute = routeForFirstWorkflow(firstWorkflow.state);
+        setFirstWorkflowState(firstWorkflow.state);
+        setOnboarded(wf.length > 0 || resumedRoute !== null);
+        if (resumedRoute) setRoute(resumedRoute);
+        const na = await engineTry<NeedsAttention>(
+          CMD.GET_NEEDS_ATTENTION,
+          {},
+          { count: 0, open_halts: 0, failed_runs: 0 },
+        );
+        setBreaks(na.count);
+        const ss = await engineTry<SyncState>(CMD.GET_SYNC_STATE, {}, sync);
+        setSync(ss);
+        const authoringStatus = await engineTry<{
+          status: string;
+          client_display?: string;
+          prompt?: string;
+          error?: string;
+          allowed?: boolean;
+          coach_only?: boolean;
+        } | null>(CMD.AUTHORING_STATUS, {}, { status: "idle" });
+        if (authoringStatus?.status && authoringStatus.status !== "idle") {
+          setAuthoring(authoringStatus);
+        }
+      } finally {
+        setCheckedAuth(true);
       }
-      setCheckedAuth(true);
     })();
 
     const unsubs = [
