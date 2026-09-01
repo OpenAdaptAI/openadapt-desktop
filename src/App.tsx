@@ -175,7 +175,10 @@ export default function App() {
     client_display?: string;
     prompt?: string;
     error?: string;
+    allowed?: boolean;
+    coach_only?: boolean;
   } | null>(null);
+  const [authoringUrl, setAuthoringUrl] = useState("");
   const [firstRunPersistencePending, setFirstRunPersistencePending] =
     useState(false);
   const [firstWorkflowRunning, setFirstWorkflowRunning] = useState(false);
@@ -257,6 +260,17 @@ export default function App() {
       setBreaks(na.count);
       const ss = await engineTry<SyncState>(CMD.GET_SYNC_STATE, {}, sync);
       setSync(ss);
+      const authoringStatus = await engineTry<{
+        status: string;
+        client_display?: string;
+        prompt?: string;
+        error?: string;
+        allowed?: boolean;
+        coach_only?: boolean;
+      }>(CMD.AUTHORING_STATUS, {}, { status: "idle" });
+      if (authoringStatus.status && authoringStatus.status !== "idle") {
+        setAuthoring(authoringStatus);
+      }
       setCheckedAuth(true);
     })();
 
@@ -325,6 +339,8 @@ export default function App() {
           client_display?: string;
           prompt?: string;
           error?: string;
+          allowed?: boolean;
+          coach_only?: boolean;
         }) => {
           setAuthoring(state);
         },
@@ -362,7 +378,8 @@ export default function App() {
     authoring &&
     (authoring.status === "pending_allow" ||
       authoring.status === "replace_allow" ||
-      authoring.status === "error") ? (
+      authoring.status === "error" ||
+      authoring.status === "bound") ? (
       <div
         className={`pairing-notice ${authoring.status === "error" ? "error" : ""}`}
         role={authoring.status === "error" ? "alert" : "status"}
@@ -370,12 +387,19 @@ export default function App() {
         <span>
           {authoring.status === "error"
             ? authoring.error || "The authoring bind could not be completed."
-            : authoring.prompt ||
-              (authoring.status === "replace_allow"
-                ? `A different ${authoring.client_display || "ChatGPT"} account is asking. Allow it to replace the current one?`
-                : `Allow ${authoring.client_display || "ChatGPT"} to drive this job`)}
+            : authoring.status === "bound"
+              ? authoring.coach_only
+                ? "This job is coach-only on this window. ChatGPT can suggest; you click."
+                : authoring.allowed
+                  ? "Pin the browser URL or use this window. Titles stay on this computer."
+                  : "This computer is bound. Pin the window, then Allow ChatGPT to drive this job."
+              : authoring.prompt ||
+                (authoring.status === "replace_allow"
+                  ? `A different ${authoring.client_display || "ChatGPT"} account is asking. Allow it to replace the current one?`
+                  : `Allow ${authoring.client_display || "ChatGPT"} to drive this job`)}
         </span>
-        {authoring.status !== "error" && (
+        {(authoring.status === "pending_allow" ||
+          authoring.status === "replace_allow") && (
           <span className="allow-actions">
             <button
               type="button"
@@ -384,7 +408,13 @@ export default function App() {
                   CMD.AUTHORING_ALLOW,
                   { replace: authoring.status === "replace_allow" },
                   {},
-                ).then(() => setAuthoring(null));
+                ).then(() =>
+                  engineTry(
+                    CMD.AUTHORING_STATUS,
+                    {},
+                    { status: "bound", allowed: true },
+                  ).then((next) => setAuthoring(next)),
+                );
               }}
             >
               Allow
@@ -393,11 +423,82 @@ export default function App() {
               type="button"
               onClick={() => {
                 void engineTry(CMD.AUTHORING_DENY, {}, {}).then(() =>
-                  setAuthoring(null),
+                  engineTry(
+                    CMD.AUTHORING_STATUS,
+                    {},
+                    { status: "bound", allowed: false },
+                  ).then((next) => setAuthoring(next)),
                 );
               }}
             >
               Not now
+            </button>
+          </span>
+        )}
+        {authoring.status === "bound" && (
+          <span className="allow-actions">
+            <input
+              aria-label="Playwright URL"
+              onChange={(event) => setAuthoringUrl(event.target.value)}
+              placeholder="https://"
+              type="url"
+              value={authoringUrl}
+            />
+            <button
+              type="button"
+              onClick={() => {
+                void engineTry(
+                  CMD.AUTHORING_PIN_TARGET,
+                  { backend: "web", url: authoringUrl },
+                  {},
+                ).then((next) =>
+                  setAuthoring((current) =>
+                    current
+                      ? {
+                          ...current,
+                          coach_only:
+                            typeof next === "object" &&
+                            next !== null &&
+                            "coach_only" in next
+                              ? Boolean(
+                                  (next as { coach_only?: boolean }).coach_only,
+                                )
+                              : current.coach_only,
+                        }
+                      : current,
+                  ),
+                );
+              }}
+            >
+              Pin browser
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                void engineTry(
+                  CMD.AUTHORING_PIN_TARGET,
+                  { use_frontmost: true },
+                  {},
+                ).then((next) =>
+                  setAuthoring((current) =>
+                    current
+                      ? {
+                          ...current,
+                          coach_only:
+                            typeof next === "object" &&
+                            next !== null &&
+                            "coach_only" in next
+                              ? Boolean(
+                                  (next as { coach_only?: boolean }).coach_only,
+                                )
+                              : true,
+                        }
+                      : current,
+                  ),
+                );
+              }}
+            >
+              Use this window
             </button>
           </span>
         )}

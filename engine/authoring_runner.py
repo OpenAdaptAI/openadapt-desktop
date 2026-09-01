@@ -41,6 +41,7 @@ NODE_TABLE_LIFETIME_S = 15 * 60
 COMMAND_ENVELOPE_SCHEMA = "openadapt.authoring.command/v1"
 OBSERVE_SCHEMA = "openadapt.authoring.observe/v1"
 CLIENT_DISPLAYS = frozenset({"ChatGPT", "Claude"})
+PAUSE_PROMPT = "Type in the application. Continue here when done."
 ENQUEUE_REQUIRING_ALLOW = frozenset(
     {
         "observe",
@@ -55,12 +56,33 @@ ENQUEUE_REQUIRING_ALLOW = frozenset(
     }
 )
 COACH_ONLY_BACKENDS = frozenset({"windows", "rdp", "citrix"})
+UNIQUE_WINDOW_BACKENDS = frozenset({"macos", "linux"})
 PROCESS_NAME_RE = re.compile(r"^[A-Za-z0-9 ._-]{1,64}$")
 SIX_DIGITS_RE = re.compile(r"\d{6,}")
 _SHA256_HEX = re.compile(r"^[a-f0-9]{64}$")
 _SAFE_PARAM = re.compile(r"^[A-Za-z0-9_]{1,40}$")
 _NODE_ID = re.compile(r"^n_[a-f0-9]{8}$")
 _COMMAND_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,200}$")
+FORBIDDEN_RESULT_KEYS = frozenset(
+    {
+        "value",
+        "text",
+        "title",
+        "screenshot",
+        "png",
+        "ocr",
+        "backend_pixels",
+        "pixels",
+        "events",
+        "window_title",
+        "image",
+        "raw",
+        "leaseSecret",
+        "lease_secret",
+        "bind",
+    }
+)
+MAILBOX_ACTIONS = frozenset({"claim", "poll", "callback", "allow"})
 
 
 class AuthoringError(RuntimeError):
@@ -81,6 +103,62 @@ def _utc_now() -> str:
 
 def _sha256_hex(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _lease_hmac_key(lease_secret: str) -> bytes:
+    """Use the lease secret body as HMAC key material. Do not hash it as a password."""
+
+    if not valid_lease_secret(lease_secret):
+        raise AuthoringError("The authoring mailbox credential is malformed.")
+    return bytes.fromhex(lease_secret[5:])
+
+
+def _sanitize_result(value: Any) -> Any:
+    """Drop titles, values, pixels, and other vendor-forbidden keys."""
+
+    if isinstance(value, dict):
+        return {
+            key: _sanitize_result(child)
+            for key, child in value.items()
+            if key not in FORBIDDEN_RESULT_KEYS
+        }
+    if isinstance(value, list):
+        return [_sanitize_result(item) for item in value]
+    return value
+
+
+def _require_empty_cookies(browser: Any) -> None:
+    cookies_fn = getattr(browser, "cookies", None)
+    if cookies_fn is None:
+        context = getattr(browser, "context", None)
+        cookies_fn = getattr(context, "cookies", None)
+    if not callable(cookies_fn):
+        raise AuthoringError("Playwright Chromium did not start with empty cookies.")
+    cookies = cookies_fn()
+    if cookies:
+        raise AuthoringError("Playwright Chromium did not start with empty cookies.")
+
+
+def launch_empty_playwright_chromium(url: str) -> Any:
+    """Launch a fresh Chromium with empty cookies. Never attach to logged-in Chrome."""
+
+    if not isinstance(url, str) or not url.startswith("https://"):
+        raise AuthoringError("A Playwright job needs a URL typed into Desktop.")
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        raise AuthoringError("Playwright Chromium is unavailable.") from exc
+    playwright = sync_playwright().start()
+    browser = playwright.chromium.launch(headless=False)
+    context = browser.new_context()
+    cookies = context.cookies()
+    if cookies:
+        browser.close()
+        playwright.stop()
+        raise AuthoringError("Playwright Chromium did not start with empty cookies.")
+    page = context.new_page()
+    page.goto(url)
+    return page
 
 
 def _pack_dir(data_dir: Path, pack_id: str) -> Path:
@@ -323,7 +401,7 @@ class AuthoringMailboxTransport:
             self._client.close()
 
     def _path(self, pack_id: str, action: str) -> str:
-        if not valid_pack_id(pack_id) or action not in {"claim", "poll", "callback"}:
+        if not valid_pack_id(pack_id) or action not in MAILBOX_ACTIONS:
             raise AuthoringTransportError("The authoring mailbox path is invalid.")
         return f"/j/{quote(pack_id, safe='._-')}/runner/{action}"
 
@@ -440,6 +518,22 @@ class AuthoringMailboxTransport:
             expected=(200, 202),
         )
 
+    def allow(self, pack_id: str, lease_secret: str, command_id: str) -> None:
+        if not valid_lease_secret(lease_secret):
+            raise AuthoringTransportError("The authoring mailbox credential is malformed.")
+        if not isinstance(command_id, str) or _COMMAND_ID.fullmatch(command_id) is None:
+            raise AuthoringTransportError("The authoring Allow request is malformed.")
+        path = self._path(pack_id, "allow")
+        self._post(
+            path,
+            {"command_id": command_id},
+            headers={
+                "Authorization": f"Bearer {lease_secret}",
+                "Content-Type": "application/json",
+            },
+            expected=(200, 202),
+        )
+
 
 class AuthoringRunner:
     """Claim, Allow-per-sub, wait=0 poll, and Flow record_observed session."""
@@ -457,6 +551,7 @@ class AuthoringRunner:
         compile_recording: Callable[..., Any] | None = None,
         playwright_launcher: Callable[[str], Any] | None = None,
         text_value_at: Callable[[dict[str, int]], str | None] | None = None,
+        unique_window: Callable[[], dict[str, Any] | None] | None = None,
     ) -> None:
         self.config = config
         self.emit = emit or (lambda _event, _data: None)
@@ -468,6 +563,7 @@ class AuthoringRunner:
         self._compile_recording = compile_recording
         self._playwright_launcher = playwright_launcher
         self._text_value_at = text_value_at
+        self._unique_window = unique_window
         self._transport: AuthoringMailboxTransport | None = None
         self._lock = threading.RLock()
         self._stop = threading.Event()
@@ -477,12 +573,14 @@ class AuthoringRunner:
         self._allowed_sub: str | None = None
         self._allowed_client_id: str | None = None
         self._pending_allow: dict[str, Any] | None = None
-        self._pin: dict[str, Any] = {"backend": "macos"}
+        self._pin: dict[str, Any] = {"backend": "macos", "window_title_unique": False}
         self._node_table: NodeTable | None = None
         self._recorder: Any | None = None
         self._recording = False
         self._paused = False
         self._pause_target: dict[str, Any] | None = None
+        self._pause_command_id: str | None = None
+        self._active_command_id: str | None = None
         self._secret_pause = False
         self._secret_type_recorded = False
         self._actuation_started = False
@@ -505,6 +603,7 @@ class AuthoringRunner:
                 "recording": True,
                 "paused": True,
                 "capture_id": None,
+                "pause_prompt": PAUSE_PROMPT,
                 "controls": {"pause": False, "resume": True, "stop": True},
             }
         if self._recording:
@@ -541,17 +640,39 @@ class AuthoringRunner:
 
     def pin_target(self, **fields: Any) -> dict[str, Any]:
         backend = str(fields.get("backend") or self._pin.get("backend") or "macos")
+        unique = fields.get("window_title_unique")
+        macos_app = fields.get("macos_app")
+        macos_title = fields.get("macos_window_title")
+        linux_app = fields.get("linux_app")
+        linux_title = fields.get("linux_window_title")
+        if fields.get("use_frontmost") is True:
+            probe = self._unique_window() if self._unique_window is not None else None
+            if not isinstance(probe, dict) or probe.get("unique") is not True:
+                unique = False
+            else:
+                unique = True
+                backend = str(probe.get("backend") or backend)
+                macos_app = probe.get("process_name") or macos_app
+                macos_title = probe.get("window_title") or macos_title
+                linux_app = probe.get("process_name") or linux_app
+                linux_title = probe.get("window_title") or linux_title
+        if unique is None:
+            unique = False if backend in UNIQUE_WINDOW_BACKENDS else True
         pin = {
             "backend": backend,
-            "url": fields.get("url"),
-            "macos_app": fields.get("macos_app"),
-            "macos_window_title": fields.get("macos_window_title"),
-            "linux_app": fields.get("linux_app"),
-            "linux_window_title": fields.get("linux_window_title"),
-            "window_title_unique": fields.get("window_title_unique", True),
+            "url": fields.get("url") if backend == "web" else None,
+            "macos_app": macos_app,
+            "macos_window_title": macos_title,
+            "linux_app": linux_app,
+            "linux_window_title": linux_title,
+            "window_title_unique": bool(unique),
         }
         self._pin = pin
-        return {"ok": True, "backend": backend}
+        return {
+            "ok": True,
+            "backend": backend,
+            "coach_only": self._coach_only(),
+        }
 
     def claim_uri(self, uri: str, *, start_loop: bool = True) -> dict[str, Any]:
         parsed = parse_runner_uri(uri)
@@ -592,7 +713,7 @@ class AuthoringRunner:
             self._transport = transport
             self._pack = pack
             self._lease_secret = lease_secret
-            hmac_key = hashlib.sha256(lease_secret.encode("utf-8")).digest()
+            hmac_key = _lease_hmac_key(lease_secret)
             self._node_table = NodeTable(
                 _pack_dir(self.config.data_dir, pack) / "nodes.json",
                 hmac_key,
@@ -602,7 +723,7 @@ class AuthoringRunner:
             self.audit.log("authoring_bind_claimed", pack_hash=_sha256_hex(pack)[:16])
         if start_loop:
             self.start()
-        self.emit("authoring_state", {"status": "bound"})
+        self.emit("authoring_state", self.status())
         return {"bound": True, "origin": origin, "pack_prefix": pack[:2]}
 
     def start(self) -> None:
@@ -657,6 +778,14 @@ class AuthoringRunner:
         if pack_id != self._pack:
             self._callback_error(command_id, "pack_mismatch")
             return
+        if command_id in {self._active_command_id, self._pause_command_id}:
+            return
+        if (
+            tool == "bind_pack"
+            and self._pending_allow
+            and self._pending_allow.get("command_id") == command_id
+        ):
+            return
         sub = envelope.get("oauth_sub_sha256")
         if tool == "bind_pack":
             self._queue_allow(envelope)
@@ -665,9 +794,11 @@ class AuthoringRunner:
             self._callback_error(command_id, "not_allowed")
             return
         args = envelope.get("args") if isinstance(envelope.get("args"), dict) else {}
+        self._active_command_id = command_id
         try:
             result = self._dispatch_tool(str(tool), args)
         except AuthoringCoachOnly:
+            self._active_command_id = None
             self._callback(
                 {
                     "command_id": command_id,
@@ -677,8 +808,13 @@ class AuthoringRunner:
             )
             return
         except AuthoringError as exc:
+            self._active_command_id = None
             self._callback_error(command_id, str(exc))
             return
+        if tool == "pause_for_input":
+            self._pause_command_id = command_id
+            return
+        self._active_command_id = None
         self._callback({"command_id": command_id, "status": "done", "result": result})
 
     def _queue_allow(self, envelope: dict[str, Any]) -> None:
@@ -724,6 +860,15 @@ class AuthoringRunner:
             and not replace
         ):
             return self.status()
+        command_id = pending.get("command_id")
+        display = pending.get("client_display")
+        if (
+            isinstance(command_id, str)
+            and self._transport is not None
+            and self._pack
+            and self._lease_secret
+        ):
+            self._transport.allow(self._pack, self._lease_secret, command_id)
         granted_at = _utc_now()
         self._allowed_sub = pending["oauth_sub_sha256"]
         self._allowed_client_id = pending.get("client_id_sha256")
@@ -733,17 +878,7 @@ class AuthoringRunner:
             stored["allowed_client_id"] = self._allowed_client_id
             stored["allowed_at"] = granted_at
             store_authoring_lease(self._pack or "", stored)
-        command_id = pending.get("command_id")
-        display = pending.get("client_display")
         self._pending_allow = None
-        if isinstance(command_id, str):
-            self._callback(
-                {
-                    "command_id": command_id,
-                    "status": "done",
-                    "result": {"allowed": True},
-                }
-            )
         if self.audit:
             self.audit.log(
                 "authoring_allowed",
@@ -751,7 +886,7 @@ class AuthoringRunner:
                 allowed_sub_prefix=(self._allowed_sub or "")[:8],
                 client_display=display,
             )
-        self.emit("authoring_state", {"status": "bound", "allowed": True})
+        self.emit("authoring_state", self.status())
         return {"allowed": True, "client_display": display}
 
     def deny(self) -> dict[str, Any]:
@@ -777,7 +912,12 @@ class AuthoringRunner:
         else:
             original = None
         try:
+            text = None
+            if self._text_value_at is not None:
+                text = self._text_value_at(target["backend_pixels"])
             if target.get("secret"):
+                if text is not None and not text:
+                    return self.status_dict() or {"recording": True, "paused": True}
                 recorder.record_observed(
                     event={"kind": "type"},
                     param=target.get("param"),
@@ -786,9 +926,6 @@ class AuthoringRunner:
                 )
                 self._secret_type_recorded = True
             else:
-                text = None
-                if self._text_value_at is not None:
-                    text = self._text_value_at(target["backend_pixels"])
                 recorder.record_observed(
                     event={"kind": "type"},
                     param=target.get("param"),
@@ -797,14 +934,25 @@ class AuthoringRunner:
         finally:
             if original is not None:
                 recorder.type_text = original
+        command_id = self._pause_command_id
         self._paused = False
         self._pause_target = None
+        self._pause_command_id = None
+        self._active_command_id = None
         self.emit("status_update", self.status_dict() or {})
         if self.audit:
             self.audit.log(
                 "authoring_pause_typed",
                 param=target.get("param"),
                 secret=bool(target.get("secret")),
+            )
+        if isinstance(command_id, str):
+            self._callback(
+                {
+                    "command_id": command_id,
+                    "status": "done",
+                    "result": {"recorded": True, "param": target.get("param")},
+                }
             )
         return self.status_dict() or {}
 
@@ -840,7 +988,7 @@ class AuthoringRunner:
         backend = str(self._pin.get("backend") or "")
         if backend in COACH_ONLY_BACKENDS:
             return True
-        if backend == "linux" and not self._pin.get("window_title_unique"):
+        if backend in UNIQUE_WINDOW_BACKENDS and not self._pin.get("window_title_unique"):
             return True
         return False
 
@@ -856,13 +1004,20 @@ class AuthoringRunner:
             "macos": "ax",
             "linux": "atspi",
         }.get(backend, "none")
+        process_name = None
+        if backend == "web":
+            process_name = "Chromium"
+        elif backend == "macos":
+            process_name = self._pin.get("macos_app")
+        elif backend == "linux":
+            process_name = self._pin.get("linux_app")
         return project_observe(
             backend=backend,
             provider=provider,
             recording=self._recording,
             agent_drive=agent_drive,
             coach_only=coach_only,
-            process_name="Chromium" if backend == "web" else None,
+            process_name=process_name if isinstance(process_name, str) else None,
             raw_nodes=raw,
             node_table=self._node_table,
         )
@@ -877,8 +1032,9 @@ class AuthoringRunner:
             url = self._pin.get("url")
             if not isinstance(url, str) or not url.startswith("https://"):
                 raise AuthoringError("A Playwright job needs a URL typed into Desktop.")
-            if self._playwright_launcher is not None:
-                self._playwright = self._playwright_launcher(url)
+            launcher = self._playwright_launcher or launch_empty_playwright_chromium
+            self._playwright = launcher(url)
+            _require_empty_cookies(self._playwright)
         factory = self._recorder_factory
         if factory is None:
             raise AuthoringError("Authoring recorder is unavailable.")
@@ -894,8 +1050,9 @@ class AuthoringRunner:
     def _click(self, args: dict[str, Any]) -> dict[str, Any]:
         if self._coach_only():
             raise AuthoringCoachOnly("COACH_ONLY")
-        if self._uncertain:
-            raise AuthoringError("RECONCILIATION_REQUIRED")
+        with self._lock:
+            if self._uncertain:
+                raise AuthoringError("RECONCILIATION_REQUIRED")
         node_id = args.get("node_id")
         if not isinstance(node_id, str) or _NODE_ID.fullmatch(node_id) is None:
             raise AuthoringError("stale_node")
@@ -907,14 +1064,17 @@ class AuthoringRunner:
         pixels = row["backend_pixels"]
         x = int(pixels["x"] + pixels["w"] / 2)
         y = int(pixels["y"] + pixels["h"] / 2)
-        self._actuation_started = True
+        with self._lock:
+            self._actuation_started = True
         try:
             self._recorder.click(x, y)
         except Exception:
-            self._uncertain = True
+            with self._lock:
+                self._uncertain = True
             raise AuthoringError("RECONCILIATION_REQUIRED") from None
         finally:
-            self._actuation_started = False
+            with self._lock:
+                self._actuation_started = False
         return {"clicked": True}
 
     def _pause_for_input(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -975,8 +1135,19 @@ class AuthoringRunner:
         }
 
     def _halt(self, *, unsigned: bool, command_id: str | None) -> None:
-        if self._actuation_started:
-            self._uncertain = True
+        with self._lock:
+            if self._actuation_started:
+                self._uncertain = True
+                uncertain = True
+            else:
+                uncertain = False
+                self._recording = False
+                self._paused = False
+                self._recorder = None
+                self._pause_target = None
+                self._pause_command_id = None
+                self._active_command_id = None
+        if uncertain:
             self._callback(
                 {
                     "command_id": command_id,
@@ -985,9 +1156,6 @@ class AuthoringRunner:
                 }
             )
             return
-        self._recording = False
-        self._paused = False
-        self._recorder = None
         if self._node_table is not None:
             self._node_table.clear()
         if unsigned and self._pack and self._lease_secret and self._transport:
@@ -1006,6 +1174,8 @@ class AuthoringRunner:
             for key in ("command_id", "status", "result", "halted")
             if key in payload
         }
+        if "result" in closed:
+            closed["result"] = _sanitize_result(closed["result"])
         self._transport.callback(self._pack, self._lease_secret, closed)
 
     def _callback_error(self, command_id: object, error: str) -> None:
@@ -1040,7 +1210,7 @@ def restore_authoring_runner(
     runner._lease_secret = stored["lease_secret"]
     runner._allowed_sub = stored.get("allowed_sub")
     runner._allowed_client_id = stored.get("allowed_client_id")
-    hmac_key = hashlib.sha256(stored["lease_secret"].encode("utf-8")).digest()
+    hmac_key = _lease_hmac_key(stored["lease_secret"])
     runner._node_table = NodeTable(_pack_dir(config.data_dir, pack_id) / "nodes.json", hmac_key)
     runner._transport = AuthoringMailboxTransport(
         origin=stored["origin"],

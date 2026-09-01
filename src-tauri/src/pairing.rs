@@ -257,7 +257,20 @@ fn valid_pairing_secret(value: &str) -> bool {
 }
 
 fn valid_bind_token(value: &str) -> bool {
+    if value.starts_with("oar_") || value.starts_with("oap_") {
+        return false;
+    }
+    // Cloud runner bodies are 64 hex. That encoding is never a bind token.
+    if value.len() == 68 && value.starts_with("oab_") && hex_body(&value[4..]) {
+        return false;
+    }
     value.len() == 47 && value.starts_with("oab_") && unreserved_body(&value[4..])
+}
+
+fn hex_body(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 fn valid_pack_id(value: &str) -> bool {

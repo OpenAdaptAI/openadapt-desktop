@@ -140,6 +140,15 @@ def _mailbox(
                 headers={"Cache-Control": "no-store"},
                 json={"accepted": True},
             )
+        if path.endswith("/runner/allow"):
+            assert request.headers["Authorization"] == f"Bearer {LEASE}"
+            body = json.loads(request.content)
+            assert body["command_id"]
+            return httpx.Response(
+                200,
+                headers={"Cache-Control": "no-store"},
+                json={"allowedAt": "2026-09-01T00:00:00Z", "client_display": "ChatGPT"},
+            )
         return httpx.Response(404)
 
     client = httpx.Client(
@@ -205,6 +214,12 @@ def test_poll_wait_is_zero_not_twenty_five(tmp_path: Path) -> None:
     assert '"wait_seconds": POLL_WAIT_S' in source
     assert "from openadapt_flow.backends.win_agent" not in source
     assert "launch_agent(" not in source
+    assert "import parallels_vm" not in source
+    assert "hashlib.sha256(lease_secret" not in source
+    assert "hashlib.sha256(stored[\"lease_secret\"]" not in source
+    assert "bytes.fromhex(lease_secret[5:])" in source
+    assert '"allow"' in source
+    assert "PAUSE_PROMPT" in source
     runner, requests, _recorder, _audit = _mailbox(tmp_path)
     runner.claim_uri(URI, start_loop=False)
     runner.poll_once()
@@ -231,6 +246,9 @@ def test_bind_pack_allow_is_per_sub_and_required_for_halt(tmp_path: Path) -> Non
     ]
     assert {item["result"]["error"] for item in denied} == {"not_allowed"}
     assert runner.allow()["allowed"] is True
+    allow_req = next(item for item in requests if item.url.path.endswith("/allow"))
+    assert json.loads(allow_req.content) == {"command_id": "cmd_bind_pack"}
+    assert allow_req.headers["Authorization"] == f"Bearer {LEASE}"
     runner.handle_envelope(_envelope("observe"))
     observe = json.loads(requests[-1].content)["result"]
     assert observe["schema_version"] == "openadapt.authoring.observe/v1"
@@ -257,7 +275,7 @@ def test_unsigned_stop_uses_lease_bearer_not_mcp_jwt(tmp_path: Path) -> None:
 
 
 def test_continue_records_observed_on_pause_target_never_type_text(tmp_path: Path) -> None:
-    runner, _requests, recorder, _audit = _mailbox(tmp_path)
+    runner, requests, recorder, _audit = _mailbox(tmp_path)
     runner.claim_uri(URI, start_loop=False)
     runner.handle_envelope(_envelope("bind_pack"))
     runner.allow()
@@ -265,14 +283,24 @@ def test_continue_records_observed_on_pause_target_never_type_text(tmp_path: Pat
     runner.handle_envelope(_envelope("start_record"))
     observe = runner._observe()
     note = next(node for node in observe["tree"] if node.get("automation_id") == "note")
+    before = [item for item in requests if item.url.path.endswith("/callback")]
     runner.handle_envelope(
         _envelope("pause_for_input", args={"node_id": note["node_id"], "param": "note"})
+    )
+    after_pause = [item for item in requests if item.url.path.endswith("/callback")]
+    assert after_pause == before
+    assert runner.status_dict()["pause_prompt"] == (
+        "Type in the application. Continue here when done."
     )
     runner.continue_pause()
     assert recorder.typed == []
     assert recorder.observed[0]["event"] == {"kind": "type"}
     assert recorder.observed[0]["text"] == "follow up in two weeks"
     assert "secret" not in recorder.observed[0] or recorder.observed[0].get("secret") is not True
+    continued = json.loads(requests[-1].content)
+    assert continued["result"] == {"recorded": True, "param": "note"}
+    assert "text" not in continued["result"]
+    assert "value" not in continued["result"]
 
 
 def test_secret_continue_has_no_text_and_compile_refuses_if_missing(tmp_path: Path) -> None:
@@ -280,7 +308,7 @@ def test_secret_continue_has_no_text_and_compile_refuses_if_missing(tmp_path: Pa
     runner.claim_uri(URI, start_loop=False)
     runner.handle_envelope(_envelope("bind_pack"))
     runner.allow()
-    runner.pin_target(backend="macos")
+    runner.pin_target(backend="macos", window_title_unique=True)
     runner.handle_envelope(_envelope("start_record"))
     observe = runner._observe()
     note = next(node for node in observe["tree"] if node.get("automation_id") == "note")
@@ -309,7 +337,7 @@ def test_click_uses_backend_pixels_and_stale_node_does_not_retry(tmp_path: Path)
     runner.claim_uri(URI, start_loop=False)
     runner.handle_envelope(_envelope("bind_pack"))
     runner.allow()
-    runner.pin_target(backend="macos")
+    runner.pin_target(backend="macos", window_title_unique=True)
     runner.handle_envelope(_envelope("start_record"))
     observe = runner._observe()
     button = next(node for node in observe["tree"] if node.get("automation_id") == "btnContinue")
@@ -422,7 +450,7 @@ def test_dispatch_resume_and_stop_use_authoring_when_bound(tmp_path: Path) -> No
     runner.claim_uri(URI, start_loop=False)
     runner.handle_envelope(_envelope("bind_pack"))
     runner.allow()
-    runner.pin_target(backend="macos")
+    runner.pin_target(backend="macos", window_title_unique=True)
     runner.handle_envelope(_envelope("start_record"))
     observe = runner._observe()
     note = next(node for node in observe["tree"] if node.get("automation_id") == "note")
@@ -455,3 +483,74 @@ def test_replace_allow_required_for_a_second_sub(tmp_path: Path) -> None:
     assert runner._allowed_sub == SUB
     runner.allow(replace=True)
     assert runner._allowed_sub == OTHER_SUB
+
+
+def test_macos_without_unique_window_is_coach_only(tmp_path: Path) -> None:
+    runner, _requests, recorder, _audit = _mailbox(tmp_path)
+    runner.claim_uri(URI, start_loop=False)
+    runner.handle_envelope(_envelope("bind_pack"))
+    runner.allow()
+    pinned = runner.pin_target(backend="macos", macos_window_title="Patient Jane Doe")
+    assert pinned["coach_only"] is True
+    observe = runner._observe()
+    assert observe["coach_only"] is True
+    assert "Patient Jane Doe" not in json.dumps(observe)
+    with pytest.raises(AuthoringCoachOnly):
+        runner._start_record()
+    assert recorder.clicks == []
+
+
+def test_use_frontmost_unique_window_stays_local(tmp_path: Path) -> None:
+    runner, requests, _recorder, _audit = _mailbox(tmp_path)
+    runner._unique_window = lambda: {
+        "backend": "macos",
+        "unique": True,
+        "process_name": "Notes",
+        "window_title": "Patient Jane Doe",
+    }
+    runner.claim_uri(URI, start_loop=False)
+    runner.handle_envelope(_envelope("bind_pack"))
+    runner.allow()
+    pinned = runner.pin_target(use_frontmost=True)
+    assert pinned == {"ok": True, "backend": "macos", "coach_only": False}
+    assert "Patient Jane Doe" not in json.dumps(pinned)
+    observe = runner._observe()
+    assert observe["window"].get("process_name") == "Notes"
+    assert "Patient Jane Doe" not in json.dumps(observe)
+    assert all("Patient Jane Doe" not in item.content.decode("utf-8") for item in requests)
+
+
+def test_playwright_rejects_nonempty_cookies(tmp_path: Path) -> None:
+    runner, _requests, _recorder, _audit = _mailbox(tmp_path)
+    runner._playwright_launcher = lambda _url: SimpleNamespace(cookies=lambda: [{"name": "sid"}])
+    runner.claim_uri(URI, start_loop=False)
+    runner.handle_envelope(_envelope("bind_pack"))
+    runner.allow()
+    runner.pin_target(backend="web", url="https://openadapt.ai/mockmed")
+    with pytest.raises(AuthoringError, match="empty cookies"):
+        runner._start_record()
+
+
+def test_callback_strips_titles_and_never_retries_uncertain_click(tmp_path: Path) -> None:
+    runner, requests, recorder, _audit = _mailbox(tmp_path)
+
+    def _boom(_x: int, _y: int) -> None:
+        raise RuntimeError("delivery unknown")
+
+    runner.claim_uri(URI, start_loop=False)
+    runner.handle_envelope(_envelope("bind_pack"))
+    runner.allow()
+    runner.pin_target(backend="macos", window_title_unique=True)
+    runner.handle_envelope(_envelope("start_record"))
+    observe = runner._observe()
+    button = next(node for node in observe["tree"] if node.get("automation_id") == "btnContinue")
+    recorder.click = _boom
+    runner.handle_envelope(_envelope("click", args={"node_id": button["node_id"]}))
+    body = json.loads(requests[-1].content)
+    assert body["result"]["error"] == "RECONCILIATION_REQUIRED"
+    assert "title" not in json.dumps(body)
+    assert "backend_pixels" not in json.dumps(body)
+    recorder.click = lambda x, y: recorder.clicks.append((x, y))
+    with pytest.raises(AuthoringError, match="RECONCILIATION_REQUIRED"):
+        runner._click({"node_id": button["node_id"]})
+    assert recorder.clicks == []

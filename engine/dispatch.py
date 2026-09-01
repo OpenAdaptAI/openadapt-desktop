@@ -3296,7 +3296,7 @@ class EngineDispatcher:
         if not isinstance(uri, str):
             raise ValueError("uri is required")
         result = self._authoring_service().claim_uri(uri)
-        self.emit("authoring_state", {"status": "bound"})
+        self.emit("authoring_state", self._authoring_service().status())
         return result
 
     def authoring_allow(self, **params: Any) -> dict:

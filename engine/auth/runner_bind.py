@@ -20,8 +20,8 @@ PACK_ALIAS_RE = re.compile(r"^p\.[A-Za-z0-9_-]{12}$")
 PACK_CIPHER_RE = re.compile(r"^v1\.[A-Za-z0-9_-]{32,2000}$")
 CLOUD_RUNNER_TOKEN_RE = re.compile(r"^oar_[a-f0-9]{64}$")
 PAIRING_SECRET_RE = re.compile(r"^oap_[A-Za-z0-9_-]{43}$")
-HEX_BODY_RE = re.compile(r"^[a-f0-9]+$")
-UNRESERVED_BODY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+BIND_HEX_BODY_RE = re.compile(r"^oab_[a-f0-9]{64}$")
+LEASE_BASE64URL_BODY_RE = re.compile(r"^oals_[A-Za-z0-9_-]{43}$")
 
 
 class RunnerBindError(RuntimeError):
@@ -31,25 +31,29 @@ class RunnerBindError(RuntimeError):
 def valid_bind_token(value: object) -> bool:
     """Return whether ``value`` is exactly one ``oab_`` bind token."""
 
-    if not isinstance(value, str) or BIND_TOKEN_RE.fullmatch(value) is None:
+    if not isinstance(value, str):
         return False
-    body = value[4:]
-    # 32-byte hex (the ``oar_`` body) is not a bind token even with this prefix.
-    if HEX_BODY_RE.fullmatch(body) is not None and len(body) == 64:
+    if (
+        CLOUD_RUNNER_TOKEN_RE.fullmatch(value) is not None
+        or PAIRING_SECRET_RE.fullmatch(value) is not None
+        or BIND_HEX_BODY_RE.fullmatch(value) is not None
+    ):
         return False
-    return True
+    return BIND_TOKEN_RE.fullmatch(value) is not None
 
 
 def valid_lease_secret(value: object) -> bool:
     """Return whether ``value`` is exactly one ``oals_`` mailbox lease secret."""
 
-    if not isinstance(value, str) or LEASE_SECRET_RE.fullmatch(value) is None:
+    if not isinstance(value, str):
         return False
-    body = value[5:]
-    # 32-byte base64url (the ``oab_`` body) is not a lease secret.
-    if len(body) == 43 and UNRESERVED_BODY_RE.fullmatch(body) is not None:
+    if (
+        CLOUD_RUNNER_TOKEN_RE.fullmatch(value) is not None
+        or PAIRING_SECRET_RE.fullmatch(value) is not None
+        or LEASE_BASE64URL_BODY_RE.fullmatch(value) is not None
+    ):
         return False
-    return True
+    return LEASE_SECRET_RE.fullmatch(value) is not None
 
 
 def valid_pack_id(value: object) -> bool:
