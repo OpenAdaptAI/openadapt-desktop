@@ -25,9 +25,21 @@ export interface AttentionCopy {
   choices: AttentionChoice[];
 }
 
-function stepName(item: AttentionItem): string {
+/** "Click “Save”", or null when the stop has no recorded step. */
+function stepCaption(item: AttentionItem): string | null {
   const caption = plainStep(item.halt_step);
-  return caption === "A step" ? "a step" : `“${caption}”`;
+  return caption === "A step" ? null : caption;
+}
+
+/** The button or field the step acted on, such as "Save". */
+function targetName(item: AttentionItem): string | null {
+  const match = /['"‘’“”](.+)['"‘’“”]/.exec(String(item.halt_step ?? ""));
+  return match ? match[1] : null;
+}
+
+function stepPhrase(item: AttentionItem): string {
+  const caption = stepCaption(item);
+  return caption ? `this step: ${caption}` : "a step";
 }
 
 function subject(item: AttentionItem): string {
@@ -109,7 +121,7 @@ export function attentionCopy(item: AttentionItem): AttentionCopy {
       sentence:
         item.halt_kind === "save_not_confirmed"
           ? "OpenAdapt saved, but when it read the record back it couldn't confirm the entry. A person checks the record before anything is retried."
-          : `OpenAdapt stopped at ${stepName(item)} and can't tell whether the save went through. A person checks the record before anything is retried.`,
+          : `OpenAdapt stopped at ${stepPhrase(item)}. It can't tell whether the save went through, so a person checks the record before anything is retried.`,
       prevented: "A save may have gone through. OpenAdapt won't retry this item on its own.",
       preventedTone: "warn",
       choices,
@@ -154,7 +166,9 @@ export function attentionCopy(item: AttentionItem): AttentionCopy {
       };
     case "screen_changed":
       return {
-        question: `OpenAdapt couldn't find ${stepName(item)} on the screen`,
+        question: targetName(item)
+          ? `OpenAdapt couldn't find “${targetName(item)}” on the screen`
+          : "OpenAdapt couldn't find the next thing to click",
         sentence:
           "The app may look different from when you showed the task. It stopped instead of guessing where to click.",
         prevented: "It stopped before saving. Nothing was written.",
@@ -165,7 +179,9 @@ export function attentionCopy(item: AttentionItem): AttentionCopy {
       };
     default:
       return {
-        question: `OpenAdapt stopped at ${stepName(item)}`,
+        question: stepCaption(item)
+          ? `OpenAdapt stopped at this step: ${stepCaption(item)}`
+          : "OpenAdapt stopped before finishing",
         sentence: item.halt_reason
           ? sentenceCase(item.halt_reason)
           : "Something didn't match, so it stopped instead of guessing.",
