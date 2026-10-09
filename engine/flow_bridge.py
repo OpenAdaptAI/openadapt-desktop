@@ -660,7 +660,13 @@ class FlowBridge:
         args = ["tutorial", "--out", str(out_dir), "--no-receipt"]
         if break_it:
             args.append("--break-it")
-        return self._run(args, out_dir=out_dir, timeout=timeout)
+        # The sample is local. Opt out of any optional product signal too.
+        return self._run(
+            args,
+            out_dir=out_dir,
+            timeout=timeout,
+            env_overrides={"DO_NOT_TRACK": "1", "OPENADAPT_TELEMETRY": "0"},
+        )
 
     def start_record(
         self,
