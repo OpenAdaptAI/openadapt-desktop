@@ -11,6 +11,7 @@
 import { useEffect, useId, useMemo, useState } from "react";
 import { CMD, engineInvoke, engineTry } from "../lib/engine";
 import {
+  TIER_CHOICES,
   checkPlan,
   missingPinQuestion,
   type CaseView,
@@ -122,6 +123,149 @@ function caseResult(response: { case_run?: RunReport } & Record<string, unknown>
   const run = response.case_run;
   if (!run) return null;
   return resultCopy(plainResultForReport(run));
+}
+
+interface EffectAnswer {
+  kind: "record_written" | "field_equals";
+  matchParam: string;
+  matchField: string;
+  field: string;
+  valueParam: string;
+  tier: number;
+}
+
+/**
+ * Plain questions for a save OpenAdapt can't confirm from the recording.
+ * The answers become one effect binding, the same one the exact checks make.
+ */
+function EffectQuestion({
+  idPrefix,
+  inputs,
+  busy,
+  onSave,
+}: {
+  idPrefix: string;
+  inputs: QualificationParameter[];
+  busy: boolean;
+  onSave: (answer: EffectAnswer) => void;
+}) {
+  const [answer, setAnswer] = useState<EffectAnswer>({
+    kind: "field_equals",
+    matchParam: inputs[0]?.name ?? "",
+    matchField: "",
+    field: "",
+    valueParam: inputs[1]?.name ?? inputs[0]?.name ?? "",
+    tier: 1,
+  });
+  const set = (next: Partial<EffectAnswer>) => setAnswer({ ...answer, ...next });
+  const ready =
+    answer.matchParam &&
+    answer.matchField.trim() &&
+    (answer.kind === "record_written" || (answer.field.trim() && answer.valueParam));
+  return (
+    <div className="question effect-question">
+      <p>
+        OpenAdapt didn't see where this save lands in your system. Answer these
+        so it can read the record back. Ask your IT team if you're not sure of a
+        name; they connect OpenAdapt to the records once.
+      </p>
+      <fieldset className="plain-choices">
+        <legend>What does this step save?</legend>
+        <label>
+          <input
+            type="radio"
+            name={`${idPrefix}-kind`}
+            checked={answer.kind === "field_equals"}
+            onChange={() => set({ kind: "field_equals" })}
+          />
+          It changes a field on an existing record
+        </label>
+        <label>
+          <input
+            type="radio"
+            name={`${idPrefix}-kind`}
+            checked={answer.kind === "record_written"}
+            onChange={() => set({ kind: "record_written" })}
+          />
+          It adds a new entry to a record
+        </label>
+      </fieldset>
+      <div className="single-form">
+        <Field label="Which value identifies the record?" htmlFor={`${idPrefix}-match-param`}>
+          <select
+            id={`${idPrefix}-match-param`}
+            className="input"
+            value={answer.matchParam}
+            onChange={(event) => set({ matchParam: event.target.value })}
+          >
+            {inputs.map((input) => (
+              <option key={input.name} value={input.name}>
+                {sentenceCase(humanizeInput(input.name))}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field
+          label="What is that ID called in your system's records?"
+          hint="The field or column name, for example member_id."
+          htmlFor={`${idPrefix}-match-field`}
+        >
+          <input
+            id={`${idPrefix}-match-field`}
+            className="input"
+            value={answer.matchField}
+            onChange={(event) => set({ matchField: event.target.value })}
+          />
+        </Field>
+        <Field
+          label={answer.kind === "field_equals" ? "Which field gets the new value?" : "Which field holds the entry? (optional)"}
+          htmlFor={`${idPrefix}-field`}
+        >
+          <input
+            id={`${idPrefix}-field`}
+            className="input"
+            value={answer.field}
+            onChange={(event) => set({ field: event.target.value })}
+          />
+        </Field>
+        <Field label="Which value goes there?" htmlFor={`${idPrefix}-value-param`}>
+          <select
+            id={`${idPrefix}-value-param`}
+            className="input"
+            value={answer.valueParam}
+            onChange={(event) => set({ valueParam: event.target.value })}
+          >
+            {answer.kind === "record_written" && <option value="">Not needed</option>}
+            {inputs.map((input) => (
+              <option key={input.name} value={input.name}>
+                {sentenceCase(humanizeInput(input.name))}
+              </option>
+            ))}
+          </select>
+        </Field>
+      </div>
+      <fieldset className="plain-choices">
+        <legend>How should OpenAdapt read the record back?</legend>
+        {TIER_CHOICES.map((choice) => (
+          <label key={choice.tier}>
+            <input
+              type="radio"
+              name={`${idPrefix}-tier`}
+              checked={answer.tier === choice.tier}
+              onChange={() => set({ tier: choice.tier })}
+            />
+            <span>
+              {choice.label}
+              <small>{choice.note}</small>
+            </span>
+          </label>
+        ))}
+      </fieldset>
+      <Button size="sm" variant="primary" disabled={busy || !ready} onClick={() => onSave(answer)}>
+        Save how it confirms the save
+      </Button>
+    </div>
+  );
 }
 
 export function CheckIt({
@@ -307,6 +451,58 @@ export function CheckIt({
       }
       setProject(response as QualificationProject);
       setProposal(null);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function useRecordedApp() {
+    const application = proposal?.pins.find((pin) => pin.kind === "application");
+    const environment = proposal?.pins.find((pin) => pin.kind === "environment");
+    if (!application?.payload || !environment?.payload) return;
+    setBusy("app");
+    fail("");
+    try {
+      const response = await call(CMD.INITIALIZE_QUALIFICATION, {
+        target_kind: String(application.payload.target_kind ?? target?.backend ?? "web"),
+        application: String(application.payload.application ?? ""),
+        application_version: String(application.payload.application_version ?? "recorded"),
+        environment_digest: String(environment.payload.environment_digest ?? ""),
+        required_capabilities: Array.isArray(environment.payload.required_capabilities)
+          ? environment.payload.required_capabilities
+          : [],
+      });
+      if (!response.ok) {
+        fail("OpenAdapt couldn't start the check from the recording.", String(response.error || ""));
+        return;
+      }
+      setProject(response as QualificationProject);
+      setProposal(null);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function bindEffect(step: WriteStep, answer: EffectAnswer) {
+    setBusy("effect");
+    fail("");
+    try {
+      const response = await call(CMD.BIND_QUALIFICATION_EFFECT, {
+        step_id: step.id,
+        kind: answer.kind,
+        match_field: answer.matchField.trim(),
+        match_param: answer.matchParam,
+        ...(answer.field.trim() ? { field: answer.field.trim() } : {}),
+        ...(answer.valueParam ? { value_param: answer.valueParam } : {}),
+        count_new_only: answer.kind === "record_written",
+        expected_count: 1,
+        verification_tier: answer.tier,
+      });
+      if (!response.ok) {
+        fail("OpenAdapt couldn't save how it confirms the save.", String(response.error || ""));
+        return;
+      }
+      setProject(response as QualificationProject);
     } finally {
       setBusy(null);
     }
@@ -552,15 +748,19 @@ export function CheckIt({
             {plan.writes.map((step) => (
               <div className="check-detail" key={step.id}>
                 <p>{step.checkText}</p>
-                {!step.checked && (
+                {!step.checked && plan.hasProject && (
+                  <EffectQuestion
+                    idPrefix={`${idPrefix}-${step.id}`}
+                    inputs={inputs}
+                    busy={busy !== null}
+                    onSave={(answer) => void bindEffect(step, answer)}
+                  />
+                )}
+                {!step.checked && !plan.hasProject && (
                   <p className="question">
                     OpenAdapt didn't see where this save lands in your system,
-                    so it can't confirm it yet. Your IT team connects OpenAdapt
-                    to the system's records once; then answer this in the exact
-                    checks under "Record check".
-                    <Button size="sm" onClick={() => onExactChecks(workflowId)}>
-                      Open exact checks
-                    </Button>
+                    so it will ask you a few questions about it. Start the check
+                    first.
                   </p>
                 )}
               </div>
@@ -584,6 +784,20 @@ export function CheckIt({
                     <li key={pin.kind}>{missingPinQuestion(pin)}</li>
                   ))}
                 </ul>
+                {!appMissing && !plan.hasProject && (
+                  <div className="check-actions">
+                    <Button
+                      variant="primary"
+                      disabled={busy !== null}
+                      onClick={() => void useRecordedApp()}
+                    >
+                      Start the check with the app from your recording
+                    </Button>
+                    <span className="simple-sub">
+                      Then answer the questions above for each save.
+                    </span>
+                  </div>
+                )}
                 {appMissing && (
                   <div className="single-form">
                     <Field label="App name" htmlFor={`${idPrefix}-app`}>

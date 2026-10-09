@@ -2764,3 +2764,42 @@ select.input:focus {
     transition: none;
   }
 }
+
+.effect-question {
+  gap: var(--space-3);
+}
+.effect-question p {
+  margin: 0;
+}
+.effect-question .single-form {
+  width: 100%;
+  margin-top: 0;
+}
+.plain-choices {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.plain-choices legend {
+  margin-bottom: var(--space-2);
+  padding: 0;
+  color: var(--text);
+  font-weight: var(--fw-medium);
+}
+.plain-choices label {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+.plain-choices input {
+  margin-top: 3px;
+  accent-color: var(--brand);
+}
+.plain-choices small {
+  display: block;
+  color: var(--text-muted);
+  font-size: var(--fs-caption);
+}

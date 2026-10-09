@@ -222,3 +222,42 @@ it("keeps approval off until the practice item passed", async () => {
   const approve = await screen.findByRole("button", { name: "Approve for use" });
   expect((approve as HTMLButtonElement).disabled).toBe(true);
 });
+
+it("asks plain questions when the recording can't show how to confirm the save", async () => {
+  const missing = project({ tier: null });
+  missing.controls.actions.save.effects = [];
+  engine(missing);
+  vi.mocked(engineInvoke).mockImplementation(async (command, params) => {
+    if (command === CMD.GET_QUALIFICATION) return missing;
+    if (command === CMD.BIND_QUALIFICATION_EFFECT) {
+      expect(params).toEqual(
+        expect.objectContaining({
+          step_id: "save",
+          kind: "field_equals",
+          match_param: "member_id",
+          match_field: "member_id",
+          field: "status_note",
+          value_param: "note",
+          verification_tier: 2,
+        }),
+      );
+      return project({ tier: 2 });
+    }
+    throw new Error(`unexpected ${command}`);
+  });
+  render(<CheckIt workflowId="wf-1" onExactChecks={() => {}} onRun={() => {}} />);
+
+  expect(await screen.findByText("Needs an answer")).toBeTruthy();
+  fireEvent.change(screen.getByLabelText("What is that ID called in your system's records?"), {
+    target: { value: "member_id" },
+  });
+  fireEvent.change(screen.getByLabelText("Which field gets the new value?"), {
+    target: { value: "status_note" },
+  });
+  fireEvent.click(screen.getByLabelText(/Read it back in a separate session/));
+  fireEvent.click(screen.getByRole("button", { name: "Save how it confirms the save" }));
+
+  expect(
+    await screen.findByText(/opens the record again in a separate session and reads it/),
+  ).toBeTruthy();
+});
