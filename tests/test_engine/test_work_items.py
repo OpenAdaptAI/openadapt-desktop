@@ -539,3 +539,32 @@ def test_the_sample_runs_without_a_recording_and_reports_plain_results(task) -> 
     assert dropped["record_checks_failed"] == 1
     assert [step["saves"] for step in dropped["steps"]] == [False, True]
     assert ("sample_progress", {"state": "done", "detail": ""}) in events
+
+
+def test_an_interrupted_item_run_becomes_a_record_to_check(task) -> None:
+    disp, db, _events = task
+    bridge = _Bridge([_verified_report(transaction="VERIFIED", execution="VERIFIED")])
+    disp.services._flow_bridge = bridge
+    # Desktop stopped after inserting this item and before its run ended.
+    db.insert_work_item(
+        "item-lost",
+        batch_id="batch-0",
+        workflow_id="wf-note",
+        position=0,
+        label="M-1",
+        inputs_json=json.dumps({"member_id": "M-1", "note": "Reviewed"}),
+        inputs_digest="x",
+    )
+
+    inbox = disp.dispatch("list_attention_items", {})["items"]
+    assert [entry["item_id"] for entry in inbox] == ["item-lost"]
+    assert inbox[0]["result"] == "check_record"
+    assert inbox[0]["nothing_written"] is False
+    assert inbox[0]["actions"] == ["confirmed_saved", "retry_after_check", "done_by_person"]
+
+    # Nothing else of this task runs, and the same item is not re-run blindly.
+    blocked = _run(disp, "M-2")
+    assert blocked["pre_action_refusal"] is True
+    again = _run(disp, "M-1")
+    assert again["pre_action_refusal"] is True
+    assert bridge.calls == []

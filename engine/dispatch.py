@@ -226,6 +226,9 @@ class EngineDispatcher:
         self._sync_paused = False
         self._flow_recording: _ActiveFlowRecording | None = None
         self._pending_run_memory: dict[tuple[str, str], tuple[Path, str, bool]] = {}
+        # Work items whose run this engine process started and hasn't
+        # finished. A queued item that isn't here was interrupted.
+        self._running_items: set[str] = set()
         self._coach: dict[str, Any] = {}
         self._handlers: dict[str, Callable[..., dict | None]] = {}
         self._register()
@@ -3415,6 +3418,7 @@ class EngineDispatcher:
     def _open_item_count(self) -> int:
         from engine.work_items import OPEN, TEACHING
 
+        self._reconcile_interrupted_items()
         try:
             return len(self.services.db.list_work_items(statuses=(OPEN, TEACHING)))
         except Exception:
@@ -3422,6 +3426,39 @@ class EngineDispatcher:
             return 0
 
     # ------------------------------------------------- simple operator surface
+
+    def _reconcile_interrupted_items(self) -> None:
+        """Turn items whose run was interrupted into records to check.
+
+        An item is inserted as queued before its run starts. If Desktop or the
+        engine stopped during that run, nothing recorded how it ended, and the
+        save may have gone through. Such an item becomes an open item with an
+        unknown outcome: it waits in Needs you, blocks more items of its task,
+        and is never retried until a person checks the record.
+        """
+
+        from engine.work_items import OPEN, QUEUED
+
+        try:
+            rows = self.services.db.list_work_items(statuses=(QUEUED,))
+        except Exception:
+            logger.exception("Could not read queued work items")
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        for row in rows:
+            if row["item_id"] in self._running_items:
+                continue
+            self.services.db.update_work_item(
+                row["item_id"],
+                status=OPEN,
+                execution_outcome="unknown",
+                halt_reason=(
+                    "OpenAdapt stopped while this item was running. "
+                    "The save may have gone through."
+                ),
+                finished_at=now,
+            )
+
 
     def _task_inputs(self, workflow_id: str) -> list[dict]:
         from engine.qualification import task_parameters
@@ -3506,6 +3543,7 @@ class EngineDispatcher:
             return self._pre_action_refusal(str(exc))
 
         retry_of = params.get("_retry_of")
+        self._reconcile_interrupted_items()
         open_items = self.services.db.list_work_items(
             workflow_id=workflow_id,
             statuses=(OPEN, TEACHING),
@@ -3553,7 +3591,22 @@ class EngineDispatcher:
             execution["target"] = params["target"]
         if params.get("deployment_config") is not None:
             execution["deployment_config"] = params["deployment_config"]
-        report = self._replay_or_run(execution, run=True)
+        self._running_items.add(item_id)
+        try:
+            report = self._replay_or_run(execution, run=True)
+        except Exception:
+            # The run may have reached the application before it failed.
+            logger.exception("An item run ended without a report")
+            report = {
+                "ok": False,
+                "outcome": "unknown",
+                "transaction_outcome": None,
+                "pre_action_refusal": False,
+                "run_id": "",
+                "error": "The run ended without a result. The save may have gone through.",
+            }
+        finally:
+            self._running_items.discard(item_id)
         finished = datetime.now(timezone.utc).isoformat()
         if report.get("pre_action_refusal"):
             self.services.db.update_work_item(
@@ -3594,6 +3647,7 @@ class EngineDispatcher:
         from engine.outcomes import plain_result_for_transaction
         from engine.work_items import OPEN, TEACHING, public_item
 
+        self._reconcile_interrupted_items()
         names = {
             row.get("bundle_id"): row.get("workflow_name") or row.get("capture_id") or ""
             for row in self.services.db.list_bundles(limit=500)
@@ -3776,6 +3830,7 @@ class EngineDispatcher:
 
         from engine.work_items import public_item, summarize
 
+        self._reconcile_interrupted_items()
         rows = self.services.db.list_work_items(limit=5000)
         bundles = {row.get("bundle_id"): row for row in self.services.db.list_bundles(limit=500)}
         baselines: dict[str, float | None] = {}
