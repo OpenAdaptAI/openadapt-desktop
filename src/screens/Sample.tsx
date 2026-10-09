@@ -51,6 +51,7 @@ function SampleRunCard({ run }: { run: SampleRun }) {
           width={run.screen.width ?? 0}
           height={run.screen.height ?? 0}
           caption={normal ? "The screen after saving" : "The screen said saved. The record didn't."}
+          region="top"
         />
       )}
       <ol className="sample-steps">

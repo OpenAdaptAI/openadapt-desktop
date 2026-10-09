@@ -202,6 +202,7 @@ export function ScreenCrop({
   focus,
   caption,
   provenance,
+  region,
 }: {
   dataUrl: string;
   width: number;
@@ -209,6 +210,8 @@ export function ScreenCrop({
   focus?: { x: number; y: number } | null;
   caption: string;
   provenance?: string;
+  /** "top": show the top-left of the screen, where most apps put the record. */
+  region?: "top";
 }) {
   const valid = width > 0 && height > 0;
   const hasFocus = Boolean(
@@ -221,11 +224,18 @@ export function ScreenCrop({
   );
   // With a stopped point, show a wide band of the screen around it, so the
   // question and its choices stay in view. Without one, show the whole screen.
-  const zoom = hasFocus ? 1.4 : 1;
+  const top = !hasFocus && region === "top";
+  const zoom = hasFocus ? 1.4 : top ? 1 / 0.6 : 1;
   const winW = valid ? width / zoom : 1;
-  const winH = valid ? (hasFocus ? Math.min(height, winW / 2.6) : height) : 1;
-  const fx = hasFocus && focus ? focus.x : width / 2;
-  const fy = hasFocus && focus ? focus.y : height / 2;
+  const winH = valid
+    ? hasFocus
+      ? Math.min(height, winW / 2.6)
+      : top
+        ? Math.min(height, winW / 2)
+        : height
+    : 1;
+  const fx = hasFocus && focus ? focus.x : top ? winW / 2 : width / 2;
+  const fy = hasFocus && focus ? focus.y : top ? winH / 2 : height / 2;
   const x0 = valid ? Math.min(width - winW, Math.max(0, fx - winW / 2)) : 0;
   const y0 = valid ? Math.min(height - winH, Math.max(0, fy - winH / 2)) : 0;
   return (
