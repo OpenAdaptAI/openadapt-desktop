@@ -650,6 +650,71 @@ export function CheckIt({
   );
   const approved = approvedId !== null || (plan?.approved && plan.sealed);
 
+  const practiceForm = plan ? (
+    <>
+      {inputs.length > 0 && (
+        <div className="single-form">
+          {inputs.map((input) => (
+            <Field
+              key={input.name}
+              label={sentenceCase(humanizeInput(input.name))}
+              hint={input.example != null ? "From your recording" : undefined}
+              htmlFor={`${idPrefix}-value-${input.name}`}
+            >
+              <input
+                id={`${idPrefix}-value-${input.name}`}
+                className="input"
+                value={values[input.name] ?? ""}
+                onChange={(event) =>
+                  setValues({ ...values, [input.name]: event.target.value })
+                }
+              />
+            </Field>
+          ))}
+        </div>
+      )}
+      <p className="simple-sub">Runs in: {targetSummary(target)}</p>
+      <details className="technical">
+        <summary>Change where it runs</summary>
+        <div className="technical-body">
+          {target && (
+            <ExecutionTargetForm
+              target={target}
+              onChange={setTarget}
+              idPrefix={`${idPrefix}-target`}
+              disabled={busy !== null}
+            />
+          )}
+        </div>
+      </details>
+      <label className="record-check">
+        <input
+          type="checkbox"
+          checked={attested}
+          onChange={(event) => setAttested(event.target.checked)}
+        />
+        <span>These are test values, and I'll keep the app in view while it runs.</span>
+      </label>
+      {practiceNote && <p className="result-line">{practiceNote}</p>}
+      <div className="check-actions">
+        <Button
+          variant={plan.practiceState === "done" ? "ghost" : "primary"}
+          disabled={busy !== null || !attested || !valuesReady || !firstThreeDone || !target}
+          onClick={() => void runPractice()}
+        >
+          {busy === "practice"
+            ? "Running the practice item…"
+            : plan.practiceState === "done"
+              ? "Run the practice item again"
+              : "Run the practice item"}
+        </Button>
+        {!firstThreeDone && (
+          <span className="simple-sub">Confirm the first three parts first.</span>
+        )}
+      </div>
+    </>
+  ) : null;
+
   return (
     <div className="content simple">
       <PageHead
@@ -845,66 +910,14 @@ export function CheckIt({
               choose, with every check on. It saves for real in the app, so use
               a test record. Keep the app where you can see it.
             </p>
-            {inputs.length > 0 && (
-              <div className="single-form">
-                {inputs.map((input) => (
-                  <Field
-                    key={input.name}
-                    label={sentenceCase(humanizeInput(input.name))}
-                    hint={input.example != null ? "From your recording" : undefined}
-                    htmlFor={`${idPrefix}-value-${input.name}`}
-                  >
-                    <input
-                      id={`${idPrefix}-value-${input.name}`}
-                      className="input"
-                      value={values[input.name] ?? ""}
-                      onChange={(event) =>
-                        setValues({ ...values, [input.name]: event.target.value })
-                      }
-                    />
-                  </Field>
-                ))}
-              </div>
+            {plan.practiceState === "done" && practiceNote === "" ? (
+              <details className="technical">
+                <summary>Run the practice item again</summary>
+                <div className="technical-body">{practiceForm}</div>
+              </details>
+            ) : (
+              practiceForm
             )}
-            <p className="simple-sub">Runs in: {targetSummary(target)}</p>
-            <details className="technical">
-              <summary>Change where it runs</summary>
-              <div className="technical-body">
-                {target && (
-                  <ExecutionTargetForm
-                    target={target}
-                    onChange={setTarget}
-                    idPrefix={`${idPrefix}-target`}
-                    disabled={busy !== null}
-                  />
-                )}
-              </div>
-            </details>
-            <label className="record-check">
-              <input
-                type="checkbox"
-                checked={attested}
-                onChange={(event) => setAttested(event.target.checked)}
-              />
-              <span>These are test values, and I'll keep the app in view while it runs.</span>
-            </label>
-            {practiceNote && <p className="result-line">{practiceNote}</p>}
-            <div className="check-actions">
-              <Button
-                variant={plan.practiceState === "done" ? "ghost" : "primary"}
-                disabled={busy !== null || !attested || !valuesReady || !firstThreeDone || !target}
-                onClick={() => void runPractice()}
-              >
-                {busy === "practice"
-                  ? "Running the practice item…"
-                  : plan.practiceState === "done"
-                    ? "Run the practice item again"
-                    : "Run the practice item"}
-              </Button>
-              {!firstThreeDone && (
-                <span className="simple-sub">Confirm the first three parts first.</span>
-              )}
-            </div>
           </CheckSection>
 
           <CheckSection index={5} title="Safety drills" doneWord="Passed" state={plan.drillsState}>
@@ -933,9 +946,10 @@ export function CheckIt({
                   ))}
                 </ul>
                 {drillNote && <p className="result-line">{drillNote}</p>}
+                {plan.drillsState !== "done" && (
                 <div className="check-actions">
                   <Button
-                    disabled={busy !== null || plan.practiceState !== "done" || plan.drillsState === "done"}
+                    disabled={busy !== null || plan.practiceState !== "done"}
                     onClick={() => void runDrills()}
                   >
                     {busy === "drills" ? "Running the drills…" : "Run the drills"}
@@ -944,6 +958,7 @@ export function CheckIt({
                     <span className="simple-sub">Run the practice item first.</span>
                   )}
                 </div>
+                )}
               </>
             )}
           </CheckSection>
