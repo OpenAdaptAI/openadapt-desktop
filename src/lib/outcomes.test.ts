@@ -80,3 +80,13 @@ describe("plain words", () => {
     expect(plainStep("")).toBe("A step");
   });
 });
+
+describe("transaction-only records", () => {
+  it("maps a Cloud run's transaction outcome conservatively", async () => {
+    const { plainResultForTransaction } = await import("./outcomes");
+    expect(plainResultForTransaction("HALTED_BEFORE_EFFECT").nothingWritten).toBe(true);
+    expect(plainResultForTransaction("RECONCILIATION_REQUIRED").key).toBe("check_record");
+    expect(plainResultForTransaction("SOMETHING_NEW").key).toBe("check_record");
+    expect(plainResultForTransaction(null).nothingWritten).toBe(false);
+  });
+});

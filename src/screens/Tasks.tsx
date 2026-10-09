@@ -13,7 +13,6 @@ import {
   Status,
   iconForTone,
   plural,
-  relativeTime,
 } from "../ui/simple";
 
 export interface TaskActions {
@@ -82,11 +81,6 @@ function TaskCard({
               {plural(counts.wrong_record_prevented, "wrong-record save")} prevented
             </span>
           )}
-          {task.current.updated_at && (
-            <span className="task-meta-item faint">
-              Updated {relativeTime(task.current.updated_at)}
-            </span>
-          )}
         </div>
         <details className="task-more">
           <summary>More</summary>
@@ -112,7 +106,7 @@ function TaskCard({
         </details>
       </div>
       <div className="task-action">
-        <Button variant={status.next === "needs" ? "ghost" : "primary"} onClick={go}>
+        <Button className="btn-soft" onClick={go}>
           {status.nextLabel}
         </Button>
       </div>
@@ -153,22 +147,6 @@ export function Tasks({
           ) : undefined
         }
       />
-
-      {attention > 0 && tasks.length > 0 && (
-        <div className="attention-banner" role="status">
-          <Status tone="warn" icon="attention">
-            {attention === 1
-              ? "1 item needs you"
-              : `${attention} items need you`}
-          </Status>
-          <span className="attention-banner-text">
-            OpenAdapt stopped and is waiting for a person to decide.
-          </span>
-          <Button size="sm" onClick={actions.onNeedsYou}>
-            Open Needs you
-          </Button>
-        </div>
-      )}
 
       {workflows === null ? (
         <p className="simple-sub">Loading…</p>

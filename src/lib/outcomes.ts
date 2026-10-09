@@ -203,6 +203,27 @@ export function resultCopy(plain: Pick<PlainResult, "key" | "nothingWritten">): 
   }
 }
 
+const EXECUTION_FOR_TRANSACTION: Record<string, string> = {
+  VERIFIED: "VERIFIED",
+  HALTED_BEFORE_EFFECT: "HALTED",
+  REJECTED_POLICY: "HALTED",
+  CANCELED: "FAILED",
+  FAILED_PLATFORM: "FAILED",
+  COMPLETED_UNVERIFIED: "COMPLETED_UNVERIFIED",
+  ROLLED_BACK: "ROLLED_BACK",
+  RECONCILIATION_REQUIRED: "HALTED",
+};
+
+/**
+ * Plain result for a record that carries only Flow's transaction outcome,
+ * such as a run Cloud sent to this computer. An unknown value proves nothing.
+ */
+export function plainResultForTransaction(transaction: unknown): PlainResult {
+  const execution = EXECUTION_FOR_TRANSACTION[String(transaction)];
+  if (!execution) return plainResult("unknown");
+  return plainResult(execution, transaction);
+}
+
 /** Plain result for a run report as Desktop's engine returns it. */
 export function plainResultForReport(report: {
   outcome?: unknown;

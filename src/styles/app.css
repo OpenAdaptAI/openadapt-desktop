@@ -803,6 +803,15 @@ a:hover {
 .btn-danger:hover:not(:disabled) {
   background: var(--pill-crit-bg);
 }
+.btn-soft {
+  border-color: transparent;
+  background: var(--brand-tint);
+  color: var(--brand-hover);
+}
+.btn-soft:hover:not(:disabled) {
+  border-color: transparent;
+  background: color-mix(in srgb, var(--brand) 16%, transparent);
+}
 .btn-sm {
   padding: var(--space-1) var(--space-3);
   font-size: var(--fs-sm);
