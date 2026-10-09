@@ -10,7 +10,7 @@ calls, the safety rules it keeps, and what the engine can't do for it yet.
 | --- | --- | --- |
 | Welcome | Chooses the sample or shows a first task. Cloud sign-in is a link. | none until a choice |
 | Sample | Watches Flow's built-in tutorial run twice on a synthetic clinic app: once normally, once with a backend that drops the save after the screen says "saved". No account and no operating-system permission. | `run_sample` |
-| Tasks | Sees one card per recorded task with one status (Not checked, Checking, Ready, Needs you, Check the record) and one next step. Versions of a task are grouped by recording. | `get_workflows`, `get_results_summary` |
+| Tasks | Sees one card per recorded task with one status (Not checked, Checking, Ready, Needs you, Needs a fix, Check the record) and one next step: Check it, Run it, Show it, or Open Needs you. Versions of a task are grouped by recording. | `get_workflows`, `get_results_summary` |
 | Show it | Records a task in its app. The app type is checked just in time, so browser tasks need no native permission. | `start_recording`, `stop_recording`, `compile_recording` |
 | Check it | Confirms what the task changes, the right-record check, and the record check; runs one practice item; runs the safety drills; approves and locks the version. | `get_qualification`, `propose_qualification_from_demo`, `initialize_qualification`, `set_qualification_risk`, `arm_qualification_identity`, `bind_qualification_effect`, `add_qualification_case`, `run_qualification_case`, `certify_qualification`, `seal_qualification_workflow` |
 | Run it | Pastes a list, opens a CSV, or types one item, then watches per-item progress. | `get_task_inputs`, `run_item` |

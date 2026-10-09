@@ -104,7 +104,7 @@ gear menu over the live engine:
 
 | Screen | What it does |
 | --- | --- |
-| Tasks | One card per recorded task with one status and one next step: Check it, Run it, or Needs you |
+| Tasks | One card per recorded task with one status and one next step: Check it, Run it, Show it, or Needs you |
 | Needs you | Every stopped item, with the plain question, what was prevented, the stopped screen, and only the choices the transaction outcome allows |
 | Results | Items done and checked, items that needed a person, wrong-record saves prevented, and a labeled time estimate |
 | Check it | The short readiness test, built on the same qualification commands as the exact checks |
