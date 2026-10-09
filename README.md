@@ -21,7 +21,7 @@ match, it stops and asks a person instead of guessing.
 | The right record | The person rereads the screen before saving | OpenAdapt checks that the record on screen matches the item before it types |
 | Did it save? | Found out later, if at all | OpenAdapt reads the saved record back and marks the item done and checked |
 | Something doesn't match | Someone notices downstream | OpenAdapt stops before saving and asks one question in Needs you |
-| The app's screen changes | Staff work around it | OpenAdapt stops at that step, and a person shows it the right way once |
+| The app's screen changes | Staff work around it | OpenAdapt finds the same field again, or stops at that step so a person can show it the right way once |
 
 ## How it works
 
