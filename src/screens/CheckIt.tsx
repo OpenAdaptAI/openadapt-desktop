@@ -641,6 +641,7 @@ export function CheckIt({
 
   const firstThreeDone =
     plan !== null &&
+    plan.hasProject &&
     [plan.changes, plan.rightRecord, plan.recordCheck].every(
       (state) => state === "done" || state === "not_needed",
     );
@@ -767,11 +768,11 @@ export function CheckIt({
                 )}
               </div>
             ))}
-            {!firstThreeDone && (
+            {(!plan.hasProject || plan.changes === "todo") && (
               <div className="check-actions">
                 <Button
                   variant="primary"
-                  disabled={busy !== null || plan.writes.length === 0}
+                  disabled={busy !== null}
                   onClick={() => void confirmFound()}
                 >
                   {busy === "confirm" ? "Saving…" : "These look right"}
