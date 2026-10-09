@@ -820,8 +820,8 @@ export function ipcTable({ authenticated, workflows, permissions, operator = fal
     get_workflows: workflows,
     get_first_workflow_state: { ok: true, state: null },
     get_needs_attention: {
-      // The operator captures list every stop in the inbox, hosted ones too.
-      count: operator ? attention.length : workflows.some((w) => w.open_halts) ? 1 : 0,
+      // One count for the badge, the task cards, and the inbox.
+      count: workflows.reduce((sum, w) => sum + (w.open_items || 0) + (w.open_halts || 0), 0),
       open_halts: workflows.some((w) => w.open_halts) ? 1 : 0,
       open_items: attention.length,
       failed_runs: 0,

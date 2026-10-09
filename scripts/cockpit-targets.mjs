@@ -32,6 +32,8 @@ export const CONSUMERS = {
 
 // The README shots use the README's own geometry: a typical laptop window.
 export const README_VIEWPORT = { width: 1280, height: 860 };
+// Run it keeps its action bar in view; a taller window shows the whole list.
+export const README_TALL_VIEWPORT = { width: 1280, height: 1060 };
 
 // Every expert surface is behind the gear menu now. These are the clicks an
 // operator makes to reach them.
@@ -179,7 +181,7 @@ export const TARGETS = [
     consumer: CONSUMERS.README,
     surface: 'Needs you',
     shows: 'Synthetic stop on the wrong record: the question, what was prevented, the screen, and the allowed choices.',
-    viewport: README_VIEWPORT,
+    viewport: { width: 1280, height: 1200 },
     session: { localSession: true, authenticated: false, permissions: GRANTED, operator: true, workflows: WORKFLOWS },
     steps: [{ name: 'Needs you', exact: false }],
   },
@@ -209,7 +211,7 @@ export const TARGETS = [
     consumer: CONSUMERS.README,
     surface: 'Run it',
     shows: 'Synthetic list of member IDs and notes pasted into Run it, checked against the inputs the task needs.',
-    viewport: README_VIEWPORT,
+    viewport: README_TALL_VIEWPORT,
     session: {
       localSession: true, authenticated: false, permissions: GRANTED, operator: false,
       workflows: [{ ...WORKFLOWS[0], open_items: 0, open_halts: 0 }],

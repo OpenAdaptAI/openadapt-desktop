@@ -77,9 +77,9 @@ function StepBadge({ state, index }: { state: StepState; index: number }) {
   );
 }
 
-function stateWord(state: StepState): string {
+function stateWord(state: StepState, doneWord = "Confirmed"): string {
   return state === "done"
-    ? "Confirmed"
+    ? doneWord
     : state === "missing"
       ? "Needs an answer"
       : state === "not_needed"
@@ -91,11 +91,13 @@ function CheckSection({
   index,
   title,
   state,
+  doneWord,
   children,
 }: {
   index: number;
   title: string;
   state: StepState;
+  doneWord?: string;
   children: React.ReactNode;
 }) {
   return (
@@ -104,7 +106,7 @@ function CheckSection({
       <div className="check-step-body">
         <div className="check-step-head">
           <h2 id={`check-${index}`}>{title}</h2>
-          <span className="check-step-state">{stateWord(state)}</span>
+          <span className="check-step-state">{stateWord(state, doneWord)}</span>
         </div>
         {children}
       </div>
@@ -834,6 +836,7 @@ export function CheckIt({
           <CheckSection
             index={4}
             title="Practice run on a test item"
+            doneWord="Passed"
             state={plan.writes.length === 0 && !plan.practice ? "todo" : plan.practiceState}
           >
             <p>
@@ -903,7 +906,7 @@ export function CheckIt({
             </div>
           </CheckSection>
 
-          <CheckSection index={5} title="Safety drills" state={plan.drillsState}>
+          <CheckSection index={5} title="Safety drills" doneWord="Passed" state={plan.drillsState}>
             {plan.drills.length === 0 ? (
               <p>
                 No drills are set up for this task. OpenAdapt adds them when it
@@ -944,7 +947,12 @@ export function CheckIt({
             )}
           </CheckSection>
 
-          <CheckSection index={6} title="Approve for use" state={approved ? "done" : "todo"}>
+          <CheckSection
+            index={6}
+            title="Approve for use"
+            doneWord="Approved"
+            state={approved ? "done" : "todo"}
+          >
             {approved ? (
               <div className="approved">
                 <Status tone="ok" icon="check">

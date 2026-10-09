@@ -1,0 +1,60 @@
+{
+  "schema_version": "openadapt.desktop-operator-capture-provenance/v1",
+  "generated_at": "2026-10-09",
+  "label": "Synthetic recording",
+  "generator": "scripts/capture-cockpit-previews.mjs",
+  "fixture": "scripts/cockpit-fixtures.mjs",
+  "targets": "scripts/cockpit-targets.mjs, consumer openadapt-desktop",
+  "command": "npm run dev, then PLAYWRIGHT_MODULE=<playwright> node scripts/capture-cockpit-previews.mjs --out <dir>",
+  "data_boundary": "Every task, member ID, note, count, and screen is invented fixture data. No engine, account, recording, run, or customer data is involved. The application screen inside Needs you and the sample is a generic synthetic page, not any vendor's product.",
+  "captures": [
+    {
+      "file": "tasks.png",
+      "surface": "Tasks",
+      "shows": "Synthetic task list: each task with one status and one next step.",
+      "width": 1280,
+      "height": 860,
+      "sha256": "496b5270266acd93c68920a58f0be8aa18137e36d74f3ee7483099ab1e7ea177"
+    },
+    {
+      "file": "needs-you.png",
+      "surface": "Needs you",
+      "shows": "Synthetic stop on the wrong record: the question, what was prevented, the screen, and the allowed choices.",
+      "width": 1280,
+      "height": 1200,
+      "sha256": "41c709dc5f4b5aa45e0cb90b7a0376cf293325c0cd41c5548dee488b7f97112e"
+    },
+    {
+      "file": "results.png",
+      "surface": "Results",
+      "shows": "Synthetic results: items done and checked, items that needed a person, a prevented wrong-record save, and a labeled time estimate.",
+      "width": 1280,
+      "height": 860,
+      "sha256": "4f56b247889acde86e90fbc2436b38cd607c52cdd19574e0332d3cfb50be892f"
+    },
+    {
+      "file": "check-it.png",
+      "surface": "Check it",
+      "shows": "Synthetic short readiness test: what it changes, the right-record check, the record check, practice run, drills, approval.",
+      "width": 1280,
+      "height": 860,
+      "sha256": "7aabe98b1fe65a9b4ad85ca3241d79f2c76e4bb0c66743cfdf74a5fdcf04ccca"
+    },
+    {
+      "file": "run-it.png",
+      "surface": "Run it",
+      "shows": "Synthetic list of member IDs and notes pasted into Run it, checked against the inputs the task needs.",
+      "width": 1280,
+      "height": 1060,
+      "sha256": "9158be35edb4f72c90e7c87357d802cd89f9f8a4c6a734370ebbb6f7e59104ef"
+    },
+    {
+      "file": "sample.png",
+      "surface": "Sample run",
+      "shows": "Synthetic sample results: one run done and checked, and one where the app showed saved but the record check disagreed.",
+      "width": 1280,
+      "height": 860,
+      "sha256": "acbb31667ec73548add7b0b8b0d8cc39a95464bf385513faf87a3a4e26f34d94"
+    }
+  ]
+}

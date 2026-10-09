@@ -42,7 +42,12 @@ function issueForReport(report: RunReport): RunIssue | null {
   const copy = resultCopy(plain);
   return {
     title: copy.label,
-    message: [copy.sentence, copy.next].filter(Boolean).join(" "),
+    // "Check the record" already says what to do; its Needs-you next step
+    // doesn't apply on this screen.
+    message:
+      plain.key === "check_record"
+        ? copy.sentence
+        : [copy.sentence, copy.next].filter(Boolean).join(" "),
     preActionRefusal: false,
     nothingWritten: plain.nothingWritten,
   };
@@ -627,9 +632,11 @@ export function WatchRun({
             {runIssue.message}{" "}
             {runIssue.preActionRefusal
               ? "Correct the configuration before trying again. OpenAdapt didn't start the run."
-              : runIssue.nothingWritten
-                ? ""
-                : "Don't run it again until a person has checked the record and the run evidence. The run may have saved something."}
+              : runIssue.nothingWritten === false
+                ? "Look at the record and the run evidence below before you run it again."
+                : runIssue.nothingWritten
+                  ? ""
+                  : "The run may have saved something. Look at the record before you run it again."}
           </Callout>
         )}
         {report?.persistence && report.persistence.state !== "persisted" && (
