@@ -102,6 +102,8 @@ export interface Workflow {
   last_result?: PlainResultKey | null;
   /** Items of this task waiting for a person. */
   open_items?: number;
+  /** Waiting items a person chose to fix by showing the step again. */
+  teaching_items?: number;
   /** An open item's save may have gone through; more items wait for a check. */
   blocked?: boolean;
   /** new: not checked yet; checking: readiness test under way; ready: certified and sealed. */

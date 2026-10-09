@@ -586,3 +586,20 @@ def test_recording_another_task_keeps_an_uncertain_first_run_locked(task) -> Non
     )
     moved = disp.dispatch("set_first_workflow_stage", {"stage": "record"})
     assert moved["state"]["stage"] == "record"
+
+
+def test_a_task_counts_items_waiting_for_a_new_showing(task) -> None:
+    disp, _db, _events = task
+    disp.services._flow_bridge = _Bridge(
+        [
+            _verified_report(transaction="HALTED_BEFORE_EFFECT", execution="HALTED",
+                             halt={"state_id": "step_1", "intent": "Save", "reason": "x"}),
+        ]
+    )
+    item = _run(disp, "M-1")["item"]
+    assert disp.dispatch("resolve_attention_item",
+                         {"item_id": item["item_id"], "action": "teach"})["ok"] is True
+
+    card = disp.dispatch("get_workflows", {})[0]
+    assert card["open_items"] == 1
+    assert card["teaching_items"] == 1

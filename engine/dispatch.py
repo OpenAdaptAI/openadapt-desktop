@@ -944,6 +944,8 @@ class EngineDispatcher:
             "last_result": last_result,
             "open_halts": open_halts,
             "open_items": len(open_items),
+            # Items a person chose to fix by showing the step again.
+            "teaching_items": sum(1 for item in open_items if item["status"] == TEACHING),
             "blocked": any(blocks_more_runs(item) for item in open_items),
             "readiness": readiness,
             "certified": status == "certified",

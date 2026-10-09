@@ -71,3 +71,21 @@ it("offers the sample and a first task when there are no tasks", async () => {
   fireEvent.click(await screen.findByRole("button", { name: /See it work on a sample app/ }));
   expect(handlers.onSample).toHaveBeenCalled();
 });
+
+it("asks for a new showing when a person chose to teach a fix", async () => {
+  vi.mocked(engineTry).mockImplementation(async (command, _params, fallback) => {
+    if (command === CMD.GET_WORKFLOWS) {
+      return [
+        { id: "t", name: "Referral entry", steps: 9, capture_id: "cap-t", readiness: "ready", open_items: 1, teaching_items: 1 },
+      ];
+    }
+    return fallback;
+  });
+  const handlers = actions();
+  render(<Tasks attention={1} {...handlers} />);
+
+  const card = await screen.findByRole("article", { name: "Referral entry" });
+  expect(within(card).getByText("Needs a fix")).toBeTruthy();
+  fireEvent.click(within(card).getByRole("button", { name: "Show it" }));
+  expect(handlers.onTeach).toHaveBeenCalledWith("t");
+});

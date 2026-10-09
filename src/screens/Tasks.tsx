@@ -54,7 +54,7 @@ function TaskCard({
     if (status.next === "run") actions.onRun(id);
     else if (status.next === "check") actions.onCheck(id);
     else if (status.next === "needs") actions.onNeedsYou();
-    else actions.onShow();
+    else actions.onTeach(id);
   };
   return (
     <article className="task-card" aria-label={task.current.name}>

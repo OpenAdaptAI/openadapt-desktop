@@ -11,6 +11,7 @@ export interface Task {
   current: Workflow;
   versions: Workflow[];
   openItems: number;
+  teachingItems: number;
   blocked: boolean;
 }
 
@@ -44,7 +45,11 @@ export function groupTasks(workflows: Workflow[]): Task[] {
         key,
         current: sorted[0],
         versions: sorted,
-        openItems: sorted.reduce((sum, item) => sum + (item.open_items ?? 0) + (item.open_halts ?? 0), 0),
+        openItems: sorted.reduce(
+          (sum, item) => sum + (item.open_items ?? 0) + (item.open_halts ?? 0),
+          0,
+        ),
+        teachingItems: sorted.reduce((sum, item) => sum + (item.teaching_items ?? 0), 0),
         blocked: sorted.some((item) => item.blocked),
       };
     })
@@ -75,6 +80,17 @@ export function taskStatus(task: Task): TaskStatus {
       nextLabel: "Open Needs you",
       detail:
         "A save may have gone through. Check that record before OpenAdapt runs more items.",
+    };
+  }
+  if (task.teachingItems > 0) {
+    return {
+      word: "Needs a fix",
+      tone: "warn",
+      icon: "attention",
+      next: "show",
+      nextLabel: "Show it",
+      detail:
+        "OpenAdapt couldn't do a step the way you showed it. Show it the right way once; a person approves the fix before it's used.",
     };
   }
   if (task.openItems > 0) {
