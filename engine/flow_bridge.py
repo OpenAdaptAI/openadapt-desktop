@@ -641,6 +641,27 @@ class FlowBridge:
             timeout=timeout,
         )
 
+    def tutorial(
+        self,
+        out_dir: Path,
+        *,
+        break_it: bool = True,
+        timeout: float | None = 900,
+    ) -> FlowResult:
+        """Run Flow's built-in sample task end to end in a headless browser.
+
+        Flow serves its own synthetic clinic app with made-up patients on this
+        computer, records the sample task, builds it, runs it with the record
+        check on, and (with ``break_it``) runs it again against a backend that
+        drops the save after the screen says "saved". Nothing here needs an
+        operating-system permission, an account, or the operator's apps.
+        """
+
+        args = ["tutorial", "--out", str(out_dir), "--no-receipt"]
+        if break_it:
+            args.append("--break-it")
+        return self._run(args, out_dir=out_dir, timeout=timeout)
+
     def start_record(
         self,
         out_dir: Path,

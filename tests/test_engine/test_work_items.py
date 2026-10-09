@@ -447,3 +447,95 @@ def test_first_task_can_leave_the_read_only_path_before_anything_ran(task) -> No
         disp.dispatch(
             "set_first_workflow_stage", {"stage": "complete", "workflow_id": "wf-note"}
         )
+
+
+def test_task_inputs_return_where_the_task_was_recorded(task) -> None:
+    disp, db, _events = task
+    assert disp.dispatch("get_task_inputs", {"workflow_id": "wf-note"})["target"] is None
+
+    db.set_task_target("cap-1", {"backend": "web", "url": "https://emr.example.test"})
+
+    inputs = disp.dispatch("get_task_inputs", {"workflow_id": "wf-note"})
+    assert inputs["target"] == {"backend": "web", "url": "https://emr.example.test"}
+
+
+def test_a_certified_task_is_ready_to_run_only_once_sealed(task) -> None:
+    disp, db, _events = task
+    db.update_bundle("wf-note", status="certified")
+    card = disp.dispatch("get_workflows", {})[0]
+    assert card["certified"] is True
+    assert card["encrypted"] is False
+    assert card["readiness"] == "checking"
+
+    bundle_dir = Path(db.get_bundle("wf-note")["bundle_path"])
+    (bundle_dir / "workflow.json.enc").write_bytes(b"sealed")
+    card = disp.dispatch("get_workflows", {})[0]
+    assert card["encrypted"] is True
+    assert card["readiness"] == "ready"
+    assert card["version"] == 1
+    assert card["capture_id"] == "cap-1"
+
+
+_PNG = (
+    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x02\x00\x00\x00\x01"
+    b"\x08\x02\x00\x00\x00"
+)
+
+
+class _SampleBridge:
+    """Stand-in for Flow's tutorial: writes the two sample run reports."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[Path, bool]] = []
+
+    def ensure_browser_runtime(self, _progress) -> None:
+        pass
+
+    def tutorial(self, out_dir: Path, *, break_it: bool = True, timeout=None):
+        self.calls.append((out_dir, break_it))
+        for folder, execution, transaction, verdict in (
+            ("run", "VERIFIED", "VERIFIED", "confirmed"),
+            ("run-broken", "HALTED", "RECONCILIATION_REQUIRED", "refuted"),
+        ):
+            run_dir = out_dir / folder
+            (run_dir / "steps").mkdir(parents=True)
+            (run_dir / "steps" / "step_001_after.png").write_bytes(_PNG)
+            report = _verified_report(
+                transaction=transaction,
+                execution=execution,
+                results=[
+                    {"step_id": "step_000", "intent": "type <note>", "ok": True,
+                     "identity": {"status": "verified"}},
+                    {"step_id": "step_001", "intent": "click 'Save Encounter'",
+                     "ok": execution == "VERIFIED",
+                     "identity": {"status": "verified"},
+                     "effect_verified": execution == "VERIFIED",
+                     "effect_evidence": [{"final_verdict": verdict}],
+                     "after_png": "steps/step_001_after.png"},
+                ],
+            )
+            report["params"] = {"note": "Synthetic follow-up"}
+            (run_dir / "report.json").write_text(json.dumps(report))
+
+
+def test_the_sample_runs_without_a_recording_and_reports_plain_results(task) -> None:
+    disp, _db, events = task
+    bridge = _SampleBridge()
+    disp.services._flow_bridge = bridge
+
+    sample = disp.dispatch("run_sample", {})
+
+    assert sample["ok"] is True
+    assert bridge.calls and bridge.calls[0][1] is True
+    normal, dropped = sample["runs"]
+    assert normal["result"] == "done_checked"
+    assert normal["record_checks_confirmed"] == 1
+    assert normal["right_record_checks"] == 2
+    assert normal["screen"]["width"] == 2 and normal["screen"]["height"] == 1
+    # The dropped save may have landed: the sample never claims nothing was
+    # written for it, exactly like a real run.
+    assert dropped["result"] == "check_record"
+    assert dropped["nothing_written"] is False
+    assert dropped["record_checks_failed"] == 1
+    assert [step["saves"] for step in dropped["steps"]] == [False, True]
+    assert ("sample_progress", {"state": "done", "detail": ""}) in events

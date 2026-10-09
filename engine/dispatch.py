@@ -269,6 +269,7 @@ class EngineDispatcher:
             "resolve_attention_item": self.resolve_attention_item,
             "get_attention_screenshot": self.get_attention_screenshot,
             "get_results_summary": self.get_results_summary,
+            "run_sample": self.run_sample,
             "teach_fix": self.teach_fix,
             # qualification cockpit (canonical Flow graph/policy/manifests)
             "get_qualification": self.get_qualification,
@@ -573,6 +574,16 @@ class EngineDispatcher:
         target: Any | None,
         task: str,
     ) -> None:
+        if target is not None:
+            try:
+                # Check it and Run it start from the app the task was shown
+                # in. The target stays in the local database.
+                self.services.db.set_task_target(
+                    capture_id,
+                    target.model_dump(mode="json", exclude_none=True),
+                )
+            except Exception:
+                logger.warning("Could not remember where this task was recorded")
         if params.get("first_workflow") is not True:
             return
         self.services.db.set_first_workflow_state(
@@ -899,12 +910,20 @@ class EngineDispatcher:
         )
         task = str((capture or {}).get("task_description") or "")
         # The bundle status is set by the readiness-test commands: "certified"
-        # only after Flow certified the current revision.
-        readiness = {
-            "certified": "ready",
-            "qualification_pending": "checking",
-            "qualification_failed": "checking",
-        }.get(str(b.get("status") or ""), "new")
+        # only after Flow certified the current revision. Flow's governed run
+        # also refuses a plaintext bundle, so a certified version is ready to
+        # run only once it is sealed (encrypted at rest).
+        bundle_path = Path(str(b.get("bundle_path") or ""))
+        encrypted = bool(b.get("bundle_path")) and (
+            bundle_path / "workflow.json.enc"
+        ).is_file()
+        status = str(b.get("status") or "")
+        if status == "certified":
+            readiness = "ready" if encrypted else "checking"
+        elif status in {"qualification_pending", "qualification_failed"}:
+            readiness = "checking"
+        else:
+            readiness = "new"
         return {
             "id": bid,
             "name": b.get("workflow_name") or b.get("capture_id") or bid,
@@ -916,6 +935,10 @@ class EngineDispatcher:
             "open_items": len(open_items),
             "blocked": any(blocks_more_runs(item) for item in open_items),
             "readiness": readiness,
+            "certified": status == "certified",
+            "encrypted": encrypted,
+            "version": int(b.get("version") or 1),
+            "capture_id": b.get("capture_id"),
             "task": task if task != "teach_fix" else "",
             "demo_seconds": self._demonstration_seconds(b),
             "synced": bool(b.get("workflow_id")),
@@ -1269,10 +1292,9 @@ class EngineDispatcher:
         try:
             from engine.private_flow_config import (
                 prepare_flow_config,
+                stage_private_text,
                 stage_private_yaml,
             )
-
-            from engine.private_flow_config import stage_private_text
 
             prepared = prepare_flow_config(base_config, target)
             log_redactions = prepared.redactions if prepared is not None else ()
@@ -3411,7 +3433,11 @@ class EngineDispatcher:
         )
 
     def get_task_inputs(self, **params: Any) -> dict:
-        """Return the inputs one run of a task needs (no secret values)."""
+        """Return the inputs one run of a task needs and where it was recorded.
+
+        No secret value is returned. The recorded target is local data: it can
+        name an internal host or window, and it never leaves this computer.
+        """
 
         workflow_id = str(params.get("workflow_id") or "")
         try:
@@ -3419,9 +3445,27 @@ class EngineDispatcher:
                 "ok": True,
                 "workflow_id": workflow_id,
                 "inputs": self._task_inputs(workflow_id),
+                "target": self._task_target(workflow_id),
             }
         except Exception as exc:
             return {"ok": False, "workflow_id": workflow_id, "error": str(exc)}
+
+    def _task_target(self, workflow_id: str) -> dict | None:
+        """The application target the task's recording used, if known."""
+
+        bundle = self.services.db.get_bundle(workflow_id)
+        capture_id = (bundle or {}).get("capture_id")
+        if not capture_id:
+            return None
+        try:
+            target = self.services.db.get_task_target(str(capture_id))
+        except Exception:
+            return None
+        if target is None:
+            first = self.services.db.get_first_workflow_state() or {}
+            if first.get("capture_id") == capture_id and isinstance(first.get("target"), dict):
+                target = first["target"]
+        return target
 
     def run_item(self, **params: Any) -> dict:
         """Run a task once on one item's input values and record the outcome.
@@ -3660,8 +3704,6 @@ class EngineDispatcher:
         item's own run directory and returned to the local cockpit.
         """
 
-        import base64
-
         item_id = str(params.get("item_id") or "")
         row = self.services.db.get_work_item(item_id)
         run = self.services.db.get_run(str((row or {}).get("run_id") or "")) if row else None
@@ -3678,37 +3720,55 @@ class EngineDispatcher:
         )
         if not isinstance(stopped, dict):
             return {"ok": False}
-        relative = stopped.get("before_png") or stopped.get("after_png")
-        if not isinstance(relative, str) or not relative:
+        frame = self._step_frame(run_dir, stopped, prefer="before")
+        if frame is None:
             return {"ok": False}
+        return {"ok": True, **frame}
+
+    @staticmethod
+    def _step_frame(run_dir: Path, step: dict, *, prefer: str) -> dict | None:
+        """One retained step frame as a data URL, plus the point it acted on.
+
+        The frame must be a PNG inside ``run_dir``; a symlink or a path that
+        leaves the run directory is refused.
+        """
+
+        import base64
+
+        order = ("before_png", "after_png") if prefer == "before" else ("after_png", "before_png")
+        relative = next(
+            (step.get(key) for key in order if isinstance(step.get(key), str) and step.get(key)),
+            None,
+        )
+        if not relative:
+            return None
         try:
             root = run_dir.resolve(strict=True)
-            frame = (run_dir / relative)
+            frame = run_dir / relative
             if frame.is_symlink():
-                return {"ok": False}
+                return None
             frame = frame.resolve(strict=True)
             frame.relative_to(root)
             data = frame.read_bytes()
         except (OSError, ValueError):
-            return {"ok": False}
+            return None
         if len(data) > 12_000_000 or not data.startswith(b"\x89PNG\r\n\x1a\n"):
-            return {"ok": False}
+            return None
         width = int.from_bytes(data[16:20], "big")
         height = int.from_bytes(data[20:24], "big")
         focus = None
-        resolution = stopped.get("resolution")
+        resolution = step.get("resolution")
         point = resolution.get("point") if isinstance(resolution, dict) else None
         if isinstance(point, dict) and isinstance(point.get("x"), (int, float)):
             focus = {"x": point["x"], "y": point.get("y", 0)}
         elif isinstance(point, (list, tuple)) and len(point) >= 2:
             focus = {"x": point[0], "y": point[1]}
         return {
-            "ok": True,
             "data_url": "data:image/png;base64," + base64.b64encode(data).decode("ascii"),
             "width": width,
             "height": height,
             "focus": focus,
-            "step": str(stopped.get("intent") or ""),
+            "step": str(step.get("intent") or ""),
         }
 
     def get_results_summary(self, **params: Any) -> dict:
@@ -3742,6 +3802,125 @@ class EngineDispatcher:
         if isinstance(duration, (int, float)) and 1 <= duration <= 6 * 3600:
             return float(duration)
         return None
+
+    # ------------------------------------------------------------ sample
+
+    def run_sample(self, **params: Any) -> dict:
+        """Run Flow's built-in sample task so a new user sees it work first.
+
+        Flow serves a synthetic clinic app with made-up patients on this
+        computer and drives it in a headless browser, so this needs no
+        operating-system permission, no account, and none of the user's apps.
+        It runs the sample twice: once normally, and once against a backend
+        that drops the save after the screen says "saved". Each result is
+        derived from Flow's transaction outcome like every other run.
+        """
+
+        from engine.flow_bridge import FlowBridge
+        from engine.outcomes import consistent_transaction_outcome, plain_result
+
+        ensure_browser = getattr(self.services.flow_bridge, "ensure_browser_runtime", None)
+        if ensure_browser is not None:
+            try:
+                ensure_browser(
+                    lambda state, detail: self.emit(
+                        "sample_progress", {"state": "browser", "detail": detail}
+                    )
+                )
+            except Exception:
+                return {
+                    "ok": False,
+                    "error": (
+                        "OpenAdapt couldn't prepare its browser. Check your "
+                        "internet connection, then try again."
+                    ),
+                }
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        sample_dir = self.config.data_dir / "samples" / f"sample-{stamp}-{uuid.uuid4().hex[:6]}"
+        sample_dir.parent.mkdir(parents=True, exist_ok=True)
+        self.emit("sample_progress", {"state": "running", "detail": ""})
+        started = time.monotonic()
+        try:
+            self.services.flow_bridge.tutorial(sample_dir, break_it=True)
+        except Exception:
+            logger.exception("The sample task did not run")
+            self.emit("sample_progress", {"state": "failed", "detail": ""})
+            return {
+                "ok": False,
+                "error": "The sample didn't run. Check that the OpenAdapt engine is ready.",
+            }
+        runs: list[dict[str, Any]] = []
+        for kind, folder in (("normal", "run"), ("save_dropped", "run-broken")):
+            run_dir = sample_dir / folder
+            report = FlowBridge.read_report(run_dir)
+            if not report:
+                continue
+            execution = report.get("execution_outcome")
+            transaction = consistent_transaction_outcome(
+                execution, report.get("transaction_outcome")
+            )
+            result = plain_result(execution, transaction)
+            results = [r for r in report.get("results") or [] if isinstance(r, dict)]
+            steps = []
+            save_step: dict | None = None
+            right_record = 0
+            confirmed = 0
+            refuted = 0
+            for index, step in enumerate(results):
+                evidence = [e for e in step.get("effect_evidence") or [] if isinstance(e, dict)]
+                saves = bool(evidence) or step.get("effect_verified") is not None
+                identity = step.get("identity")
+                if isinstance(identity, dict) and identity.get("status") == "verified":
+                    right_record += 1
+                confirmed += sum(1 for e in evidence if e.get("final_verdict") == "confirmed")
+                refuted += sum(1 for e in evidence if e.get("final_verdict") != "confirmed")
+                steps.append(
+                    {
+                        "index": index,
+                        "intent": str(step.get("intent") or ""),
+                        "ok": bool(step.get("ok")),
+                        "saves": saves,
+                    }
+                )
+                if saves:
+                    save_step = step
+            frame = (
+                self._step_frame(run_dir, save_step, prefer="after")
+                if save_step is not None
+                else None
+            )
+            params_used = report.get("params") if isinstance(report.get("params"), dict) else {}
+            runs.append(
+                {
+                    "kind": kind,
+                    "result": result["key"],
+                    "nothing_written": result["nothing_written"],
+                    "execution_outcome": execution,
+                    "transaction_outcome": transaction,
+                    "steps": steps,
+                    "right_record_checks": right_record,
+                    "record_checks_confirmed": confirmed,
+                    "record_checks_failed": refuted,
+                    "model_calls": report.get("model_calls"),
+                    "inputs": {
+                        str(key): str(value)
+                        for key, value in params_used.items()
+                        if isinstance(value, (str, int, float))
+                    },
+                    "screen": frame,
+                }
+            )
+        self.emit("sample_progress", {"state": "done" if runs else "failed", "detail": ""})
+        if not runs:
+            return {
+                "ok": False,
+                "error": "The sample finished without a result to show.",
+            }
+        return {
+            "ok": True,
+            "seconds": round(time.monotonic() - started, 1),
+            "runs": runs,
+        }
 
     # ------------------------------------------------------- auth
 

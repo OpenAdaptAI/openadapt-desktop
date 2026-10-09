@@ -157,6 +157,14 @@ CREATE TABLE IF NOT EXISTS work_items (
     resolved_at TEXT
 );
 
+-- Where a task was recorded, so Check it and Run it start from the same app.
+-- Local only: a target can name an internal host or window.
+CREATE TABLE IF NOT EXISTS task_targets (
+    capture_id TEXT PRIMARY KEY,
+    target_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_captures_review ON captures(review_status);
 CREATE INDEX IF NOT EXISTS idx_work_items_workflow ON work_items(workflow_id, status);
 CREATE INDEX IF NOT EXISTS idx_captures_tier ON captures(tier);
@@ -438,6 +446,37 @@ class IndexDB:
             (stage, capture_id, workflow_id, target_json, task, _now()),
         )
         self.conn.commit()
+
+    # --- Where each task was recorded ---
+
+    def set_task_target(self, capture_id: str, target: dict) -> None:
+        """Remember the application target one recording used."""
+
+        self.conn.execute(
+            "INSERT INTO task_targets (capture_id, target_json, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(capture_id) DO UPDATE SET "
+            "target_json = excluded.target_json, updated_at = excluded.updated_at",
+            (
+                capture_id,
+                json.dumps(target, sort_keys=True, separators=(",", ":")),
+                _now(),
+            ),
+        )
+        self.conn.commit()
+
+    def get_task_target(self, capture_id: str) -> dict | None:
+        """The application target a recording used, if Desktop knows it."""
+
+        row = self.conn.execute(
+            "SELECT target_json FROM task_targets WHERE capture_id = ?", (capture_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            target = json.loads(row["target_json"])
+        except (TypeError, json.JSONDecodeError):
+            return None
+        return target if isinstance(target, dict) else None
 
     # --- Run operations (local replay/run executions) ---
 
