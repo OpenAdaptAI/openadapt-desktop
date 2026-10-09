@@ -595,7 +595,7 @@ export default function App() {
         return;
       }
       const resumed = routeForFirstWorkflow(firstWorkflowStateRef.current);
-      if (resumed && resumed.name === "watch") setRoute(resumed);
+      setRoute(resumed && resumed.name === "watch" ? resumed : { name: "tasks" });
     });
   }, [route, leaveFirstWorkflowPath]);
 
@@ -614,6 +614,16 @@ export default function App() {
 
   async function startFirstTask() {
     rememberLocalSession();
+    const current = firstWorkflowStateRef.current;
+    if (current?.stage === "executing" || current?.stage === "reconciliation") {
+      // An uncertain run keeps its lock: check its target first.
+      const resumed = routeForFirstWorkflow(current);
+      if (resumed) setRoute(resumed);
+      setFirstWorkflowStageError(
+        "Check the target of your last run before you record another task.",
+      );
+      return;
+    }
     if (!(await saveFirstWorkflowStage("record"))) return;
     setOnboarded(true);
     setShowLogin(false);

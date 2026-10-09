@@ -568,3 +568,21 @@ def test_an_interrupted_item_run_becomes_a_record_to_check(task) -> None:
     again = _run(disp, "M-1")
     assert again["pre_action_refusal"] is True
     assert bridge.calls == []
+
+
+def test_recording_another_task_keeps_an_uncertain_first_run_locked(task) -> None:
+    disp, db, _events = task
+    db.set_first_workflow_state(
+        stage="reconciliation", capture_id="cap-1", workflow_id="wf-note",
+        task="Add a claim note",
+    )
+
+    with pytest.raises(ValueError, match="Check the target of the last run"):
+        disp.dispatch("set_first_workflow_stage", {"stage": "record"})
+    assert db.get_first_workflow_state()["stage"] == "reconciliation"
+
+    db.set_first_workflow_state(
+        stage="complete", capture_id="cap-1", workflow_id="wf-note", task="Add a claim note"
+    )
+    moved = disp.dispatch("set_first_workflow_stage", {"stage": "record"})
+    assert moved["state"]["stage"] == "record"

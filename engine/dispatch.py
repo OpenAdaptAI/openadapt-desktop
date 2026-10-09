@@ -802,6 +802,14 @@ class EngineDispatcher:
         }:
             raise ValueError("Invalid first workflow stage")
         if stage == "record":
+            current = self.services.db.get_first_workflow_state()
+            if current is not None and current.get("stage") in {"executing", "reconciliation"}:
+                # A first run that started and hasn't been checked keeps its
+                # lock. Recording another task would replace this record and
+                # drop the lock that stops the run from repeating.
+                raise ValueError(
+                    "Check the target of the last run before you record another task."
+                )
             self.services.db.set_first_workflow_state(stage="record")
             return {"ok": True, "state": self.services.db.get_first_workflow_state()}
 

@@ -375,3 +375,33 @@ it("leaves loading when authoring status is missing", async () => {
   ).toBeTruthy();
   expect(screen.queryByText("Loading…")).toBeNull();
 });
+
+it("won't start another task while an uncertain first run is unchecked", async () => {
+  vi.mocked(engineTry).mockImplementation(async (command, _params, fallback) => {
+    const boot = bootDefaults(command);
+    if (boot !== undefined) return boot;
+    if (command === CMD.GET_WORKFLOWS) {
+      return [{ id: "workflow-1", name: "Test", steps: 1 }];
+    }
+    if (command === CMD.GET_FIRST_WORKFLOW_STATE) {
+      return { ok: true, state: first("reconciliation") };
+    }
+    if (command === CMD.SET_FIRST_WORKFLOW_STAGE) {
+      throw new Error("the uncertain first run must keep its lock");
+    }
+    return fallback ?? null;
+  });
+
+  render(<App />);
+  expect(await screen.findByText("First supervised replay")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Tasks" }));
+  fireEvent.click(
+    await screen.findByRole("button", { name: "Show OpenAdapt a new task" }),
+  );
+
+  expect((await screen.findByRole("alert")).textContent).toContain(
+    "Check the target of your last run before you record another task.",
+  );
+  expect(await screen.findByText("First supervised replay")).toBeTruthy();
+  expect(screen.queryByText("First workflow recording")).toBeNull();
+});
