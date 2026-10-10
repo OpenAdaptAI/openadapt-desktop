@@ -191,6 +191,12 @@ def check_action(item: dict, action: str, *, record_checked: bool) -> None:
             "Look at the record first. Run it again only after you confirm "
             "that nothing was saved."
         )
+    # Closing a possible save as done also rests on what the person saw in
+    # the record, so the engine asks for the same confirmation the screen does.
+    if action in {"confirmed_saved", "done_by_person"} and not record_checked:
+        raise WorkItemError(
+            "Look at the record first, then say what you found."
+        )
 
 
 def resolution_status(action: str) -> str:

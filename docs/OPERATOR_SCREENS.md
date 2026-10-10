@@ -34,7 +34,8 @@ on every task.
 - A retry is offered only for an item whose run proved nothing was written.
   For a possible save, the person first confirms they looked at the record,
   then says it saved, it didn't save (run it again), or they finished it by
-  hand.
+  hand. The engine refuses each of these three choices without that
+  confirmation, not only the screen.
 - While any item of a task may have saved, Desktop refuses to run more items
   of that task. Run it stops the list at that item.
 - An item whose run was interrupted (Desktop or the engine stopped mid-run)

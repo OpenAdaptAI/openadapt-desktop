@@ -289,9 +289,24 @@ def test_an_uncertain_save_blocks_more_items_until_a_person_checks(task) -> None
     assert "Look at the record first" in unchecked["error"]
     assert len(bridge.calls) == 1
 
-    confirmed = disp.dispatch(
+    # Closing a possible save also needs the person to have looked.
+    unlooked = disp.dispatch(
         "resolve_attention_item",
         {"item_id": first["item"]["item_id"], "action": "confirmed_saved"},
+    )
+    assert unlooked["ok"] is False
+    assert "Look at the record first" in unlooked["error"]
+    by_hand = disp.dispatch(
+        "resolve_attention_item",
+        {"item_id": first["item"]["item_id"], "action": "done_by_person"},
+    )
+    assert by_hand["ok"] is False
+    assert db.get_work_item(first["item"]["item_id"])["status"] == "open"
+
+    confirmed = disp.dispatch(
+        "resolve_attention_item",
+        {"item_id": first["item"]["item_id"], "action": "confirmed_saved",
+         "record_checked": True},
     )
     assert confirmed["ok"] is True
     assert db.get_work_item(first["item"]["item_id"])["status"] == "confirmed_saved"
