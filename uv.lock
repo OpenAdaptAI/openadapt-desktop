@@ -1383,7 +1383,7 @@ requires-dist = [
     { name = "openadapt-desktop", extras = ["enterprise"], marker = "extra == 'full'" },
     { name = "openadapt-flow", extras = ["browser", "console"], marker = "extra == 'build'", specifier = "==1.35.1" },
     { name = "openadapt-privacy", specifier = ">=1.0.0" },
-    { name = "openadapt-types", specifier = "==0.17.0" },
+    { name = "openadapt-types", specifier = ">=0.17.0,<0.18.0" },
     { name = "packaging", specifier = ">=24" },
     { name = "playwright", marker = "extra == 'build'", specifier = ">=1.44" },
     { name = "psutil" },
