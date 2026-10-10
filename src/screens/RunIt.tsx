@@ -31,6 +31,7 @@ type Source = "paste" | "file" | "one";
 type ItemState =
   | { state: "waiting" }
   | { state: "running" }
+  | { state: "not_run" }
   | { state: "skipped"; reason: string }
   | { state: "finished"; key: ReturnType<typeof plainResult>["key"]; nothingWritten: boolean }
   | { state: "refused"; reason: string };
@@ -131,7 +132,13 @@ export function RunIt({
   const blocked = Boolean(workflow?.blocked);
   const notReady = workflow !== null && workflow.readiness !== "ready";
   const canRun =
-    !running && ready.length > 0 && !blocked && !notReady && target !== null && !parsed.error;
+    !running &&
+    !finished &&
+    ready.length > 0 &&
+    !blocked &&
+    !notReady &&
+    target !== null &&
+    !parsed.error;
 
   async function readFile(file: File) {
     setFileName(file.name);
@@ -213,9 +220,26 @@ export function RunIt({
         }
       }
     } finally {
+      setStates(
+        next.map((state): ItemState =>
+          state.state === "waiting" || state.state === "running" ? { state: "not_run" } : state,
+        ),
+      );
       setRunning(false);
       setFinished(true);
     }
+  }
+
+  // A finished list never runs again as it stands: its done items are already
+  // saved, and its stopped items wait in Needs you. Running it again would
+  // enter the same items twice, so the next step is a new list.
+  function startNewList() {
+    setPasted("");
+    setFileName("");
+    setSingle({});
+    setStates([]);
+    setFinished(false);
+    setBatchNote("");
   }
 
   const done = states.filter((item) => item.state === "finished" && item.key === "done_checked").length;
@@ -226,6 +250,7 @@ export function RunIt({
     (item) =>
       item.state === "refused" ||
       item.state === "skipped" ||
+      item.state === "not_run" ||
       (!running && item.state === "waiting"),
   ).length;
   const attempted = states.filter((item) => item.state === "finished").length;
@@ -298,7 +323,7 @@ export function RunIt({
               id={`${idPrefix}-paste`}
               className="input textarea"
               rows={7}
-              disabled={running}
+              disabled={running || finished}
               value={pasted}
               spellCheck={false}
               placeholder={
@@ -324,7 +349,7 @@ export function RunIt({
               className="input"
               type="file"
               accept=".csv,.tsv,.txt,text/csv,text/tab-separated-values"
-              disabled={running}
+              disabled={running || finished}
               onChange={(event) => {
                 const file = event.target.files?.[0];
                 if (file) void readFile(file);
@@ -344,7 +369,7 @@ export function RunIt({
                 <input
                   id={`${idPrefix}-one-${input.name}`}
                   className="input"
-                  disabled={running}
+                  disabled={running || finished}
                   value={single[input.name] ?? ""}
                   placeholder={input.example ?? ""}
                   onChange={(event) =>
@@ -423,6 +448,8 @@ export function RunIt({
               Stop after this item
             </Button>
           </>
+        ) : finished ? (
+          <Button onClick={startNewList}>Start a new list</Button>
         ) : (
           <Button variant="primary" disabled={!canRun} onClick={() => void runAll()}>
             {ready.length > 0 ? `Run ${plural(ready.length, "item")}` : "Run"}
@@ -535,6 +562,12 @@ function ItemStatus({ item, state }: { item: ParsedItem; state?: ItemState }) {
       return (
         <Status tone="run" icon="dot">
           Running
+        </Status>
+      );
+    case "not_run":
+      return (
+        <Status tone="neutral" icon="minus">
+          Not run
         </Status>
       );
     case "skipped":

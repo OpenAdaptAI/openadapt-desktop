@@ -116,3 +116,27 @@ it("sends an unchecked task to Check it first", async () => {
   fireEvent.click(screen.getByRole("button", { name: "Check it" }));
   await waitFor(() => expect(onCheck).toHaveBeenCalledWith("wf-1"));
 });
+
+it("never runs a finished list again; the next step is a new list", async () => {
+  engine();
+  vi.mocked(engineInvoke)
+    .mockResolvedValueOnce(item(0, "VERIFIED", "VERIFIED", "done_checked", false))
+    .mockResolvedValueOnce(item(1, "HALTED", "RECONCILIATION_REQUIRED", "check_record", false));
+  render(<RunIt workflowId="wf-1" onCheck={() => {}} onNeedsYou={() => {}} onResults={() => {}} />);
+
+  await paste("member_id,note\nM-1,Reviewed\nM-2,Reviewed\nM-3,Reviewed");
+  fireEvent.click(await screen.findByRole("button", { name: "Run 3 items" }));
+  expect(await screen.findByText("Finished this list")).toBeTruthy();
+
+  // The item the list never reached says so, and nothing offers to run the
+  // same items again: item 1 is already saved.
+  expect(screen.getByText("Not run")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /^Run \d/ })).toBeNull();
+  const box = screen.getByLabelText("Paste rows from a spreadsheet or a list") as HTMLTextAreaElement;
+  expect(box.disabled).toBe(true);
+
+  fireEvent.click(screen.getByRole("button", { name: "Start a new list" }));
+  expect(box.value).toBe("");
+  expect(box.disabled).toBe(false);
+  expect(engineInvoke).toHaveBeenCalledTimes(2);
+});
