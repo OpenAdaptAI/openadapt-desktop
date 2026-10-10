@@ -837,7 +837,7 @@ export function ipcTable({ authenticated, workflows, permissions, operator = fal
     get_effective_policy: null,
     get_presentation_export_status: { ready: false, reason: 'Nothing is recorded yet.' },
     get_config: {
-      lane: 'byoc',
+      deployment_lane: 'byoc',
       phi_mode: 'on',
       host: 'app.openadapt.ai',
       grounding: 'managed',
