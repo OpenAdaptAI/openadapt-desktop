@@ -19,7 +19,8 @@ export type StatusIcon =
   | "half"
   | "play"
   | "cross"
-  | "minus";
+  | "minus"
+  | "shield";
 
 export function Icon({ name }: { name: StatusIcon }) {
   const common = {
@@ -77,6 +78,14 @@ export function Icon({ name }: { name: StatusIcon }) {
         <svg {...common}>
           <circle cx="8" cy="8" r="7" fill="currentColor" opacity="0.14" />
           <path d="M5.6 5.6l4.8 4.8M10.4 5.6l-4.8 4.8" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+        </svg>
+      );
+    case "shield":
+      // Held before saving: the protection worked. Ink, never a verdict colour.
+      return (
+        <svg {...common}>
+          <path d="M8 1.8l5 1.9v3.9c0 3.1-2.1 5.6-5 6.6-2.9-1-5-3.5-5-6.6V3.7z" fill="currentColor" opacity="0.14" />
+          <path d="M8 1.8l5 1.9v3.9c0 3.1-2.1 5.6-5 6.6-2.9-1-5-3.5-5-6.6V3.7z" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
         </svg>
       );
     case "minus":

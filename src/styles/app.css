@@ -1105,6 +1105,9 @@ select.input:focus {
 
 .seg {
   display: inline-flex;
+  flex-wrap: wrap;
+  width: fit-content;
+  max-width: 100%;
   padding: 3px;
   gap: 2px;
   border-radius: var(--radius-sm);
@@ -1137,16 +1140,19 @@ select.input:focus {
   color: var(--text-muted);
   font-size: var(--fs-sm);
 }
-.radio-seg label + label {
-  border-left: 1px solid var(--border);
+.radio-seg label {
+  border-radius: 6px;
+  font-weight: var(--fw-medium);
 }
 .radio-seg label span {
   display: block;
-  padding: var(--space-2) var(--space-4);
+  padding: var(--space-1) var(--space-4);
+  line-height: 24px;
 }
 .radio-seg label.active {
-  background: var(--panel-sunk);
+  background: var(--panel);
   color: var(--text-strong);
+  box-shadow: var(--shadow-sm);
 }
 .radio-seg input {
   position: absolute;
@@ -1365,7 +1371,8 @@ select.input:focus {
 }
 .metric-value {
   font-size: var(--fs-h3);
-  font-family: var(--font-display);
+  font-family: var(--font-heading);
+  font-feature-settings: var(--num-tabular);
   color: var(--text-strong);
 }
 
@@ -1693,14 +1700,15 @@ select.input:focus {
   padding: 0;
   border: 0;
   background: none;
-  color: var(--brand);
+  color: var(--action);
   cursor: pointer;
   font: inherit;
   text-decoration: underline;
+  text-decoration-color: var(--control);
   text-underline-offset: 3px;
 }
 .link-button:hover {
-  color: var(--brand-hover);
+  text-decoration-color: currentColor;
 }
 .link-button:focus-visible {
   border-radius: var(--radius-1);
@@ -1818,16 +1826,16 @@ select.input:focus {
   opacity: 0.55;
 }
 .choice-primary {
-  border-color: var(--brand);
-  background: var(--brand);
+  border-color: var(--action);
+  background: var(--action);
 }
 .choice-primary strong,
 .choice-primary span {
-  color: var(--text-inverse);
+  color: var(--on-action);
 }
 .choice-primary:hover:not(:disabled) {
-  border-color: var(--brand-hover);
-  background: var(--brand-hover);
+  border-color: var(--action-hover);
+  background: var(--action-hover);
 }
 
 /* Welcome */
@@ -2105,8 +2113,9 @@ select.input:focus {
   font-size: var(--fs-sm);
   font-weight: var(--fw-medium);
 }
+/* Held before saving is reassurance, not a verdict: ink, not green. */
 .attention-prevented.ok {
-  color: var(--pill-ok-fg);
+  color: var(--text-strong);
 }
 .attention-prevented.warn {
   color: var(--pill-warn-fg);
@@ -2147,7 +2156,7 @@ select.input:focus {
 .record-check input {
   width: 16px;
   height: 16px;
-  accent-color: var(--brand);
+  accent-color: var(--action);
 }
 .choices {
   display: flex;
@@ -2298,11 +2307,15 @@ select.input:focus {
 .stat-warn .stat-label {
   color: var(--pill-warn-fg);
 }
+/* A measurement: the serif, with tabular figures. */
 .stat-value {
   color: var(--text-strong);
-  font-family: var(--font-display);
-  font-size: 30px;
-  line-height: 1.1;
+  font-family: var(--font-heading);
+  font-feature-settings: var(--num-tabular);
+  font-size: 32px;
+  font-weight: 430;
+  letter-spacing: -0.015em;
+  line-height: 1.05;
 }
 .stat-note {
   color: var(--text-muted);
@@ -2484,7 +2497,12 @@ select.input:focus {
   color: var(--text-muted);
   font-size: var(--fs-sm);
 }
+/* A part a person confirmed or approved is ink. Green is only for a check
+   that ran and passed: the practice run and the drills. */
 .check-step.done .check-step-state {
+  color: var(--text-strong);
+}
+.check-step.done.passed .check-step-state {
   color: var(--pill-ok-fg);
 }
 .check-step.missing .check-step-state {
@@ -2509,6 +2527,10 @@ select.input:focus {
 }
 .check-badge.done {
   border-color: transparent;
+  color: var(--text-strong);
+  background: var(--panel-sunk);
+}
+.check-badge.done.passed {
   color: var(--pill-ok-fg);
   background: var(--pill-ok-bg);
 }
@@ -2806,7 +2828,7 @@ select.input:focus {
 }
 .plain-choices input {
   margin-top: 3px;
-  accent-color: var(--brand);
+  accent-color: var(--action);
 }
 .plain-choices small {
   display: block;

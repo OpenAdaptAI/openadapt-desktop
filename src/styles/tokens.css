@@ -51,11 +51,13 @@
 
 /* -----------------------------------------------------------------------------
    0b. CANONICAL 1.1.0 TOKENS, CARRIED UNTIL THE NEXT RE-VENDOR.
-      openadapt-web adds these names, with these exact values, in its tokens
-      1.1.0 for the Clinical Calm direction. Until that release is deployed
-      and re-vendored here, Desktop defines them itself. After the re-vendor,
-      scripts/designTokens.test.ts fails on every name below that canonical
-      now carries; delete this block then.
+      openadapt-web's tokens 1.1.0 (Clinical Calm, not yet published) add
+      these names with these values. The one intended difference is the font
+      stacks, which also name the metric-adjusted fallback faces above.
+      Until 1.1.0 is published and re-vendored here, Desktop defines them
+      itself. After the re-vendor, scripts/designTokens.test.ts fails on every
+      colour below that canonical now carries; delete this whole block then,
+      keeping only the fallback faces in the two font stacks.
    -------------------------------------------------------------------------- */
 :root {
   --ink-hover: #1E2A3D;

@@ -150,7 +150,7 @@ export function Results({ onNeedsYou }: { onNeedsYou: () => void }) {
         />
         <StatTile
           label="Wrong-record saves prevented"
-          icon="check"
+          icon="shield"
           tone="neutral"
           value={total.wrong_record_prevented}
           note="Stopped before saving on a record that didn't match"

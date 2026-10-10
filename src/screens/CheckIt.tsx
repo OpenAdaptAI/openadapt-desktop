@@ -48,10 +48,18 @@ type Busy =
   | "drills"
   | "approve";
 
-function StepBadge({ state, index }: { state: StepState; index: number }) {
+function StepBadge({
+  state,
+  index,
+  passed,
+}: {
+  state: StepState;
+  index: number;
+  passed: boolean;
+}) {
   if (state === "done") {
     return (
-      <span className="check-badge done" aria-label="Done">
+      <span className={`check-badge done${passed ? " passed" : ""}`} aria-label="Done">
         <Icon name="check" />
       </span>
     );
@@ -100,9 +108,15 @@ function CheckSection({
   doneWord?: string;
   children: React.ReactNode;
 }) {
+  // Green marks a check that ran and passed (the practice run, the drills).
+  // A part a person confirmed or approved stays ink.
+  const passed = doneWord === "Passed";
   return (
-    <section className={`check-step ${state}`} aria-labelledby={`check-${index}`}>
-      <StepBadge state={state} index={index} />
+    <section
+      className={`check-step ${state}${passed ? " passed" : ""}`}
+      aria-labelledby={`check-${index}`}
+    >
+      <StepBadge state={state} index={index} passed={passed} />
       <div className="check-step-body">
         <div className="check-step-head">
           <h2 id={`check-${index}`}>{title}</h2>

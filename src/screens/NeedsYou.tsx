@@ -103,7 +103,7 @@ function AttentionCard({
       <h2 id={`q-${item.item_id}`}>{copy.question}</h2>
       <p className="attention-sentence">{copy.sentence}</p>
       <p className={`attention-prevented ${copy.preventedTone}`}>
-        <Icon name={copy.preventedTone === "ok" ? "check" : "search"} />
+        <Icon name={copy.preventedTone === "ok" ? "shield" : "search"} />
         <span>{copy.prevented}</span>
       </p>
 
@@ -292,7 +292,7 @@ export function NeedsYou({
         <p className="simple-sub">Loading…</p>
       ) : items.length === 0 ? (
         <div className="calm-empty">
-          <Status tone="ok" icon="check">
+          <Status tone="neutral" icon="check">
             Nothing needs you right now
           </Status>
           <p>
