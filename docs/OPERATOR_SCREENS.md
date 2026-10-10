@@ -41,8 +41,9 @@ on every task.
 - An item whose run was interrupted (Desktop or the engine stopped mid-run)
   becomes an open item with an unknown outcome. It is never run again until a
   person checks the record.
-- A done item isn't repeated by accident: running the same values again needs
-  an explicit choice.
+- A done item isn't repeated by accident: `run_item` refuses values that
+  already finished for that task. Only the engine's `allow_repeat` flag
+  overrides that; the screens don't offer it.
 - Item values reach Flow only through an owner-only params file that exists
   for the length of the call. They never enter a process argument list, an
   event, a log line, a notification, or a Cloud payload.

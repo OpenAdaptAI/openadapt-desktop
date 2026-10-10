@@ -390,7 +390,9 @@ export function RunIt({
         {parsed.items.length > 0 && (
           <ItemTable items={parsed.items} inputs={declared} states={states} />
         )}
-        {parsed.items.length > 0 && (
+        {/* How the list reads applies before it runs; once it starts, each
+            row's status and the summary below say what happened. */}
+        {parsed.items.length > 0 && states.length === 0 && (
           <p className="simple-sub">
             {plural(parsed.items.length, "item")}.{" "}
             {ready.length === parsed.items.length

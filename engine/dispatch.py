@@ -3573,8 +3573,8 @@ class EngineDispatcher:
             ):
                 if row.get("inputs_digest") == digest:
                     return self._pre_action_refusal(
-                        "This item is already done. Choose to repeat it only if "
-                        "you want the same entry made again."
+                        "This item is already done, so OpenAdapt didn't enter "
+                        "it again."
                     )
 
         batch_id = str(params.get("batch_id") or new_id("batch"))

@@ -599,7 +599,7 @@ export function CheckIt({
       }
       if (latest) {
         setProject(latest);
-        setDrillNote("Each drill ended the way it should: OpenAdapt stopped instead of saving.");
+        setDrillNote("Every drill ended the way its description says.");
       }
     } catch (error) {
       fail("The drills didn't finish.", String(error));
@@ -943,8 +943,8 @@ export function CheckIt({
             ) : (
               <>
                 <p>
-                  OpenAdapt tries to make the task go wrong on purpose and checks
-                  that it stops before saving.
+                  OpenAdapt makes the task go wrong on purpose, then checks that
+                  it reacts the way each drill below says.
                 </p>
                 <ul className="drill-list">
                   {plan.drills.map((drill: CaseView) => (

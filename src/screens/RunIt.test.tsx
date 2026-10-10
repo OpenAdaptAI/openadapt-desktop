@@ -132,6 +132,8 @@ it("never runs a finished list again; the next step is a new list", async () => 
   // same items again: item 1 is already saved.
   expect(screen.getByText("Not run")).toBeTruthy();
   expect(screen.queryByRole("button", { name: /^Run \d/ })).toBeNull();
+  // The "All ready" line describes a list before it runs, not after.
+  expect(screen.queryByText(/All ready/)).toBeNull();
   const box = screen.getByLabelText("Paste rows from a spreadsheet or a list") as HTMLTextAreaElement;
   expect(box.disabled).toBe(true);
 

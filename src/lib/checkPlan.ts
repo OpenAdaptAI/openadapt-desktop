@@ -134,7 +134,7 @@ function caseView(
     ? { label: "Practice run", explanation: item.description || "One test item from start to finish." }
     : (CASE_COPY[item.kind] ?? {
         label: "Safety drill",
-        explanation: item.description || "OpenAdapt checks that it stops instead of saving.",
+        explanation: item.description || "OpenAdapt checks that it stops instead of guessing.",
       });
   return {
     id: item.id,
