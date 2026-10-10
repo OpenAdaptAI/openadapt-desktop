@@ -27,7 +27,8 @@ import {
 } from "../ui/simple";
 
 interface Notice {
-  tone: "ok" | "warn";
+  /** Green ("ok") only for a run that was done and checked. */
+  tone: "ok" | "warn" | "neutral";
   text: string;
 }
 
@@ -265,7 +266,8 @@ export function NeedsYou({
           text: `Ran it again: ${copy.label}. ${copy.sentence}`,
         });
       } else {
-        setNotice({ tone: "ok", text: "Done. This item is closed." });
+        // A person closed the item; nothing was checked, so no green.
+        setNotice({ tone: "neutral", text: "Done. This item is closed." });
       }
       await refresh();
       onChanged();
@@ -284,7 +286,7 @@ export function NeedsYou({
       />
       {notice && (
         <div className={`notice ${notice.tone}`} role="status">
-          <Icon name={notice.tone === "ok" ? "check" : "attention"} />
+          <Icon name={notice.tone === "warn" ? "attention" : "check"} />
           <span>{notice.text}</span>
         </div>
       )}
