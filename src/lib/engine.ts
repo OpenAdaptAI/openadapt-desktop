@@ -44,6 +44,10 @@ export const CMD = {
   RESOLVE_ATTENTION_ITEM: "resolve_attention_item",
   GET_ATTENTION_SCREENSHOT: "get_attention_screenshot",
   GET_RESULTS_SUMMARY: "get_results_summary",
+  // "Only ask a person about problems": read the switch and turn it off.
+  // Turning it on happens in OpenAdapt Cloud, never here.
+  GET_APPROVAL_MODE: "get_approval_mode",
+  TURN_OFF_APPROVAL_MODE: "turn_off_approval_mode",
   RUN_SAMPLE: "run_sample",
   GET_QUALIFICATION: "get_qualification",
   INITIALIZE_QUALIFICATION: "initialize_qualification",

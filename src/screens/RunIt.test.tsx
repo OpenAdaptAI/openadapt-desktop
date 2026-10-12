@@ -16,8 +16,11 @@ afterEach(() => {
 
 const TARGET = { backend: "web", url: "https://emr.example.test" };
 
-function engine(readiness: "ready" | "checking" = "ready") {
+function engine(readiness: "ready" | "checking" = "ready", switchState?: string) {
   vi.mocked(engineTry).mockImplementation(async (command, _params, fallback) => {
+    if (command === CMD.GET_APPROVAL_MODE && switchState) {
+      return { ok: true, workflow_id: "wf-1", state: switchState, blockers: [] };
+    }
     if (command === CMD.GET_WORKFLOWS) {
       return [{ id: "wf-1", name: "Add a claim note", steps: 4, readiness, blocked: false }];
     }
@@ -141,4 +144,37 @@ it("never runs a finished list again; the next step is a new list", async () => 
   expect(box.value).toBe("");
   expect(box.disabled).toBe(false);
   expect(engineInvoke).toHaveBeenCalledTimes(2);
+});
+
+it("with the switch on, stops the list at the first item that needs a person", async () => {
+  engine("ready", "on");
+  vi.mocked(engineInvoke)
+    .mockResolvedValueOnce(item(0, "VERIFIED", "VERIFIED", "done_checked", false))
+    .mockResolvedValueOnce(item(1, "HALTED", "HALTED_BEFORE_EFFECT", "stopped_before_saving", true))
+    .mockResolvedValue(item(2, "VERIFIED", "VERIFIED", "done_checked", false));
+  render(<RunIt workflowId="wf-1" onCheck={() => {}} onNeedsYou={() => {}} onResults={() => {}} />);
+
+  expect(await screen.findByText(/^Only problems come to you\./)).toBeTruthy();
+  await paste("member_id,note\nM-1,Reviewed\nM-2,Reviewed\nM-3,Called");
+  fireEvent.click(await screen.findByRole("button", { name: "Run 3 items" }));
+
+  expect(await screen.findByText(/Item 2 needs you, so OpenAdapt stopped the list there/)).toBeTruthy();
+  // Even a stop that wrote nothing stops the list in this mode.
+  expect(engineInvoke).toHaveBeenCalledTimes(2);
+  expect(screen.getByText("Not run")).toBeTruthy();
+});
+
+it("with the switch on in Cloud but not used here, runs the list as before", async () => {
+  engine("ready", "not_used_here");
+  vi.mocked(engineInvoke)
+    .mockResolvedValueOnce(item(0, "HALTED", "HALTED_BEFORE_EFFECT", "stopped_before_saving", true))
+    .mockResolvedValueOnce(item(1, "VERIFIED", "VERIFIED", "done_checked", false));
+  render(<RunIt workflowId="wf-1" onCheck={() => {}} onNeedsYou={() => {}} onResults={() => {}} />);
+
+  await paste("member_id,note\nM-1,Reviewed\nM-2,Reviewed");
+  fireEvent.click(await screen.findByRole("button", { name: "Run 2 items" }));
+
+  expect(await screen.findByText("Finished this list")).toBeTruthy();
+  expect(engineInvoke).toHaveBeenCalledTimes(2);
+  expect(screen.queryByText(/Only problems come to you/)).toBeNull();
 });

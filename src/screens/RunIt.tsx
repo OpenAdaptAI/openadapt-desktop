@@ -5,11 +5,18 @@
 // The batch stops when an item's save may have gone through, because nothing
 // may run blindly after an uncertain save. Items that stopped before saving go
 // to Needs you and the batch moves on.
+//
+// With "Only ask a person about problems" on for this computer, any item that
+// needs a person stops the list there, so nothing after a problem runs until a
+// person has seen it. Continuing a paused list needs the engine to hold the
+// list (not built yet), so the rest of the items run as a new list.
 import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { onlyProblemsComeToYou } from "../lib/approvalMode";
 import { CMD, engineInvoke, engineTry } from "../lib/engine";
 import { humanizeInput, plainResult, resultCopy, sentenceCase } from "../lib/outcomes";
 import { parseItems, type ParsedItem } from "../lib/parseItems";
 import type {
+  ApprovalModeState,
   ExecutionTarget,
   QualificationParameter,
   RunItemResponse,
@@ -33,7 +40,13 @@ type ItemState =
   | { state: "running" }
   | { state: "not_run" }
   | { state: "skipped"; reason: string }
-  | { state: "finished"; key: ReturnType<typeof plainResult>["key"]; nothingWritten: boolean }
+  | {
+      state: "finished";
+      key: ReturnType<typeof plainResult>["key"];
+      nothingWritten: boolean;
+      /** The item waits for a person, even when its result is done and checked. */
+      needsPerson: boolean;
+    }
   | { state: "refused"; reason: string };
 
 function targetSummary(target: ExecutionTarget | null): string {
@@ -78,18 +91,27 @@ export function RunIt({
   const [running, setRunning] = useState(false);
   const [finished, setFinished] = useState(false);
   const [batchNote, setBatchNote] = useState("");
+  const [mode, setMode] = useState<ApprovalModeState | null>(null);
+  const [stoppedAt, setStoppedAt] = useState<number | null>(null);
   const stopRequested = useRef(false);
+  const onlyProblems = onlyProblemsComeToYou(mode);
 
   useEffect(() => {
     void (async () => {
-      const [list, details] = await Promise.all([
+      const [list, details, approval] = await Promise.all([
         engineTry<Workflow[]>(CMD.GET_WORKFLOWS, {}, []),
         engineTry<TaskInputs>(
           CMD.GET_TASK_INPUTS,
           { workflow_id: workflowId },
           { ok: false, workflow_id: workflowId, error: "The local engine isn't answering." },
         ),
+        engineTry<ApprovalModeState | null>(
+          CMD.GET_APPROVAL_MODE,
+          { workflow_id: workflowId },
+          null,
+        ),
       ]);
+      setMode(approval && approval.ok ? approval : null);
       setWorkflow((Array.isArray(list) ? list : []).find((item) => item.id === workflowId) ?? null);
       if (!details.ok) {
         setLoadError(details.error || "Desktop couldn't read this task's inputs.");
@@ -152,6 +174,7 @@ export function RunIt({
     setRunning(true);
     setFinished(false);
     setBatchNote("");
+    setStoppedAt(null);
     const batchId = `batch-${Date.now().toString(36)}`;
     const next: ItemState[] = parsed.items.map((item) =>
       item.problems.length
@@ -182,7 +205,12 @@ export function RunIt({
         } catch (error) {
           // The engine call failed after it may have started the run. Treat
           // the item as a record to check and stop the batch.
-          next[item.position] = { state: "finished", key: "check_record", nothingWritten: false };
+          next[item.position] = {
+            state: "finished",
+            key: "check_record",
+            nothingWritten: false,
+            needsPerson: true,
+          };
           setStates([...next]);
           setBatchNote(
             `OpenAdapt lost track of item ${item.position + 1} (${String(error)}). Check that record before you run more.`,
@@ -206,12 +234,23 @@ export function RunIt({
           response.item.transaction_outcome ?? null,
           { preActionRefusal: response.item.result === "did_not_start" },
         );
+        const needsPerson = response.item.status !== "done";
         next[item.position] = {
           state: "finished",
           key: plain.key,
           nothingWritten: plain.nothingWritten,
+          needsPerson,
         };
         setStates([...next]);
+        if (onlyProblems && needsPerson) {
+          // With the switch on, any item that needs a person stops the list.
+          const label = response.item.label ? ` (${response.item.label})` : "";
+          setStoppedAt(item.position);
+          setBatchNote(
+            `Item ${item.position + 1}${label} needs you, so OpenAdapt stopped the list there. Answer it in Needs you, then run the items after it as a new list.`,
+          );
+          break;
+        }
         if (plain.key !== "done_checked" && !plain.nothingWritten) {
           setBatchNote(
             `The save for item ${item.position + 1} may have gone through. OpenAdapt stopped the list so a person can check that record first.`,
@@ -240,12 +279,11 @@ export function RunIt({
     setStates([]);
     setFinished(false);
     setBatchNote("");
+    setStoppedAt(null);
   }
 
   const done = states.filter((item) => item.state === "finished" && item.key === "done_checked").length;
-  const needYou = states.filter(
-    (item) => item.state === "finished" && item.key !== "done_checked",
-  ).length;
+  const needYou = states.filter((item) => item.state === "finished" && item.needsPerson).length;
   const notRun = states.filter(
     (item) =>
       item.state === "refused" ||
@@ -265,7 +303,11 @@ export function RunIt({
     <div className="content simple">
       <PageHead
         title={workflow ? `Run: ${workflow.name}` : "Run it"}
-        sub="Give OpenAdapt the items to work on. It does them one at a time, checks each record after it saves, and stops to ask you when something doesn't match."
+        sub={
+          onlyProblems
+            ? "Only problems come to you. OpenAdapt saves each item without asking first, reads the record back, and stops the list at the first item that needs you."
+            : "Give OpenAdapt the items to work on. It does them one at a time, checks each record after it saves, and stops to ask you when something doesn't match."
+        }
       />
 
       {loadError && (
@@ -462,9 +504,11 @@ export function RunIt({
       {finished && !running && (
         <section className="run-summary" aria-live="polite">
           <h2>
-            {needYou === 0 && notRun === 0
-              ? "All done and checked"
-              : "Finished this list"}
+            {stoppedAt !== null
+              ? `Stopped at item ${stoppedAt + 1}`
+              : needYou === 0 && notRun === 0
+                ? "All done and checked"
+                : "Finished this list"}
           </h2>
           <p>
             {plural(done, "item")} done and checked.
