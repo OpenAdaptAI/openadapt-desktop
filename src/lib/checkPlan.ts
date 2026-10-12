@@ -204,7 +204,9 @@ export function checkPlan(response: QualificationProject): CheckPlan {
       caption: plainStep(node.title || node.action || node.id),
       effects: effects.length
         ? effects.map(describeEffect)
-        : node.effects.map((effect) => sentenceCase(effect.summary || "Saves an entry.")),
+        : node.effects.length
+          ? node.effects.map((effect) => sentenceCase(effect.summary || "Saves an entry."))
+          : ["OpenAdapt doesn't know yet what this step saves."],
       executableRisk: node.risk === "irreversible" ? "irreversible" : "reversible",
       confirmed: Boolean(control?.classification?.operator_confirmed),
       identityArmed,

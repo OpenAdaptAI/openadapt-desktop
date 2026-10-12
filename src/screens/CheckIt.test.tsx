@@ -224,6 +224,7 @@ it("lists a save the program declares without an effect and asks how to check it
   render(<CheckIt workflowId="wf-1" onExactChecks={() => {}} onRun={() => {}} />);
 
   expect(await screen.findByText("Click the spot you clicked when you showed it")).toBeTruthy();
+  expect(screen.getByText("OpenAdapt doesn't know yet what this step saves.")).toBeTruthy();
   expect(screen.getByText("OpenAdapt doesn't know yet how to confirm this save.")).toBeTruthy();
   expect(screen.queryByText(/This task only reads/)).toBeNull();
   expect(screen.getByText(/can't tell yet whether 1 other step changes anything/)).toBeTruthy();
