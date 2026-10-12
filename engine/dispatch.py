@@ -272,6 +272,10 @@ class EngineDispatcher:
             "resolve_attention_item": self.resolve_attention_item,
             "get_attention_screenshot": self.get_attention_screenshot,
             "get_results_summary": self.get_results_summary,
+            # "Only ask a person about problems": read the switch, turn it off.
+            # Nothing here turns it on; that happens in OpenAdapt Cloud.
+            "get_approval_mode": self.get_approval_mode,
+            "turn_off_approval_mode": self.turn_off_approval_mode,
             "run_sample": self.run_sample,
             "teach_fix": self.teach_fix,
             # qualification cockpit (canonical Flow graph/policy/manifests)
@@ -2058,6 +2062,11 @@ class EngineDispatcher:
             "metrics": {"duration_s": duration_s, "cost_usd": cost},
             "outcome_details": outcome_details,
         }
+        from engine.approval_mode import item_approval
+
+        # Flow's per-item approval-mode block, as closed codes. Present only
+        # when the run had an approval gate; Desktop never adds or upgrades it.
+        mapped["approval"] = item_approval(report.get("approval"))
         if error:
             mapped["error"] = error
         return mapped
@@ -3660,9 +3669,11 @@ class EngineDispatcher:
             )
         else:
             result = result_for_run(report)
+            approval = report.get("approval") if isinstance(report.get("approval"), dict) else None
             halt = report.get("halt") if isinstance(report.get("halt"), dict) else {}
             self.services.db.update_work_item(
                 item_id,
+                approval_json=json.dumps(approval, sort_keys=True) if approval else None,
                 run_id=str(report.get("run_id") or ""),
                 execution_outcome=str(report.get("outcome") or "unknown"),
                 transaction_outcome=report.get("transaction_outcome"),
@@ -3672,7 +3683,7 @@ class EngineDispatcher:
                 expected=str((halt or {}).get("expected") or ""),
                 observed=str((halt or {}).get("observed") or ""),
                 duration_s=(report.get("metrics") or {}).get("duration_s"),
-                status=status_after_run(result["key"]),
+                status=status_after_run(result["key"], approval),
                 finished_at=finished,
             )
         self.get_needs_attention()
@@ -3726,7 +3737,7 @@ class EngineDispatcher:
                 }
             )
         items.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
-        return {"ok": True, "items": items}
+        return {"ok": True, "items": items, "switches": self._approval_switches(names)}
 
     def resolve_attention_item(self, **params: Any) -> dict:
         """Record a person's decision on one stopped item.
@@ -3888,7 +3899,13 @@ class EngineDispatcher:
             item = public_item(row)
             item["task_name"] = names.get(row["workflow_id"], row["workflow_id"])
             recent.append(item)
-        return {"ok": True, **summary, "names": names, "recent": recent}
+        return {
+            "ok": True,
+            **summary,
+            "names": names,
+            "recent": recent,
+            "switches": self._approval_switches(names),
+        }
 
     def _demonstration_seconds(self, bundle: dict) -> float | None:
         """How long the person's own recording of the task took, if known."""
@@ -3899,6 +3916,193 @@ class EngineDispatcher:
         if isinstance(duration, (int, float)) and 1 <= duration <= 6 * 3600:
             return float(duration)
         return None
+
+    # ------------------------------------- only ask a person about problems
+
+    def _runner_id(self) -> str | None:
+        try:
+            from engine.auth.store import load_runner_credential
+
+            stored = load_runner_credential(self.config.hosted_host) or {}
+        except Exception:
+            return None
+        runner_id = stored.get("runner_id")
+        return str(runner_id) if runner_id else None
+
+    def _item_running(self, workflow_id: str) -> bool:
+        for item_id in list(self._running_items):
+            row = self.services.db.get_work_item(item_id)
+            if row and row.get("workflow_id") == workflow_id:
+                return True
+        return False
+
+    def _approval_view(self, workflow_id: str) -> dict:
+        """The switch for one task version, with the reasons it can't apply here."""
+
+        from engine.approval_mode import blockers, flow_switch_api, read_switch, store_dir
+
+        bundle = self.services.db.get_bundle(workflow_id) or {}
+        view = read_switch(
+            self.config.data_dir,
+            workflow_id,
+            bundle_dir=self._bundle_dir(workflow_id),
+            runner_id=self._runner_id() if store_dir(
+                self.config.data_dir, workflow_id
+            ).exists() else None,
+            item_running=self._item_running(workflow_id),
+        )
+        if view["state"] == "none":
+            # A switch turned on for another version of the same recording
+            # doesn't carry over: a new version needs its own.
+            capture_id = bundle.get("capture_id")
+            if capture_id:
+                for other in self.services.db.list_bundles(limit=500):
+                    other_id = str(other.get("bundle_id") or "")
+                    if other_id == workflow_id or other.get("capture_id") != capture_id:
+                        continue
+                    try:
+                        sibling = read_switch(
+                            self.config.data_dir, other_id, bundle_dir=None, runner_id=None
+                        )
+                    except Exception:
+                        continue
+                    if sibling["state"] != "none":
+                        view.update(state="off", off_reason="version_changed")
+                        break
+        found = blockers(flow_has_switch=flow_switch_api() is not None)
+        state = view["state"]
+        if state in {"on", "waiting_for_cloud"} and found:
+            # On in Cloud, but this computer doesn't check items before each
+            # save, so the switch changes nothing here.
+            state = "not_used_here"
+        host = str(self.config.hosted_host or "").rstrip("/")
+        cloud_id = bundle.get("workflow_id")
+        return {
+            **view,
+            "state": state,
+            "recorded_state": view["state"],
+            # Design 4: the switch appears only on runners with a current
+            # runner setup. Runner setup isn't built, so Desktop shows the
+            # switch only for a task version that has one on this computer.
+            "visible": view["state"] != "none",
+            "blockers": found,
+            "can_turn_off": view["state"] in {"on", "waiting_for_cloud"},
+            "cloud_url": (
+                f"{host}/dashboard/workflows/{cloud_id}" if host and cloud_id
+                else (f"{host}/dashboard/workflows" if host else None)
+            ),
+        }
+
+    def _approval_switches(self, names: dict) -> list[dict]:
+        """Every task version with a switch on this computer, for the screens."""
+
+        from engine.approval_mode import stored_switch_ids
+
+        switches = []
+        for workflow_id in stored_switch_ids(self.config.data_dir):
+            if self.services.db.get_bundle(workflow_id) is None:
+                continue
+            try:
+                view = self._approval_view(workflow_id)
+            except Exception:
+                logger.exception("Could not read a task's switch")
+                continue
+            switches.append(
+                {
+                    "workflow_id": workflow_id,
+                    "task_name": names.get(workflow_id) or "",
+                    "state": view["state"],
+                    "off_reason": view["off_reason"],
+                    "off_at": view["off_at"],
+                    "off_by_this_computer": view["off_by_this_computer"],
+                    "turned_on": view["turned_on"],
+                    "off_step": self._switch_off_step(workflow_id, view["off_reason"]),
+                }
+            )
+        return switches
+
+    def _switch_off_step(self, workflow_id: str, reason: Any) -> str:
+        """The step a screen-changed switch-off happened at, if Desktop saw it."""
+
+        if reason != "screen_changed":
+            return ""
+        from engine.approval_mode import parse_stored
+
+        for row in self.services.db.list_work_items(workflow_id=workflow_id, limit=200):
+            approval = parse_stored(row.get("approval_json")) or {}
+            if approval.get("switch_off_reason") == "screen_changed":
+                return str(row.get("halt_step") or "")[:300]
+        return ""
+
+    def get_approval_mode(self, **params: Any) -> dict:
+        """The switch "Only ask a person about problems" for one task version.
+
+        Read-only. With ``requirements`` true, and for a switch the task card
+        shows, it also evaluates E1 to E8 through Flow from what this computer
+        knows. Turning the switch on happens in OpenAdapt Cloud only.
+        """
+
+        from engine.approval_mode import SwitchApprovalError, local_requirements
+
+        workflow_id = str(params.get("workflow_id") or "")
+        bundle = self.services.db.get_bundle(workflow_id)
+        if bundle is None:
+            return {"ok": False, "workflow_id": workflow_id, "error": "Unknown task."}
+        try:
+            view = self._approval_view(workflow_id)
+        except SwitchApprovalError as exc:
+            return {"ok": False, "workflow_id": workflow_id, "error": str(exc)}
+        result = {"ok": True, "workflow_id": workflow_id, **view}
+        result["off_step"] = self._switch_off_step(workflow_id, view["off_reason"])
+        if params.get("requirements") and view["visible"]:
+            bundle_dir = self._bundle_dir(workflow_id)
+            # The same rule as the task card's "Ready": certified, then sealed.
+            certified_and_sealed = (
+                str(bundle.get("status") or "") == "certified"
+                and bundle_dir is not None
+                and (bundle_dir / "workflow.json.enc").is_file()
+            )
+            try:
+                from engine.qualification import _load
+
+                workflow = _load(
+                    bundle_dir,
+                    key=self._qualification_bundle_key(workflow_id),
+                )
+            except Exception:
+                result["requirements"] = {
+                    "available": False,
+                    "reason": "version_unreadable",
+                    "items": [],
+                }
+            else:
+                result["requirements"] = local_requirements(
+                    workflow, certified_and_sealed=certified_and_sealed
+                )
+        return result
+
+    def turn_off_approval_mode(self, **params: Any) -> dict:
+        """Turn the switch off for one task version from this computer.
+
+        Anyone here may do it, signed in or not, online or offline. It
+        applies before the next save. Cloud can't turn it back on: Flow
+        refuses any status that doesn't include this computer's latest switch
+        log event. Reporting the switch-off to Cloud isn't built yet.
+        """
+
+        from engine.approval_mode import SwitchApprovalError, turn_off
+
+        workflow_id = str(params.get("workflow_id") or "")
+        if self.services.db.get_bundle(workflow_id) is None:
+            return {"ok": False, "error": "Unknown task."}
+        try:
+            outcome = turn_off(self.config.data_dir, workflow_id)
+        except SwitchApprovalError as exc:
+            return {"ok": False, "error": str(exc)}
+        except Exception:
+            logger.exception("Could not turn the switch off")
+            return {"ok": False, "error": "OpenAdapt couldn't record the switch-off."}
+        return {**outcome, "mode": self.get_approval_mode(workflow_id=workflow_id)}
 
     # ------------------------------------------------------------ sample
 
