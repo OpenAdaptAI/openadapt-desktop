@@ -178,3 +178,34 @@ it("with the switch on in Cloud but not used here, runs the list as before", asy
   expect(engineInvoke).toHaveBeenCalledTimes(2);
   expect(screen.queryByText(/Only problems come to you/)).toBeNull();
 });
+
+it("sends an empty optional field as an empty value, never leaving it to the recording", async () => {
+  vi.mocked(engineTry).mockImplementation(async (command, _params, fallback) => {
+    if (command === CMD.GET_WORKFLOWS) {
+      return [{ id: "wf-1", name: "Add a claim note", steps: 4, readiness: "ready", blocked: false }];
+    }
+    if (command === CMD.GET_TASK_INPUTS) {
+      return {
+        ok: true,
+        workflow_id: "wf-1",
+        inputs: [
+          { name: "member_id", type: "string", secret: false, required: true, example: "M-1", choices: [] },
+          { name: "note", type: "string", secret: false, required: false, example: "Reviewed", choices: [] },
+        ],
+        target: TARGET,
+      };
+    }
+    return fallback;
+  });
+  vi.mocked(engineInvoke).mockResolvedValueOnce(item(0, "VERIFIED", "VERIFIED", "done_checked", false));
+  render(<RunIt workflowId="wf-1" onCheck={() => {}} onNeedsYou={() => {}} onResults={() => {}} />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "Type one" }));
+  fireEvent.change(await screen.findByLabelText("Member ID"), { target: { value: "M-7" } });
+  fireEvent.click(await screen.findByRole("button", { name: "Run 1 item" }));
+
+  await waitFor(() => expect(engineInvoke).toHaveBeenCalledTimes(1));
+  expect(vi.mocked(engineInvoke).mock.calls[0][1]).toEqual(
+    expect.objectContaining({ inputs: { member_id: "M-7", note: "" } }),
+  );
+});

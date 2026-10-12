@@ -130,16 +130,16 @@ export function RunIt({
   const declared = inputs ?? [];
   const parsed = useMemo(() => {
     if (source === "one") {
+      // Every input is sent, an empty field as an explicit empty value. An
+      // omitted input would make the task type the value from its recording.
       const values: Record<string, string> = {};
       for (const input of declared) {
-        if (single[input.name] !== undefined && single[input.name] !== "") {
-          values[input.name] = single[input.name];
-        }
+        values[input.name] = single[input.name] ?? "";
       }
       const problems = declared
         .filter((input) => input.required && !(values[input.name] ?? "").trim())
         .map((input) => `No ${humanizeInput(input.name)}`);
-      const touched = Object.keys(values).length > 0;
+      const touched = Object.values(values).some((value) => value !== "");
       return {
         items: touched ? [{ position: 0, values, problems }] : [],
         header: false,
