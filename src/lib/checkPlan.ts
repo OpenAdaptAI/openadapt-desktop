@@ -160,6 +160,14 @@ function caseView(
   };
 }
 
+/**
+ * Graph node kinds whose steps the graph itself shows: an action is a step,
+ * and a loop's body is drawn inline. Anything else (a sub-task call, a child
+ * program, a kind this version doesn't know) may run steps Check it can't see.
+ */
+const SHOWN_NODE_KINDS = new Set(["action", "terminal", "branch", "loop", "business_decision"]);
+const HIDDEN_STEPS_CAPTION = "Runs a part of the task that isn't shown step by step here";
+
 /** Derive the short path from one qualification projection. */
 export function checkPlan(response: QualificationProject): CheckPlan {
   const actions = response.graph.nodes.filter(
@@ -222,6 +230,28 @@ export function checkPlan(response: QualificationProject): CheckPlan {
   }
   const project = response.project;
   const report = response.report;
+  // The graph draws a call into a reusable sub-task as one node, without the
+  // steps inside it, so a save there never reaches the loop above. Flow's
+  // report still counts and checks every step the program can run. A step
+  // Flow knows about but Check it can't see is never proven read-only.
+  for (const node of response.graph.nodes) {
+    if (!SHOWN_NODE_KINDS.has(node.kind)) {
+      unproven.push({ id: node.id, caption: HIDDEN_STEPS_CAPTION });
+    }
+  }
+  const seen = new Set(actions.map((node) => controls[node.id]?.step_id ?? node.id));
+  const hidden = new Set(
+    (report.refusals ?? [])
+      .map((refusal) => refusal.step_id)
+      .filter((id): id is string => typeof id === "string" && id !== "" && !seen.has(id)),
+  );
+  const unseen = Math.max(
+    hidden.size,
+    typeof report.action_count === "number" ? report.action_count - seen.size : 0,
+  );
+  if (unseen > 0 && !unproven.some((step) => step.caption === HIDDEN_STEPS_CAPTION)) {
+    unproven.push({ id: "__unseen_steps__", caption: HIDDEN_STEPS_CAPTION });
+  }
   const firstWrite = writes[0]?.id ?? null;
   const cases = project
     ? project.cases.map((item) => caseView(project, item, firstWrite))
