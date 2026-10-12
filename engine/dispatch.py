@@ -1165,6 +1165,21 @@ class EngineDispatcher:
         )
         return hashlib.sha256(target_json.encode("utf-8")).hexdigest()
 
+    _ATTACHED_BROWSER_UNSUPPORTED = (
+        "This version of the OpenAdapt engine can't run in your signed-in "
+        "browser. Update OpenAdapt, or clear the signed-in browser address."
+    )
+
+    def _flow_runs_attached_browser(self) -> bool:
+        """Whether the installed Flow honors a signed-in browser address.
+
+        An older engine ignores the address and opens a new, signed-out
+        browser, so Desktop refuses instead of running anyway.
+        """
+
+        supports = getattr(self.services.flow_bridge, "supports_attached_browser_runs", None)
+        return supports is not None and bool(supports())
+
     def replay_workflow(self, **params: Any) -> dict:
         """Replay a bundle locally and return a ``RunReport``-shaped dict."""
         return self._replay_or_run(params, run=False)
@@ -1269,18 +1284,8 @@ class EngineDispatcher:
                 ensure_backend_capability(target.backend, action="run" if run else "replay")
             except CapabilityError as exc:
                 return self._pre_action_refusal(str(exc))
-            if target.browser_cdp_endpoint:
-                supports = getattr(
-                    self.services.flow_bridge, "supports_attached_browser_runs", None
-                )
-                if supports is None or not supports():
-                    # An older engine would ignore the address and open a new,
-                    # signed-out browser. Say so instead of running anyway.
-                    return self._pre_action_refusal(
-                        "This version of the OpenAdapt engine can't run in your "
-                        "signed-in browser. Update OpenAdapt, or clear the "
-                        "signed-in browser address."
-                    )
+            if target.browser_cdp_endpoint and not self._flow_runs_attached_browser():
+                return self._pre_action_refusal(self._ATTACHED_BROWSER_UNSUPPORTED)
         run_id = uuid.uuid4().hex[:8]
         run_dir = self.config.data_dir / "runs" / f"{'run' if run else 'replay'}-{run_id}"
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -1328,6 +1333,15 @@ class EngineDispatcher:
             )
 
             prepared = prepare_flow_config(base_config, target)
+            # The signed-in browser can also come from the operator's own
+            # config file (or the default deployment.json), not only from the
+            # target. Decide from the exact snapshot Flow will receive.
+            if (
+                prepared is not None
+                and prepared.attached_browser
+                and not self._flow_runs_attached_browser()
+            ):
+                return self._pre_action_refusal(self._ATTACHED_BROWSER_UNSUPPORTED)
             log_redactions = prepared.redactions if prepared is not None else ()
             if prepared is None:
                 staged_context = nullcontext(None)

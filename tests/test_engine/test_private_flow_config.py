@@ -349,3 +349,37 @@ def test_signed_in_browser_fields_are_web_only_and_page_needs_an_endpoint() -> N
         )
     blank = ExecutionTarget(backend="web", url="http://127.0.0.1:9301", browser_cdp_endpoint="  ")
     assert blank.browser_cdp_endpoint is None
+
+
+def test_staged_config_says_when_it_names_a_signed_in_browser(tmp_path: Path) -> None:
+    """Desktop refuses an attached run on a Flow that would ignore it, so it
+    must know from the staged snapshot itself, whichever file supplied it."""
+
+    web = ExecutionTarget(backend="web", url="http://127.0.0.1:9401/front/")
+    from_file = tmp_path / "deployment.yaml"
+    from_file.write_text(
+        "backend:\n  kind: web\n  browser_cdp_endpoint: http://127.0.0.1:9334\n"
+    )
+    plain = tmp_path / "plain.yaml"
+    plain.write_text("backend:\n  kind: web\n")
+
+    file_only = prepare_flow_config(from_file, web)
+    assert file_only is not None and file_only.attached_browser is True
+    config_only = prepare_flow_config(from_file, None)
+    assert config_only is not None and config_only.attached_browser is True
+    target_only = prepare_flow_config(
+        plain,
+        ExecutionTarget(
+            backend="web",
+            url="http://127.0.0.1:9401/front/",
+            browser_cdp_endpoint="http://127.0.0.1:9334",
+        ),
+    )
+    assert target_only is not None and target_only.attached_browser is True
+
+    neither = prepare_flow_config(plain, web)
+    assert neither is not None and neither.attached_browser is False
+    other_backend = prepare_flow_config(
+        from_file, ExecutionTarget(backend="windows", agent_url="http://localhost:5001")
+    )
+    assert other_backend is not None and other_backend.attached_browser is False
