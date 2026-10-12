@@ -19,6 +19,9 @@ Who decides what:
   ``approval`` block from the run report and never upgrades it. An item counts
   as saved without a person only when that block says so, both post-run checks
   passed, and the item's transaction outcome is a consistent ``VERIFIED``.
+  Desktop also checks the block against its own records before it lets the
+  item close without a person (:func:`confirm_no_person`); a block it can't
+  confirm needs a person.
 
 What is local, per task version (local bundle id)::
 
@@ -48,6 +51,9 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 ENVELOPE_SCHEMA = "openadapt-desktop.approval-mode-switch/v1"
+#: Where a switch log goes when a switch-off couldn't be appended to it. Flow's
+#: gate reads a missing ``switch.log`` as off.
+UNUSABLE_LOG = "switch.log.unusable"
 TURNED_OFF_SCHEMA = "openadapt-desktop.approval-mode-turned-off/v1"
 
 #: Off reasons Flow's switch log can name (``openadapt_flow.approval_mode``).
@@ -185,13 +191,46 @@ def _write_private_json(path: Path, payload: Mapping[str, Any]) -> None:
     temporary.replace(path)
 
 
+def _stored_switch_id(folder: Path) -> str | None:
+    """The switch id a stored (or archived) switch names, if readable."""
+
+    try:
+        raw = json.loads((folder / "switch.json").read_text(encoding="utf-8"))
+        switch_id = raw["record"]["switch_id"]
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+    return switch_id if isinstance(switch_id, str) else None
+
+
+def _closed_switch_ids(root: Path) -> set[str]:
+    """Every switch id this computer moved aside. None of them may return."""
+
+    found: set[str] = set()
+    try:
+        archived = list((root / "closed").iterdir())
+    except OSError:
+        return found
+    for folder in archived:
+        switch_id = _stored_switch_id(folder)
+        if switch_id:
+            found.add(switch_id)
+    return found
+
+
 def accept_switch(data_dir: Path, bundle_id: str, envelope: Mapping[str, Any]) -> str:
     """Store a switch Cloud turned on, and open its switch log.
 
     For the Cloud status client (not built yet) and for tests. No IPC command
-    calls this, so nothing in Desktop can turn the switch on. A closed switch
-    stays closed: storing a new one moves the old record and log aside.
-    Returns the switch id.
+    calls this, so nothing in Desktop can turn the switch on. Returns the
+    switch id.
+
+    A closed switch stays closed (design 7.6). Desktop refuses a switch id it
+    turned off or moved aside, so a switch-off made here that hasn't reached
+    Cloud can't be undone by Cloud sending the same record again. The switch
+    already in use, sent again unchanged, keeps its log: a fresh log would
+    forget an interrupted item and the problems counted toward
+    ``too_many_problems``. A new switch that replaces a log whose last item
+    never finished first closes that log as ``uncertain_result``.
     """
 
     api = flow_switch_api()
@@ -203,10 +242,62 @@ def accept_switch(data_dir: Path, bundle_id: str, envelope: Mapping[str, Any]) -
     except (ValidationError, ValueError) as exc:
         raise SwitchApprovalError("The switch from OpenAdapt Cloud isn't valid.") from exc
     root = store_dir(data_dir, bundle_id)
+    closed_message = (
+        "That switch was turned off on this computer, and a switch that turned "
+        "off stays off. Turning it on again needs a new switch from OpenAdapt Cloud."
+    )
+    if record.switch_id in _closed_switch_ids(root):
+        raise SwitchApprovalError(closed_message)
+    current_id = _stored_switch_id(root)
+    log_state = None
+    log_readable = False
+    if (root / "switch.log").exists():
+        try:
+            log_state = api["SwitchLog"](root / "switch.log").state()
+            log_readable = True
+        except api["SwitchLogError"]:
+            log_readable = False
+    if current_id is None and log_state is not None:
+        current_id = log_state.switch_id
+    if current_id is not None and current_id == record.switch_id:
+        current_closed = (
+            not log_readable
+            or (log_state is not None and log_state.off_reason is not None)
+            or _read_turned_off(root) is not None
+        )
+        if current_closed:
+            raise SwitchApprovalError(closed_message)
+        if log_state is None or log_state.switch_record_sha256 != record.digest():
+            raise SwitchApprovalError(
+                "OpenAdapt Cloud sent a different record under a switch id this "
+                "computer already uses."
+            )
+        # The same switch, sent again: keep its record and its log.
+        return record.switch_id
+    if log_state is not None and log_state.open_items and log_state.off_reason is None:
+        # An item under the current switch started and never finished, so
+        # its save may have gone through. Close that log the way Flow's gate
+        # would at the next item, so the archive says why it ended. The item
+        # itself waits in Needs you as a record to check (its work item was
+        # queued before the run) and blocks the task's lists.
+        try:
+            api["turn_off"](
+                api["SwitchLog"](root / "switch.log"),
+                api["OffReason"].UNCERTAIN_RESULT,
+                at=datetime.now(timezone.utc).isoformat(),
+            )
+        except api["SwitchLogError"]:
+            pass
     if (root / "switch.json").exists() or (root / "switch.log").exists():
         archive = root / "closed" / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
         archive.mkdir(parents=True, exist_ok=True)
-        for name in ("switch.json", "switch.log", "switch.log.lock", "turned_off.json"):
+        for name in (
+            "switch.json",
+            "switch.log",
+            "switch.log.lock",
+            UNUSABLE_LOG,
+            "turned_off.json",
+        ):
             if (root / name).exists():
                 (root / name).replace(archive / name)
     payload = parsed.model_dump(mode="json", by_alias=True)
@@ -359,6 +450,11 @@ def turn_off(data_dir: Path, bundle_id: str) -> dict[str, Any]:
     Writes Flow's ``switched_off`` event first, so Flow's gate refuses the
     next save without a person, then a local note of when. A broken or missing
     log already reads as off; the note still records the person's choice.
+
+    If the append itself fails while the log still reads as on (for example,
+    on a full disk), the log is moved aside. Flow's gate reads a missing log
+    as off, so the switch-off still applies before the next save. Only if that
+    also fails does turning off report an error.
     """
 
     root = store_dir(data_dir, bundle_id)
@@ -367,6 +463,7 @@ def turn_off(data_dir: Path, bundle_id: str) -> dict[str, Any]:
     now = datetime.now(timezone.utc).isoformat()
     already_off = False
     logged = False
+    moved_aside = False
     api = flow_switch_api()
     if api is not None:
         log = api["SwitchLog"](root / "switch.log")
@@ -379,12 +476,30 @@ def turn_off(data_dir: Path, bundle_id: str) -> dict[str, Any]:
                 logged = True
         except api["SwitchLogError"]:
             logged = False
+        except Exception:
+            try:
+                (root / "switch.log").replace(root / UNUSABLE_LOG)
+                moved_aside = True
+            except OSError as exc:
+                raise SwitchApprovalError(
+                    "OpenAdapt couldn't record the switch-off on this computer."
+                ) from exc
     if not already_off and _read_turned_off(root) is None:
-        _write_private_json(
-            root / "turned_off.json",
-            {"schema": TURNED_OFF_SCHEMA, "at": now, "where": "this_computer"},
-        )
-    return {"ok": True, "already_off": already_off, "logged": logged, "at": now}
+        try:
+            _write_private_json(
+                root / "turned_off.json",
+                {"schema": TURNED_OFF_SCHEMA, "at": now, "where": "this_computer"},
+            )
+        except OSError:
+            if not (logged or moved_aside):
+                raise
+    return {
+        "ok": True,
+        "already_off": already_off,
+        "logged": logged,
+        "moved_aside": moved_aside,
+        "at": now,
+    }
 
 
 def stored_switch_ids(data_dir: Path) -> list[str]:
@@ -456,6 +571,56 @@ def _check(value: Any) -> dict[str, Any] | None:
     return {"code": code, "passed": value.get("passed") is True, "detail": detail}
 
 
+#: Every item check Flow's gate runs in ``problems_only`` (design 7.2).
+REQUIRED_ITEM_CHECKS = frozenset(
+    {
+        "inputs_supplied",
+        "channel",
+        "inputs_strict",
+        "not_a_retry",
+        "record_key_not_recent",
+        "deployment_config",
+        "switch_lease",
+        "not_resumed",
+    }
+)
+#: Every pre-save check (design 7.3) and post-run check (design 7.4).
+REQUIRED_PRE_CHECKS = frozenset(
+    {"switch_on", "signed_in_user", "right_record", "same_screens", "record_check_ready"}
+)
+REQUIRED_POST_CHECKS = frozenset({"verified", "whole_run_clean"})
+
+_OPAQUE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_PREFIXED_SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+#: Why Desktop didn't accept a block's ``no_person`` (closed codes).
+UNCONFIRMED_REASONS = frozenset(
+    {
+        "engine_without_switch",
+        "flow_rejected",
+        "checks_incomplete",
+        "not_verified",
+        "retry_or_repeat",
+        "caller_configuration",
+        "switch_not_on_here",
+        "switch_mismatch",
+    }
+)
+
+
+def _unconfirmed(approval: Mapping[str, Any], reason: str) -> dict[str, Any]:
+    """The same block, now needing a person and never counting as without one."""
+
+    out = dict(approval)
+    out.update(
+        validated=False,
+        decision="unverified",
+        needs_person=True,
+        unconfirmed=reason if reason in UNCONFIRMED_REASONS else "checks_incomplete",
+    )
+    return out
+
+
 def item_approval(raw: Any) -> dict[str, Any] | None:
     """Project Flow's per-item ``approval`` block to closed codes.
 
@@ -463,11 +628,18 @@ def item_approval(raw: Any) -> dict[str, Any] | None:
     A block Flow's own model rejects, or one Desktop can't validate because
     this Flow lacks the model, is kept as ``unverified``: it needs a person
     and never counts as saved without one.
+
+    Desktop is stricter than Flow's model about ``no_person``. Flow's model
+    accepts a ``no_person`` block with no item checks and any non-empty set
+    of passed pre-save checks. Desktop requires every item check, every
+    pre-save check and both post-run checks that Flow's gate runs, each
+    passed, and the switch id and record digest the block was decided under.
     """
 
     if raw is None:
         return None
     validated = False
+    unconfirmed: str | None = None
     try:
         from openadapt_flow.approval_mode.model import ApprovalModeItemEvidence
 
@@ -475,13 +647,19 @@ def item_approval(raw: Any) -> dict[str, Any] | None:
         validated = True
     except ImportError:
         validated = False
+        unconfirmed = "engine_without_switch"
     except (ValidationError, ValueError, TypeError):
         validated = False
+        unconfirmed = "flow_rejected"
     block = raw if isinstance(raw, dict) else {}
 
     def code(name: str) -> str | None:
         value = block.get(name)
         return value if isinstance(value, str) and _CODE.fullmatch(value) else None
+
+    def matching(name: str, pattern: re.Pattern[str]) -> str | None:
+        value = block.get(name)
+        return value if isinstance(value, str) and pattern.fullmatch(value) else None
 
     checks = {
         group: [c for c in (_check(v) for v in block.get(group) or []) if c is not None]
@@ -496,18 +674,42 @@ def item_approval(raw: Any) -> dict[str, Any] | None:
         ),
         None,
     )
+
+    def every_check_passed(group: str, required: frozenset[str]) -> bool:
+        listed = checks[group]
+        return (
+            len(listed) == len(block.get(group) or [])
+            and required <= {check["code"] for check in listed}
+            and all(check["passed"] for check in listed)
+        )
+
+    switch_id = matching("switch_id", _OPAQUE_ID)
+    record_sha256 = matching("switch_record_sha256", _PREFIXED_SHA256)
+    if validated and code("decision") == "no_person" and not (
+        every_check_passed("item_checks", REQUIRED_ITEM_CHECKS)
+        and every_check_passed("pre_checks", REQUIRED_PRE_CHECKS)
+        and every_check_passed("post_checks", REQUIRED_POST_CHECKS)
+        and switch_id is not None
+        and record_sha256 is not None
+        and block.get("switch_log_recorded") is True
+    ):
+        validated = False
+        unconfirmed = "checks_incomplete"
     decision = code("decision") if validated else "unverified"
     needs_person = (block.get("needs_person") is not False) or not validated
     post = {check["code"]: check["passed"] for check in checks["post_checks"]}
     off = code("switch_off_reason")
     return {
         "validated": validated,
+        "unconfirmed": unconfirmed,
         "mode": code("mode"),
         "decision": decision,
         "reason": code("decision_reason"),
         "needs_person": needs_person,
         "counts_toward_problems": block.get("counts_toward_problems") is True,
         "switch_off_reason": off if off in OFF_REASONS else None,
+        "switch_id": switch_id,
+        "switch_record_sha256": record_sha256,
         "failed_check": failed,
         "post_checks": {
             "verified": post.get("verified") is True,
@@ -519,6 +721,51 @@ def item_approval(raw: Any) -> dict[str, Any] | None:
             else 0
         ),
     }
+
+
+def confirm_no_person(
+    approval: Mapping[str, Any] | None,
+    *,
+    consistent_tx: str | None,
+    local_switch: Mapping[str, Any] | None,
+    retry_or_repeat: bool,
+    caller_configuration: bool,
+) -> dict[str, Any] | None:
+    """Desktop's own checks before an item may close without a person.
+
+    Flow decides ``no_person``; Desktop accepts it only when what this
+    computer knows agrees (design 5.2, step 5: the runner uses the switch only
+    if its own records agree). Otherwise the item goes to a person:
+
+    * the transaction outcome is a consistent ``VERIFIED`` (design R1; a
+      ``VERIFIED`` execution outcome with no transaction outcome fails);
+    * the item isn't a retry or a repeat, and the run used the task's own
+      configuration (design 7.2; Desktop knows this, Flow doesn't);
+    * this computer has the switch on for this task version, with the same
+      switch id and record digest the block names.
+
+    Any other block is returned unchanged.
+    """
+
+    if approval is None:
+        return None
+    if approval.get("decision") != "no_person":
+        return dict(approval)
+    if consistent_tx != "VERIFIED":
+        return _unconfirmed(approval, "not_verified")
+    if retry_or_repeat:
+        return _unconfirmed(approval, "retry_or_repeat")
+    if caller_configuration:
+        return _unconfirmed(approval, "caller_configuration")
+    if local_switch is None or local_switch.get("state") != "on":
+        return _unconfirmed(approval, "switch_not_on_here")
+    evidence = local_switch.get("evidence") or {}
+    if (
+        local_switch.get("switch_id") != approval.get("switch_id")
+        or evidence.get("record_sha256") != approval.get("switch_record_sha256")
+    ):
+        return _unconfirmed(approval, "switch_mismatch")
+    return dict(approval)
 
 
 def saved_without_person(approval: Mapping[str, Any] | None, consistent_tx: str | None) -> bool:
@@ -560,6 +807,7 @@ __all__ = [
     "SwitchEnvelope",
     "accept_switch",
     "blockers",
+    "confirm_no_person",
     "flow_switch_api",
     "item_approval",
     "local_requirements",

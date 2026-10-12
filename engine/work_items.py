@@ -109,13 +109,14 @@ def validate_inputs(raw: Any, declared: list[dict]) -> dict[str, Any]:
         values[key] = value
     # A missing input never falls back to the value from the recording: Flow
     # would otherwise fill it with the demonstration's record, and the item
-    # would act on the wrong record.
+    # would act on the wrong record. That holds for optional inputs too: an
+    # omitted optional value would type the demonstration's value on every
+    # item, and the record check would confirm it. An empty value is an
+    # explicit empty value (design 7.2).
     missing = [
         str(spec.get("name"))
         for spec in declared
-        if spec.get("required")
-        and not spec.get("secret")
-        and str(spec.get("name")) not in values
+        if not spec.get("secret") and str(spec.get("name")) not in values
     ]
     if missing:
         raise WorkItemError("This item is missing: " + ", ".join(sorted(missing)) + ".")
@@ -163,18 +164,31 @@ def result_for_run(report: dict) -> dict[str, Any]:
     )
 
 
-def status_after_run(result_key: str, approval: dict | None = None) -> str:
+def status_after_run(
+    result_key: str,
+    approval: dict | None = None,
+    transaction_outcome: str | None = None,
+) -> str:
     """Item status right after its run ends.
 
     Done only when the result is done and checked and, for an item run under
     an approval mode, Flow didn't send it to a person. A save that was
     confirmed but needed a workaround keeps its result word and still waits
-    for a person.
+    for a person. An item Flow decided to save without a person also needs a
+    consistent ``VERIFIED`` transaction outcome (design R1): a ``VERIFIED``
+    execution outcome alone, which reads "Done and checked", isn't enough to
+    close it without anyone looking.
     """
 
     if result_key != DONE_CHECKED:
         return OPEN
-    if approval is not None and approval.get("needs_person") is not False:
+    if approval is None:
+        return DONE
+    if approval.get("needs_person") is not False:
+        return OPEN
+    if approval.get("decision") == "no_person" and transaction_outcome != "VERIFIED":
+        return OPEN
+    if approval.get("decision") not in {"no_person", "not_gated"}:
         return OPEN
     return DONE
 

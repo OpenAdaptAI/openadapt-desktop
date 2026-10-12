@@ -48,11 +48,13 @@ SWITCH_CASES = json.loads((REPO / "src" / "lib" / "outcome-cases.json").read_tex
 def test_the_switch_never_changes_an_outcome_word(case: dict) -> None:
     """Shared with src/lib/approvalMode.test.ts: same cases, same answers."""
 
+    from engine.outcomes import consistent_transaction_outcome
     from engine.work_items import public_item, status_after_run
 
     key = plain_result(case["execution"], case["transaction"])["key"]
     assert key == case["key"]
-    assert status_after_run(key, case["approval"]) == case["status"]
+    consistent = consistent_transaction_outcome(case["execution"], case["transaction"])
+    assert status_after_run(key, case["approval"], consistent) == case["status"]
     item = public_item(
         {
             "item_id": "item-1",
@@ -125,6 +127,25 @@ def test_inputs_must_name_every_declared_input_and_no_secret() -> None:
         validate_inputs({"member_id": "M-2", "note": "x", "extra": "y"}, DECLARED)
     with pytest.raises(WorkItemError, match="can't be empty"):
         validate_inputs({"member_id": "  ", "note": "x"}, DECLARED)
+
+
+def test_an_omitted_optional_input_never_takes_the_recorded_value() -> None:
+    """Attack attempt: leave out an optional input and Flow fills it from the
+    recording, so every item types the demonstration's value and the record
+    check confirms it. Desktop requires every declared input instead."""
+
+    declared = [
+        DECLARED[0],
+        {"name": "note", "type": "string", "secret": False, "required": False,
+         "example": "Reviewed"},
+    ]
+    with pytest.raises(WorkItemError, match="missing: note"):
+        validate_inputs({"member_id": "M-2"}, declared)
+    # An empty value is an explicit empty value, not the recorded one.
+    assert validate_inputs({"member_id": "M-2", "note": ""}, declared) == {
+        "member_id": "M-2",
+        "note": "",
+    }
 
 
 # --------------------------------------------------------------- dispatcher

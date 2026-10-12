@@ -1070,6 +1070,17 @@ class FlowBridge:
             if precise == "VERIFIED":
                 if returncode != 0 or report.get("success") is not True or explicit_halt:
                     return "unknown"
+            transaction = report.get("transaction_outcome")
+            if transaction is not None:
+                from engine.outcomes import consistent_transaction_outcome
+
+                if consistent_transaction_outcome(precise, transaction) is None:
+                    # A transaction outcome that disagrees with the execution
+                    # outcome proves nothing. Dropping it would leave a bare
+                    # VERIFIED, which reads "Done and checked" and closes the
+                    # item without a person, even when Flow said the record
+                    # needs reconciling.
+                    return "unknown"
             return cast(FlowOutcome, precise)
 
         terminal = report.get("terminal_outcome")

@@ -171,8 +171,26 @@ export interface WorkItem {
 
 /** Flow's per-item approval block, projected by engine/approval_mode.py. */
 export interface ItemApproval {
-  /** False when Flow's own model rejected the block; it then needs a person. */
+  /**
+   * False when Flow's own model rejected the block, or when Desktop's own
+   * records didn't confirm a "no_person" decision. The item then needs a
+   * person and never counts as saved without one.
+   */
   validated: boolean;
+  /** Why Desktop didn't accept "no_person" here (a closed code), if it didn't. */
+  unconfirmed?:
+    | "engine_without_switch"
+    | "flow_rejected"
+    | "checks_incomplete"
+    | "not_verified"
+    | "retry_or_repeat"
+    | "caller_configuration"
+    | "switch_not_on_here"
+    | "switch_mismatch"
+    | null;
+  /** The switch the block was decided under (an opaque id), if any. */
+  switch_id?: string | null;
+  switch_record_sha256?: string | null;
   mode: "each_item" | "problems_only" | "not_gated" | null;
   decision:
     | "no_person"

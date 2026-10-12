@@ -3606,6 +3606,14 @@ class EngineDispatcher:
                     f"The save for {label} may have gone through. Check that "
                     "record in Needs you before you run more items."
                 )
+        if self._open_hosted_save_to_check(workflow_id):
+            # Design 7.5: a run of this task that OpenAdapt Cloud started on
+            # this computer may have saved, and nobody has checked it yet.
+            return self._pre_action_refusal(
+                "A run of this task that OpenAdapt Cloud started on this "
+                "computer may have saved. Check that record in Needs you "
+                "before you run more items."
+            )
         digest = inputs_digest(workflow_id, values)
         if not params.get("allow_repeat") and retry_of is None:
             for row in self.services.db.list_work_items(
@@ -3668,8 +3676,30 @@ class EngineDispatcher:
                 finished_at=finished,
             )
         else:
+            from engine.approval_mode import confirm_no_person
+            from engine.outcomes import consistent_transaction_outcome
+
             result = result_for_run(report)
+            consistent_tx = consistent_transaction_outcome(
+                report.get("outcome"), report.get("transaction_outcome")
+            )
             approval = report.get("approval") if isinstance(report.get("approval"), dict) else None
+            if approval is not None and approval.get("decision") == "no_person":
+                # Flow decided this item needs no person. Accept that only when
+                # this computer's own records agree; otherwise a person looks.
+                try:
+                    local_switch = self._approval_view(workflow_id)
+                except Exception:
+                    logger.exception("Could not read the task's switch after a run")
+                    local_switch = None
+                approval = confirm_no_person(
+                    approval,
+                    consistent_tx=consistent_tx,
+                    local_switch=local_switch,
+                    retry_or_repeat=bool(retry_of) or bool(params.get("allow_repeat")),
+                    caller_configuration=params.get("deployment_config") is not None,
+                )
+                report["approval"] = approval
             halt = report.get("halt") if isinstance(report.get("halt"), dict) else {}
             self.services.db.update_work_item(
                 item_id,
@@ -3683,7 +3713,7 @@ class EngineDispatcher:
                 expected=str((halt or {}).get("expected") or ""),
                 observed=str((halt or {}).get("observed") or ""),
                 duration_s=(report.get("metrics") or {}).get("duration_s"),
-                status=status_after_run(result["key"], approval),
+                status=status_after_run(result["key"], approval, consistent_tx),
                 finished_at=finished,
             )
         self.get_needs_attention()
@@ -3928,6 +3958,31 @@ class EngineDispatcher:
             return None
         runner_id = stored.get("runner_id")
         return str(runner_id) if runner_id else None
+
+    def _open_hosted_save_to_check(self, workflow_id: str) -> bool:
+        """An open halt of a Cloud-started run of this task that may have saved.
+
+        Hosted halts carry the Cloud workflow id; a Desktop item carries the
+        local task version. Either id matches. A halt whose run proved that
+        nothing was written doesn't block.
+        """
+
+        from engine.outcomes import plain_result_for_transaction
+
+        bundle = self.services.db.get_bundle(workflow_id) or {}
+        ids = {workflow_id, str(bundle.get("workflow_id") or "")} - {""}
+        try:
+            halts = self.services.db.list_open_halts()
+        except Exception:
+            logger.exception("Could not read open hosted halts")
+            return True
+        for halt in halts:
+            if str(halt.get("workflow_id") or "") not in ids:
+                continue
+            run = self.services.db.get_run(str(halt.get("run_id") or "")) or {}
+            if not plain_result_for_transaction(run.get("status"))["nothing_written"]:
+                return True
+        return False
 
     def _item_running(self, workflow_id: str) -> bool:
         for item_id in list(self._running_items):
