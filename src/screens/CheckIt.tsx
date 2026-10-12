@@ -132,7 +132,13 @@ function targetSummary(target: ExecutionTarget | null): string {
   if (!target) return "Not set";
   const label = TARGETS[target.backend]?.label ?? target.backend;
   const where = target.url || target.macos_app || target.linux_app || target.rdp_host || target.rdp_window || "";
-  return where ? `${label}: ${where}` : label;
+  const summary = where ? `${label}: ${where}` : label;
+  return attachedBrowser(target) ? `${summary}, in your signed-in browser` : summary;
+}
+
+/** Runs attach to the person's signed-in browser instead of opening a new one. */
+function attachedBrowser(target: ExecutionTarget | null): boolean {
+  return Boolean(target?.backend === "web" && target.browser_cdp_endpoint?.trim());
 }
 
 function caseResult(response: { case_run?: RunReport } & Record<string, unknown>) {
@@ -589,7 +595,11 @@ export function CheckIt({
     let latest: QualificationProject | null = null;
     try {
       const parameters = caseParameters();
-      for (const drill of plan.drills.filter((item) => item.status !== "passed")) {
+      const pending = plan.drills.filter((item) => item.status !== "passed");
+      // In the signed-in browser every run starts where the last one ended,
+      // so run one drill and let the person reopen the first screen.
+      const batch = attachedBrowser(target) ? pending.slice(0, 1) : pending;
+      for (const drill of batch) {
         const response = await call(CMD.RUN_QUALIFICATION_CASE, {
           case_id: drill.id,
           parameters_json: parameters,
@@ -606,7 +616,11 @@ export function CheckIt({
       }
       if (latest) {
         setProject(latest);
-        setDrillNote("Every drill ended the way its description says.");
+        setDrillNote(
+          batch.length < pending.length
+            ? "That drill ended the way its description says. Open the screen where the task starts, then run the next drill."
+            : "Every drill ended the way its description says.",
+        );
       }
     } catch (error) {
       fail("The drills didn't finish.", String(error));
@@ -695,6 +709,12 @@ export function CheckIt({
         </div>
       )}
       <p className="simple-sub">Runs in: {targetSummary(target)}</p>
+      {attachedBrowser(target) && (
+        <p className="simple-sub">
+          It starts from the screen your signed-in browser shows. Open the
+          screen where the task starts before you run it.
+        </p>
+      )}
       <details className="technical">
         <summary>Change where it runs</summary>
         <div className="technical-body">
@@ -1014,7 +1034,11 @@ export function CheckIt({
                     disabled={busy !== null || plan.practiceState !== "done"}
                     onClick={() => void runDrills()}
                   >
-                    {busy === "drills" ? "Running the drills…" : "Run the drills"}
+                    {busy === "drills"
+                      ? "Running the drills…"
+                      : attachedBrowser(target)
+                        ? "Run the next drill"
+                        : "Run the drills"}
                   </Button>
                   {plan.practiceState !== "done" && (
                     <span className="simple-sub">Run the practice item first.</span>

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -1103,6 +1104,77 @@ class TestLibraryCommands:
         assert qualification["ok"] is True
         assert qualification["draft_environment"] is False
         assert qualification["project"]["environment"]["application"] == "Reference app"
+
+    @pytest.mark.parametrize("command", ["replay_workflow", "run_workflow"])
+    def test_signed_in_browser_run_refuses_on_a_flow_that_would_ignore_it(
+        self, deps, command: str, monkeypatch
+    ) -> None:
+        """An older Flow drops the signed-in browser address and opens a new,
+        signed-out browser; Desktop must refuse instead of running there."""
+
+        disp, db, _events = deps
+        bundle = disp.config.data_dir / "bundles" / "bnd1"
+        bundle.mkdir(parents=True)
+        db.insert_bundle("bnd1", str(bundle), capture_id="cap1")
+        monkeypatch.setattr(
+            "engine.capabilities.ensure_backend_capability",
+            lambda *_args, **_kwargs: None,
+        )
+
+        class Bridge:
+            called = False
+
+            def supports_attached_browser_runs(self) -> bool:
+                return False
+
+            def replay(self, *_args, **_kwargs):
+                self.called = True
+                raise AssertionError("must not reach Flow")
+
+            run = replay
+
+        bridge = Bridge()
+        disp.services._flow_bridge = bridge
+        result = disp.dispatch(
+            command,
+            {
+                "workflow_id": "bnd1",
+                "target": {
+                    "backend": "web",
+                    "url": "http://127.0.0.1:9401/front/",
+                    "browser_cdp_endpoint": "http://127.0.0.1:9334",
+                },
+            },
+        )
+
+        assert result["pre_action_refusal"] is True
+        assert "signed-in browser" in result["error"]
+        assert bridge.called is False
+
+    def test_signed_in_browser_address_does_not_change_the_reviewed_target(
+        self,
+    ) -> None:
+        from engine.targets import ExecutionTarget
+
+        plain = ExecutionTarget(backend="web", url="http://127.0.0.1:9301/")
+        attached = ExecutionTarget(
+            backend="web",
+            url="http://127.0.0.1:9301/",
+            browser_cdp_endpoint="http://127.0.0.1:9334",
+        )
+        digest = EngineDispatcher._canonical_target_digest
+        assert digest(plain) == digest(attached)
+        # Digests made before the field existed stay valid.
+        legacy = json.dumps(
+            {
+                key: value
+                for key, value in plain.model_dump(mode="json").items()
+                if key not in {"browser_cdp_endpoint", "browser_page_url"}
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        assert digest(plain) == hashlib.sha256(legacy.encode("utf-8")).hexdigest()
 
     @pytest.mark.parametrize("command", ["replay_workflow", "run_workflow"])
     def test_normal_execution_cannot_bypass_the_active_first_review(

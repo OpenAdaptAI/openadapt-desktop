@@ -1152,8 +1152,14 @@ class EngineDispatcher:
 
     @staticmethod
     def _canonical_target_digest(target: Any) -> str:
+        # The signed-in browser a run attaches to is how it reaches the app,
+        # not which app it is. Leaving it out keeps the reviewed application
+        # identity stable (and every digest made before these fields existed).
         target_json = json.dumps(
-            target.model_dump(mode="json"),
+            target.model_dump(
+                mode="json",
+                exclude={"browser_cdp_endpoint", "browser_page_url"},
+            ),
             sort_keys=True,
             separators=(",", ":"),
         )
@@ -1263,6 +1269,18 @@ class EngineDispatcher:
                 ensure_backend_capability(target.backend, action="run" if run else "replay")
             except CapabilityError as exc:
                 return self._pre_action_refusal(str(exc))
+            if target.browser_cdp_endpoint:
+                supports = getattr(
+                    self.services.flow_bridge, "supports_attached_browser_runs", None
+                )
+                if supports is None or not supports():
+                    # An older engine would ignore the address and open a new,
+                    # signed-out browser. Say so instead of running anyway.
+                    return self._pre_action_refusal(
+                        "This version of the OpenAdapt engine can't run in your "
+                        "signed-in browser. Update OpenAdapt, or clear the "
+                        "signed-in browser address."
+                    )
         run_id = uuid.uuid4().hex[:8]
         run_dir = self.config.data_dir / "runs" / f"{'run' if run else 'replay'}-{run_id}"
         run_dir.mkdir(parents=True, exist_ok=True)

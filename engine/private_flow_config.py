@@ -23,6 +23,8 @@ from engine.targets import ExecutionTarget
 
 _PHI_CAPABLE_BACKEND_KEYS = {
     "url",
+    "browser_cdp_endpoint",
+    "browser_page_url",
     "agent_url",
     "macos_app",
     "macos_window_title",
@@ -35,7 +37,7 @@ _PHI_CAPABLE_BACKEND_KEYS = {
 }
 
 _BACKEND_FIELDS_BY_KIND: dict[str, set[str]] = {
-    "web": {"url", "headed"},
+    "web": {"url", "headed", "browser_cdp_endpoint", "browser_page_url"},
     "windows": {"agent_url", "agent_token", "agent_tls_pin"},
     "macos": {"macos_app", "macos_window_title"},
     "linux": {

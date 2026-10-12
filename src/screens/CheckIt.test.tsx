@@ -364,3 +364,44 @@ it("asks plain questions when the recording can't show how to confirm the save",
   ).toBeTruthy();
 });
 
+it("runs one drill at a time in the signed-in browser", async () => {
+  const ready = project({
+    cases: [
+      { id: "practice-1", kind: "representative", status: "passed" },
+      { id: "fault-identity-swap", kind: "wrong_identity", status: null },
+      { id: "fault-missing-effect", kind: "missing_effect", status: null },
+    ],
+  });
+  engine(ready);
+  vi.mocked(engineTry).mockImplementation(async (command, _params, fallback) => {
+    if (command === CMD.GET_WORKFLOWS) return [{ id: "wf-1", name: "Add a claim note", steps: 2 }];
+    if (command === CMD.GET_TASK_INPUTS) {
+      return {
+        ok: true,
+        workflow_id: "wf-1",
+        inputs: [{ name: "member_id", type: "string", secret: false, required: true, example: "M-1", choices: [] }],
+        target: { backend: "web", url: "http://127.0.0.1:9401/front/", browser_cdp_endpoint: "http://127.0.0.1:9334" },
+      };
+    }
+    return fallback;
+  });
+  const ran: string[] = [];
+  vi.mocked(engineInvoke).mockImplementation(async (command, params) => {
+    if (command === CMD.GET_QUALIFICATION) return ready;
+    if (command === CMD.RUN_QUALIFICATION_CASE) {
+      const call = params as { case_id: string; target: { browser_cdp_endpoint?: string } };
+      expect(call.target.browser_cdp_endpoint).toBe("http://127.0.0.1:9334");
+      ran.push(call.case_id);
+      return ready;
+    }
+    throw new Error(`unexpected ${command}`);
+  });
+  render(<CheckIt workflowId="wf-1" onExactChecks={() => {}} onRun={() => {}} />);
+
+  expect(await screen.findByText(/in your signed-in browser/)).toBeTruthy();
+  expect(screen.getByText(/Open the screen where the task starts before you run it/)).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Run the next drill" }));
+
+  expect(await screen.findByText(/then run the next drill/)).toBeTruthy();
+  expect(ran).toEqual(["fault-identity-swap"]);
+});
