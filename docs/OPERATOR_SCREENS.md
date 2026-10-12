@@ -116,7 +116,14 @@ Safety rules:
 - Anyone at this computer can turn it off, signed in or not, offline too.
   Desktop appends Flow's `switched_off` event to the runner's hash-chained
   switch log, which Flow's gate reads before every save, so the switch-off
-  applies before the next save and Cloud can't undo it.
+  applies before the next save and Cloud can't undo it. If the append
+  fails (for example, on a full disk), Desktop moves the log aside, and
+  Flow's gate reads a missing log as off.
+- A switch that turned off stays off. `accept_switch` refuses a switch id
+  this computer turned off or moved aside, and the same switch sent again
+  keeps its log, so its interrupted items and problem count survive. A new
+  switch that replaces a log with an unfinished item first closes that log
+  as `uncertain_result`.
 - A switch Desktop can't read or confirm reads as off: a broken or missing
   log, a record for another version or runner, an item that started and
   never finished. A switch for one version never carries over to a new one.
@@ -124,7 +131,29 @@ Safety rules:
   block says `no_person`, both post-run checks (R1 and R2) passed, and the
   transaction outcome is a consistent `VERIFIED`. A block Flow's model
   rejects needs a person. A `VERIFIED` execution outcome with no
-  transaction outcome never counts.
+  transaction outcome never counts, and the item waits in Needs you.
+- Desktop also checks `no_person` against what it knows (design 5.2, step
+  5). The block must list every item check, every pre-save check and both
+  post-run checks Flow's gate runs, each passed, and name the switch it was
+  decided under. This computer must have that switch on for the task
+  version, and the item must not be a retry, a repeat or a run with a
+  caller-supplied configuration. Otherwise the item waits in Needs you, and
+  its approval block says why (`unconfirmed`). Flow's own evidence model is
+  looser: it accepts `no_person` with no item checks.
+- A run whose transaction outcome disagrees with its execution outcome
+  reads "Check the record" (`engine/flow_bridge.py`, `classify_outcome`).
+  Before, Desktop dropped the disagreeing transaction outcome and kept a
+  bare `VERIFIED`, which closed the item as "Done and checked".
+- A pasted list never changes a value on the way to the task. A row with
+  more values than columns ("Smith, Jane" in a one-column list) or a
+  missing cell doesn't run. A value with a comma runs when it's in quotes.
+- No input takes the value from the recording, optional ones included
+  (design 7.2). `run_item` refuses an item that leaves out any declared
+  input; an empty value is an explicit empty value. A pasted list needs a
+  column for every input, and Type one sends an empty field as empty.
+- A run of the task that OpenAdapt Cloud started on this computer, and that
+  may have saved, blocks the task's lists until a person checks it in
+  Needs you, the same as a Desktop item (design 7.5).
 - The switch never changes an outcome word. A save the record check
   confirmed that still went to a person keeps "Done and checked", waits in
   Needs you, blocks more items of the task, and offers no re-run.
