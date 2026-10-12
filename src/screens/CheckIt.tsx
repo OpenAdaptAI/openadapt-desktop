@@ -414,8 +414,15 @@ export function CheckIt({
       for (const step of plan.writes.filter((item) => !item.confirmed)) {
         const control = latest.controls.actions[step.id];
         const current = control?.classification?.classification;
+        // Never confirm a save as weaker than Flow's executable floor: an
+        // irreversible step confirmed as "consequential" is a conflict Flow
+        // refuses to approve.
         const risk =
-          current && current !== "unknown" && current !== "read_only" ? current : "consequential";
+          step.executableRisk === "irreversible"
+            ? "irreversible"
+            : current && current !== "unknown" && current !== "read_only"
+              ? current
+              : "consequential";
         const response = await call(CMD.SET_QUALIFICATION_RISK, {
           step_id: step.id,
           risk,
@@ -770,10 +777,15 @@ export function CheckIt({
       {plan && (
         <div className="check-list">
           <CheckSection index={1} title="What it changes" state={foundState(plan.changes)}>
-            {plan.writes.length === 0 ? (
+            {plan.writes.length === 0 && plan.unproven.length === 0 ? (
               <p>
                 This task only reads. None of its steps saves anything, so there's
                 no record to check.
+              </p>
+            ) : plan.writes.length === 0 ? (
+              <p>
+                OpenAdapt can't tell yet whether this task saves anything, so it
+                won't treat it as a task that only reads.
               </p>
             ) : (
               <>
@@ -789,11 +801,32 @@ export function CheckIt({
                 </ul>
                 {plan.readCount > 0 && (
                   <p className="simple-sub">
-                    The other {plan.readCount} step{plan.readCount === 1 ? "" : "s"} only read
-                    or move around in the app.
+                    {plan.readCount} other step{plan.readCount === 1 ? " only reads or moves" : "s only read or move"}{" "}
+                    around in the app.
                   </p>
                 )}
               </>
+            )}
+            {plan.unproven.length > 0 && (
+              <div className="unproven-steps">
+                <p className="simple-sub">
+                  {plan.writes.length === 0
+                    ? `${plan.unproven.length} step${plan.unproven.length === 1 ? "" : "s"} might change something.`
+                    : `OpenAdapt can't tell yet whether ${plan.unproven.length} other step${plan.unproven.length === 1 ? "" : "s"} change${plan.unproven.length === 1 ? "s" : ""} anything.`}{" "}
+                  Before you approve the task, say what each one does in Advanced:
+                  exact checks.
+                </p>
+                <details className="technical">
+                  <summary>
+                    Show {plan.unproven.length === 1 ? "it" : `the ${plan.unproven.length} steps`}
+                  </summary>
+                  <ul className="technical-body">
+                    {plan.unproven.map((step) => (
+                      <li key={step.id}>{step.caption}</li>
+                    ))}
+                  </ul>
+                </details>
+              </div>
             )}
           </CheckSection>
 
@@ -802,6 +835,12 @@ export function CheckIt({
             title="How it makes sure it's the right record"
             state={foundState(plan.rightRecord)}
           >
+            {plan.writes.length === 0 && plan.unproven.length > 0 && (
+              <p>
+                This depends on part 1. Once OpenAdapt knows which step saves,
+                it asks how to recognize the right record.
+              </p>
+            )}
             {plan.writes.map((step) => (
               <div className="check-detail" key={step.id}>
                 <p>{step.identityText}</p>
@@ -827,6 +866,12 @@ export function CheckIt({
             title="How it confirms the save"
             state={foundState(plan.recordCheck)}
           >
+            {plan.writes.length === 0 && plan.unproven.length > 0 && (
+              <p>
+                This depends on part 1. Once OpenAdapt knows which step saves,
+                it asks how to confirm the save.
+              </p>
+            )}
             {plan.writes.map((step) => (
               <div className="check-detail" key={step.id}>
                 <p>{step.checkText}</p>
@@ -847,7 +892,10 @@ export function CheckIt({
                 )}
               </div>
             ))}
-            {(!plan.hasProject || plan.changes === "todo") && (
+            {/* Nobody can vouch for "what it changes" while OpenAdapt can't
+                say which step saves; that answer goes in the exact checks. */}
+            {(!plan.hasProject || plan.changes === "todo") &&
+              !(plan.writes.length === 0 && plan.unproven.length > 0) && (
               <div className="check-actions">
                 <Button
                   variant="primary"

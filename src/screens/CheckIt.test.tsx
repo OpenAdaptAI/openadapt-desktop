@@ -131,7 +131,109 @@ it("says what the task changes and how it checks, in plain words", async () => {
   ).toBeTruthy();
   expect(screen.getByText(/matches the member ID you give it/)).toBeTruthy();
   expect(screen.getByText(/reads the record back from your system's records/)).toBeTruthy();
-  expect(screen.getByText(/The other 1 step only read/)).toBeTruthy();
+  // The search step has no reviewed classification, so it isn't counted among
+  // the steps that only read.
+  expect(screen.queryByText(/only reads? or move/)).toBeNull();
+  expect(screen.getByText(/can't tell yet whether 1 other step changes anything/)).toBeTruthy();
+});
+
+it("counts a step as read-only only when it is classified read-only", async () => {
+  const reviewed = project();
+  (reviewed.controls.actions as Record<string, unknown>).search = {
+    step_id: "search",
+    execution_paths: ["gui"],
+    classification: { step_id: "search", classification: "read_only", explanation: "", operator_confirmed: true },
+    identity: { can_arm: false, armed: false, sources: [], policy: null },
+    effects: [],
+  };
+  engine(reviewed);
+  render(<CheckIt workflowId="wf-1" onExactChecks={() => {}} onRun={() => {}} />);
+
+  expect(await screen.findByText(/1 other step only reads or moves around in the app/)).toBeTruthy();
+  expect(screen.queryByText(/can't tell yet/)).toBeNull();
+});
+
+/** The claims program as the old engine compiled it: every step reversible,
+ * no step with an effect, Save included, and no reviewed classification. */
+function unprovenProgram() {
+  const base = project({ confirmed: false });
+  base.graph.nodes = [
+    { id: "step_000", index: 0, kind: "action", title: "type <insurance_no>", effects: [], postconditions: [], halts: [], badges: [], risk: "reversible" },
+    { id: "step_008", index: 1, kind: "action", title: "scroll by (0, 400)", effects: [], postconditions: [], halts: [], badges: [], risk: "reversible" },
+    { id: "step_012", index: 2, kind: "action", title: "click '日'", effects: [], postconditions: [], halts: [], badges: [], risk: "reversible" },
+  ];
+  const unknown = (id: string) => ({
+    step_id: id,
+    execution_paths: ["gui"],
+    classification: { step_id: id, classification: "unknown", explanation: "", operator_confirmed: false },
+    identity: { can_arm: false, armed: false, sources: [], policy: null },
+    effects: [],
+  });
+  base.controls.actions = {
+    step_000: unknown("step_000"),
+    step_008: {
+      ...unknown("step_008"),
+      classification: { step_id: "step_008", classification: "read_only", explanation: "", operator_confirmed: true },
+    },
+    step_012: unknown("step_012"),
+  } as unknown as typeof base.controls.actions;
+  return base;
+}
+
+it("never calls a task read-only while a step's effect is unknown", async () => {
+  engine(unprovenProgram());
+  render(<CheckIt workflowId="wf-1" onExactChecks={() => {}} onRun={() => {}} />);
+
+  expect(await screen.findByText(/can't tell yet whether this task saves anything/)).toBeTruthy();
+  expect(screen.queryByText(/This task only reads/)).toBeNull();
+  expect(screen.getByText(/2 steps might change something/)).toBeTruthy();
+  expect(screen.getByText("Type the insurance no")).toBeTruthy();
+  expect(screen.getByText("Click “日”")).toBeTruthy();
+  // Parts 1-3 ask for an answer instead of saying "Not needed", and nobody is
+  // offered a button to vouch for an answer OpenAdapt doesn't have.
+  expect(screen.getAllByText("Needs an answer").length).toBeGreaterThanOrEqual(3);
+  expect(screen.queryByText("Not needed")).toBeNull();
+  expect(screen.queryByRole("button", { name: "These look right" })).toBeNull();
+  const run = screen.getByRole("button", { name: "Run the practice item" });
+  expect((run as HTMLButtonElement).disabled).toBe(true);
+});
+
+it("says a task only reads when every step is proven read-only", async () => {
+  const readOnly = unprovenProgram();
+  readOnly.graph.nodes = [readOnly.graph.nodes[1]];
+  engine(readOnly);
+  render(<CheckIt workflowId="wf-1" onExactChecks={() => {}} onRun={() => {}} />);
+
+  expect(await screen.findByText(/This task only reads/)).toBeTruthy();
+});
+
+it("lists a save the program declares without an effect and asks how to check it", async () => {
+  // The fixed engine: the icon-only Save is irreversible with no effect yet.
+  const fixed = unprovenProgram();
+  fixed.graph.nodes[2] = { ...fixed.graph.nodes[2], title: "click recorded visual target", risk: "irreversible" };
+  engine(fixed);
+  vi.mocked(engineInvoke).mockImplementation(async (command, params) => {
+    if (command === CMD.GET_QUALIFICATION) return fixed;
+    if (command === CMD.SET_QUALIFICATION_RISK) {
+      // Confirming must not record the save as weaker than Flow's floor.
+      expect(params).toEqual(expect.objectContaining({ step_id: "step_012", risk: "irreversible" }));
+      return fixed;
+    }
+    throw new Error(`unexpected ${command}`);
+  });
+  render(<CheckIt workflowId="wf-1" onExactChecks={() => {}} onRun={() => {}} />);
+
+  expect(await screen.findByText("Click the spot you clicked when you showed it")).toBeTruthy();
+  expect(screen.getByText("OpenAdapt doesn't know yet how to confirm this save.")).toBeTruthy();
+  expect(screen.queryByText(/This task only reads/)).toBeNull();
+  expect(screen.getByText(/can't tell yet whether 1 other step changes anything/)).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "These look right" }));
+  await waitFor(() =>
+    expect(vi.mocked(engineInvoke)).toHaveBeenCalledWith(
+      CMD.SET_QUALIFICATION_RISK,
+      expect.objectContaining({ risk: "irreversible" }),
+    ),
+  );
 });
 
 it("accepts the recording's proposal when nothing is confirmed yet", async () => {
@@ -261,3 +363,4 @@ it("asks plain questions when the recording can't show how to confirm the save",
     await screen.findByText(/opens the record again in a separate session and reads it/),
   ).toBeTruthy();
 });
+
