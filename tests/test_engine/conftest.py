@@ -62,7 +62,9 @@ def fake_keyring(monkeypatch) -> FakeKeyring:
     import keyring
 
     def _real_keychain(*_args, **_kwargs):
-        pytest.fail("test reached the real OS keychain; call openadapt_desktop.auth.store._keyring()")
+        pytest.fail(
+            "test reached the real OS keychain; call openadapt_desktop.auth.store._keyring()"
+        )
 
     for name in ("get_password", "set_password", "delete_password"):
         monkeypatch.setattr(keyring, name, _real_keychain)
