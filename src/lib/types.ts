@@ -977,7 +977,8 @@ export interface ReplayProgress {
 }
 
 export interface SyncState {
-  state: "synced" | "pushing" | "offline" | "paused";
+  /** ``local``: not signed in to Cloud, so nothing is backed up there. */
+  state: "synced" | "pushing" | "offline" | "paused" | "local";
   queued: number;
 }
 

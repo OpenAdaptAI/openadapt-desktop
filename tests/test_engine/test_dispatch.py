@@ -2270,14 +2270,52 @@ class TestLibraryCommands:
         assert len(calls) == 1
 
 
+def _sign_in(disp) -> None:
+    from engine.auth.store import store_credential
+
+    store_credential(
+        {
+            "kind": "ingest_token",
+            "token": "oai_ingest_sync",
+            "refresh_token": None,
+            "org_id": "org_1",
+            "host": disp.config.hosted_host,
+            "expires_at": None,
+        }
+    )
+
+
 class TestSyncCommands:
     def test_pause_resume_sync(self, deps) -> None:
         disp, _db, events = deps
+        _sign_in(disp)
         disp.dispatch("pause_sync", {})
         assert disp.dispatch("get_sync_state", {})["state"] == "paused"
         disp.dispatch("resume_sync", {})
         assert disp.dispatch("get_sync_state", {})["state"] == "synced"
         assert any(e == "sync_state" for e, _ in events)
+
+    def test_local_only_is_never_called_synced(self, deps) -> None:
+        """Without a Cloud sign-in nothing is backed up, so the state says local."""
+
+        disp, _db, events = deps
+        assert disp.dispatch("get_auth_status", {})["authenticated"] is False
+
+        assert disp.dispatch("get_sync_state", {})["state"] == "local"
+        assert disp.dispatch("pause_sync", {})["state"] == "local"
+        assert disp.dispatch("resume_sync", {})["state"] == "local"
+        assert disp.dispatch("get_sync_state", {})["state"] == "local"
+        assert not [d for e, d in events if e == "sync_state" and d["state"] == "synced"]
+
+    def test_sign_in_and_out_update_the_sync_state(self, deps) -> None:
+        disp, _db, events = deps
+        _sign_in(disp)
+        assert disp.dispatch("get_sync_state", {})["state"] == "synced"
+
+        disp.dispatch("logout", {})
+
+        assert disp.dispatch("get_sync_state", {})["state"] == "local"
+        assert ("sync_state", {"state": "local", "queued": 0}) in events
 
     def test_needs_attention(self, deps) -> None:
         disp, db, events = deps

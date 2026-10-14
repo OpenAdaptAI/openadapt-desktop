@@ -3665,20 +3665,30 @@ class EngineDispatcher:
             "error": result.get("error", ""),
         }
 
+    def _sync_state_now(self) -> str:
+        """``local`` without a Cloud sign-in: nothing is backed up then."""
+        try:
+            signed_in = bool(self.get_auth_status().get("authenticated"))
+        except Exception:
+            logger.exception("Could not read the Cloud sign-in for the sync state")
+            signed_in = False
+        if not signed_in:
+            return "local"
+        return "paused" if self._sync_paused else "synced"
+
     def get_sync_state(self, **params: Any) -> dict:
         """Return the current :class:`SyncState`-shaped sync status."""
-        state = "paused" if self._sync_paused else "synced"
-        return {"state": state, "queued": 0}
+        return {"state": self._sync_state_now(), "queued": 0}
 
     def pause_sync(self, **params: Any) -> dict:
         """Pause the upload/sync queue and emit ``sync_state``."""
         self._sync_paused = True
-        return self._emit_sync("paused")
+        return self._emit_sync(self._sync_state_now())
 
     def resume_sync(self, **params: Any) -> dict:
         """Resume the upload/sync queue and emit ``sync_state``."""
         self._sync_paused = False
-        return self._emit_sync("synced")
+        return self._emit_sync(self._sync_state_now())
 
     def _emit_sync(self, state: str) -> dict:
         payload = {"state": state, "queued": 0}
@@ -4779,6 +4789,7 @@ class EngineDispatcher:
             return {"authenticated": False, "error": str(exc)}
         self.config.hosted_host = host
         self._persist_config_key("hosted_host", host)
+        self._emit_sync(self._sync_state_now())
         return self._auth_status(cred)
 
     def login_paste(self, **params: Any) -> dict:
@@ -4797,6 +4808,7 @@ class EngineDispatcher:
             return {"authenticated": False, "error": str(exc)}
         self.config.hosted_host = host
         self._persist_config_key("hosted_host", host)
+        self._emit_sync(self._sync_state_now())
         return self._auth_status(cred)
 
     def connect_uri(self, **params: Any) -> dict:
@@ -4815,6 +4827,7 @@ class EngineDispatcher:
             "pairing_state",
             {"status": "connected", "host": host},
         )
+        self._emit_sync(self._sync_state_now())
         return result
 
     def _authoring_service(self) -> Any:
@@ -4876,6 +4889,7 @@ class EngineDispatcher:
             if not canonical_host_origin(stored_host):
                 return {"authenticated": False, "error": "Hosted origin is invalid"}
             clear_credential(stored_host)
+        self._emit_sync(self._sync_state_now())
         return {"authenticated": False}
 
     def get_auth_status(self, **params: Any) -> dict:

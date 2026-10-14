@@ -201,7 +201,8 @@ export default function App() {
 
   const [engineUp, setEngineUp] = useState(false);
   const [recording, setRecording] = useState(false);
-  const [sync, setSync] = useState<SyncState>({ state: "synced", queued: 0 });
+  // Unknown until the engine reports it: never assume Cloud has a copy.
+  const [sync, setSync] = useState<SyncState | null>(null);
   const [breaks, setBreaks] = useState(0);
   const [pairing, setPairing] = useState<PairingState | null>(null);
   const [authoring, setAuthoring] = useState<{
@@ -295,7 +296,7 @@ export default function App() {
           { count: 0, open_halts: 0, failed_runs: 0 },
         );
         setBreaks(na.count);
-        const ss = await engineTry<SyncState>(CMD.GET_SYNC_STATE, {}, sync);
+        const ss = await engineTry<SyncState | null>(CMD.GET_SYNC_STATE, {}, sync);
         setSync(ss);
         const authoringStatus = await engineTry<{
           status: string;
@@ -721,13 +722,14 @@ export default function App() {
   const activeTab = tabFor(route);
   const cloudConnected = Boolean(auth?.authenticated);
   const syncTone =
-    sync.state === "offline"
-      ? "off"
-      : sync.state === "pushing"
+    sync?.state === "synced"
+      ? "ok"
+      : sync?.state === "pushing"
         ? "run"
-        : sync.state === "paused"
+        : sync?.state === "paused"
           ? "warn"
-          : "ok";
+          : "off";
+  const syncLabel = sync?.state === "local" ? "Local only" : sync?.state;
 
   return (
     <>
@@ -780,10 +782,10 @@ export default function App() {
                   <strong>Recording</strong>
                 </span>
               ) : null}
-              {cloudConnected && sync.state !== "synced" && (
-                <span title={`Cloud: ${sync.state}`}>
+              {cloudConnected && sync && sync.state !== "synced" && (
+                <span title={`Cloud: ${syncLabel}`}>
                   <StatusDot tone={syncTone} />
-                  <strong>{sync.state}</strong>
+                  <strong>{syncLabel}</strong>
                   {sync.queued ? <small>{sync.queued}</small> : null}
                 </span>
               )}
