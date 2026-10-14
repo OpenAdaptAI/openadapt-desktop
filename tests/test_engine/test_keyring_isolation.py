@@ -36,19 +36,22 @@ def _store_helper_bindings(tree: ast.AST, package: tuple[str, ...]) -> list[tupl
             module = node.module or ""
         if module == "openadapt_desktop.auth.store":
             bindings.extend(
-                (node.lineno, alias.name)
-                for alias in node.names
-                if alias.name in _KEYRING_HELPERS
+                (node.lineno, alias.name) for alias in node.names if alias.name in _KEYRING_HELPERS
             )
     return bindings
 
 
 def test_guard_detects_by_name_binding():
-    absolute = ast.parse("from openadapt_desktop.auth.store import DEFAULT_HOST, _keyring, _kr_get\n")
+    absolute = ast.parse(
+        "from openadapt_desktop.auth.store import DEFAULT_HOST, _keyring, _kr_get\n"
+    )
     relative = ast.parse("from .store import (\n    _kr_set,\n)\n")
     attribute = ast.parse("from openadapt_desktop.auth import store as _store\n")
 
-    assert _store_helper_bindings(absolute, ("openadapt_desktop",)) == [(1, "_keyring"), (1, "_kr_get")]
+    assert _store_helper_bindings(absolute, ("openadapt_desktop",)) == [
+        (1, "_keyring"),
+        (1, "_kr_get"),
+    ]
     assert _store_helper_bindings(relative, ("openadapt_desktop", "auth")) == [(1, "_kr_set")]
     assert _store_helper_bindings(attribute, ("openadapt_desktop",)) == []
 
