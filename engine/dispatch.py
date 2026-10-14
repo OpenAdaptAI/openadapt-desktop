@@ -4013,14 +4013,16 @@ class EngineDispatcher:
         has checked the record yet, or when the same item is already done.
         """
 
+        from engine.item_vault import ItemVaultError
         from engine.work_items import (
+            CLOSED_STATUSES,
             COMPLETED_STATUSES,
             OPEN,
             TEACHING,
             WorkItemError,
             blocks_more_runs,
-            inputs_digest,
             item_label,
+            legacy_inputs_digest,
             new_id,
             public_item,
             result_for_run,
@@ -4064,13 +4066,20 @@ class EngineDispatcher:
                 "computer may have saved. Check that record in Needs you "
                 "before you run more items."
             )
-        digest = inputs_digest(workflow_id, values)
+        # The item's values are stored sealed with the keychain key. Without
+        # the key Desktop can neither store them privately nor tell whether
+        # this item is already done, so nothing runs.
+        try:
+            digest = self.services.db.work_item_digest(workflow_id, values)
+        except ItemVaultError as exc:
+            return self._pre_action_refusal(str(exc))
+        done_digests = {digest, legacy_inputs_digest(workflow_id, values)}
         if not params.get("allow_repeat") and retry_of is None:
             for row in self.services.db.list_work_items(
                 workflow_id=workflow_id,
                 statuses=tuple(COMPLETED_STATUSES),
             ):
-                if row.get("inputs_digest") == digest:
+                if row.get("inputs_digest") in done_digests:
                     return self._pre_action_refusal(
                         "This item is already done, so OpenAdapt didn't enter "
                         "it again."
@@ -4082,16 +4091,19 @@ class EngineDispatcher:
         except (TypeError, ValueError):
             position = 0
         item_id = new_id("item")
-        self.services.db.insert_work_item(
-            item_id,
-            batch_id=batch_id,
-            workflow_id=workflow_id,
-            position=position,
-            label=item_label(values, declared),
-            inputs_json=json.dumps(values, sort_keys=True),
-            inputs_digest=digest,
-            retry_of=str(retry_of) if retry_of else None,
-        )
+        try:
+            self.services.db.insert_work_item(
+                item_id,
+                batch_id=batch_id,
+                workflow_id=workflow_id,
+                position=position,
+                label=item_label(values, declared),
+                inputs_json=json.dumps(values, sort_keys=True),
+                inputs_digest=digest,
+                retry_of=str(retry_of) if retry_of else None,
+            )
+        except ItemVaultError as exc:
+            return self._pre_action_refusal(str(exc))
         execution: dict[str, Any] = {
             "workflow_id": workflow_id,
             "_item_inputs": values,
@@ -4166,6 +4178,11 @@ class EngineDispatcher:
                 status=status_after_run(result["key"], approval, consistent_tx),
                 finished_at=finished,
             )
+        row = self.services.db.get_work_item(item_id)
+        if row and row.get("status") in CLOSED_STATUSES:
+            # Nothing reads a closed item's values again; its digest still
+            # marks it done.
+            self.services.db.clear_work_item_inputs(item_id)
         self.get_needs_attention()
         row = self.services.db.get_work_item(item_id)
         return {
@@ -4228,6 +4245,8 @@ class EngineDispatcher:
         """
 
         from engine.work_items import (
+            CLOSED_STATUSES,
+            RETRIED,
             TEACHING,
             WorkItemError,
             check_action,
@@ -4254,6 +4273,17 @@ class EngineDispatcher:
         except WorkItemError as exc:
             return {"ok": False, "error": str(exc)}
         status = resolution_status(action)
+        if status == RETRIED and row.get("sealed_unreadable"):
+            # The values are sealed with a key this computer no longer has.
+            # Running the item again with anything else could act on the
+            # wrong record.
+            return {
+                "ok": False,
+                "error": (
+                    "OpenAdapt can't read this item's values on this computer, "
+                    "so it didn't start it again."
+                ),
+            }
         self.services.db.update_work_item(
             item_id,
             status=status,
@@ -4261,6 +4291,8 @@ class EngineDispatcher:
         )
         resolved = public_item(self.services.db.get_work_item(item_id) or row)
         if action not in {"retry", "retry_after_check"}:
+            if status in CLOSED_STATUSES:
+                self.services.db.clear_work_item_inputs(item_id)
             self.get_needs_attention()
             return {"ok": True, "resolved": resolved}
         rerun_params: dict[str, Any] = {
@@ -4282,6 +4314,8 @@ class EngineDispatcher:
                 "ok": False,
                 "error": rerun.get("error") or "OpenAdapt didn't start the new run.",
             }
+        # The new item carries the values from here on.
+        self.services.db.clear_work_item_inputs(item_id)
         return {"ok": True, "resolved": resolved, **rerun}
 
     def get_attention_screenshot(self, **params: Any) -> dict:

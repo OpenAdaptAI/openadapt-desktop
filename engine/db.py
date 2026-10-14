@@ -14,6 +14,14 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
+from engine.item_vault import (
+    DIGEST_PREFIX,
+    SEALED_COLUMNS,
+    ItemVault,
+    ItemVaultError,
+    is_sealed,
+    open_vault,
+)
 from engine.private_fs import ensure_private_dir, secure_sqlite_files
 
 _CAPTURES_COLUMNS = frozenset({
@@ -161,6 +169,15 @@ CREATE TABLE IF NOT EXISTS work_items (
     approval_json TEXT
 );
 
+-- The keychain key that seals work-item values (engine/item_vault.py). Only
+-- the key's id and a check value are here; the key is in the OS keychain.
+CREATE TABLE IF NOT EXISTS item_vault (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    key_id TEXT NOT NULL,
+    key_check TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
 -- Where a task was recorded, so Check it and Run it start from the same app.
 -- Local only: a target can name an internal host or window.
 CREATE TABLE IF NOT EXISTS task_targets (
@@ -190,6 +207,7 @@ class IndexDB:
     def __init__(self, db_path: Path) -> None:
         self._db_path = db_path
         self._conn: sqlite3.Connection | None = None
+        self._vault: ItemVault | None = None
 
     def initialize(self) -> None:
         """Open or create the database, enable WAL mode, create tables."""
@@ -203,9 +221,13 @@ class IndexDB:
         self._conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
+        # Overwrite deleted and replaced content, so a value replaced by its
+        # ciphertext doesn't linger in a free page of the file.
+        self._conn.execute("PRAGMA secure_delete=ON")
         secure_sqlite_files(self._db_path)
         self._conn.executescript(_SCHEMA)
         self._migrate()
+        self._seal_legacy_work_items()
 
     def _migrate(self) -> None:
         """Add columns/tables missing from databases created by older versions."""
@@ -226,6 +248,149 @@ class IndexDB:
         if "approval_json" not in work_item_columns:
             self._conn.execute("ALTER TABLE work_items ADD COLUMN approval_json TEXT")
         self._conn.commit()
+
+    # --- Work-item values at rest (engine/item_vault.py) ---
+
+    def _seal_legacy_work_items(self) -> None:
+        """Seal work-item values that an earlier version stored in plain text.
+
+        A closed item's input values are dropped, because nothing reads them
+        again. The rest are sealed with the keychain key, and each digest is
+        recomputed under that key. Without a working keychain the values of
+        open items stay as they are until the next start, because a retry
+        still needs them; their digests keep the old form, which the
+        duplicate check still recognizes.
+        """
+
+        from engine.work_items import CLOSED_STATUSES
+
+        plain = " OR ".join(
+            f"({column} IS NOT NULL AND {column} != '' AND {column} NOT LIKE 'enc:v1:%'"
+            + (" AND inputs_json != '{}')" if column == "inputs_json" else ")")
+            for column in SEALED_COLUMNS
+        )
+        rows = [
+            dict(row)
+            for row in self.conn.execute(f"SELECT * FROM work_items WHERE {plain}").fetchall()
+        ]
+        if not rows:
+            return
+        vault = self._vault_or_none()
+        for row in rows:
+            fields: dict[str, object] = {}
+            closed = row.get("status") in CLOSED_STATUSES
+            digest = str(row.get("inputs_digest") or "")
+            if vault is not None and not digest.startswith(DIGEST_PREFIX):
+                try:
+                    values = json.loads(row.get("inputs_json") or "")
+                except ValueError:
+                    values = None
+                if isinstance(values, dict) and not is_sealed(row.get("inputs_json")):
+                    fields["inputs_digest"] = vault.digest(str(row["workflow_id"]), values)
+            if closed:
+                fields["inputs_json"] = "{}"
+            if vault is not None:
+                for column in SEALED_COLUMNS:
+                    value = fields.get(column, row.get(column))
+                    if column == "inputs_json" and value == "{}":
+                        continue
+                    if isinstance(value, str) and value and not is_sealed(value):
+                        fields[column] = vault.seal(
+                            value, item_id=str(row["item_id"]), column=column
+                        )
+            if fields:
+                sets = ", ".join(f"{column} = ?" for column in fields)
+                self.conn.execute(
+                    f"UPDATE work_items SET {sets} WHERE item_id = ?",
+                    [*fields.values(), row["item_id"]],
+                )
+        self.conn.commit()
+        # Rewrite the file so no page still holds the old plain text. Best
+        # effort: another process holding the database open makes it wait
+        # until a later start; the values themselves are already sealed.
+        try:
+            self.conn.execute("VACUUM")
+            self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except sqlite3.OperationalError:
+            pass
+        secure_sqlite_files(self._db_path)
+
+    def _item_vault(self) -> ItemVault:
+        """This database's vault. Creates the key only for a database without one."""
+
+        if self._vault is not None:
+            return self._vault
+        conn = self.conn
+        # Two processes on one database (the sidecar and the CLI) must not
+        # each create a key: take the write lock before looking.
+        own_transaction = not conn.in_transaction
+        if own_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute(
+                "SELECT key_id, key_check FROM item_vault WHERE singleton = 1"
+            ).fetchone()
+            vault, key_id, key_check = open_vault(
+                row["key_id"] if row else None,
+                row["key_check"] if row else None,
+            )
+            if row is None:
+                conn.execute(
+                    "INSERT INTO item_vault (singleton, key_id, key_check, created_at)"
+                    " VALUES (1, ?, ?, ?)",
+                    (key_id, key_check, _now()),
+                )
+            if own_transaction:
+                conn.commit()
+        except BaseException:
+            if own_transaction:
+                conn.rollback()
+            raise
+        self._vault = vault
+        return vault
+
+    def work_item_digest(self, workflow_id: str, values: dict) -> str:
+        """Keyed digest of one item's values, for the duplicate check.
+
+        Raises:
+            ItemVaultError: The keychain key isn't available. Nothing may run.
+        """
+
+        return self._item_vault().digest(workflow_id, values)
+
+    def _seal_fields(self, item_id: str, fields: dict[str, object]) -> dict[str, object]:
+        sealed = dict(fields)
+        for column in SEALED_COLUMNS:
+            value = sealed.get(column)
+            if isinstance(value, str) and value and not is_sealed(value):
+                sealed[column] = self._item_vault().seal(value, item_id=item_id, column=column)
+        return sealed
+
+    def _vault_or_none(self) -> ItemVault | None:
+        try:
+            return self._item_vault()
+        except ItemVaultError:
+            return None
+
+    def _open_work_item(self, row: sqlite3.Row, vault: object = ...) -> dict:
+        item = dict(row)
+        columns = [column for column in SEALED_COLUMNS if is_sealed(item.get(column))]
+        if not columns:
+            return item
+        if vault is ...:
+            vault = self._vault_or_none()
+        for column in columns:
+            try:
+                if not isinstance(vault, ItemVault):
+                    raise ItemVaultError("The key for this item isn't available.")
+                item[column] = vault.open(
+                    str(item[column]), item_id=str(item["item_id"]), column=column
+                )
+            except ItemVaultError:
+                # Fail closed: an unreadable value is never shown or reused.
+                item[column] = None if column == "inputs_json" else ""
+                item["sealed_unreadable"] = True
+        return item
 
     def close(self) -> None:
         """Close the database connection."""
@@ -586,7 +751,16 @@ class IndexDB:
         inputs_digest: str,
         retry_of: str | None = None,
     ) -> None:
-        """Record one queued item before its run starts."""
+        """Record one queued item before its run starts.
+
+        The label and input values are sealed with the keychain key.
+
+        Raises:
+            ItemVaultError: The keychain key isn't available; nothing is stored.
+        """
+        sealed = self._seal_fields(item_id, {"label": label, "inputs_json": inputs_json})
+        label = str(sealed["label"])
+        inputs_json = str(sealed["inputs_json"])
         self.conn.execute(
             "INSERT INTO work_items (item_id, batch_id, workflow_id, position, label,"
             " inputs_json, inputs_digest, status, retry_of, created_at)"
@@ -610,7 +784,7 @@ class IndexDB:
         row = self.conn.execute(
             "SELECT * FROM work_items WHERE item_id = ?", (item_id,)
         ).fetchone()
-        return dict(row) if row else None
+        return self._open_work_item(row) if row else None
 
     def list_work_items(
         self,
@@ -630,11 +804,29 @@ class IndexDB:
             params.extend(statuses)
         query += " ORDER BY created_at DESC, position DESC LIMIT ?"
         params.append(limit)
-        return [dict(r) for r in self.conn.execute(query, params).fetchall()]
+        rows = self.conn.execute(query, params).fetchall()
+        sealed = any(is_sealed(row[column]) for row in rows for column in SEALED_COLUMNS)
+        # Open the keychain once per listing, not once per row.
+        vault = self._vault_or_none() if sealed else None
+        return [self._open_work_item(row, vault) for row in rows]
 
     def update_work_item(self, item_id: str, **fields: object) -> None:
-        """Update fields on one work item."""
-        _update(self.conn, "work_items", "item_id", item_id, fields, _WORK_ITEM_COLUMNS)
+        """Update fields on one work item. Record text is sealed first."""
+        _update(
+            self.conn,
+            "work_items",
+            "item_id",
+            item_id,
+            self._seal_fields(item_id, fields),
+            _WORK_ITEM_COLUMNS,
+        )
+
+    def clear_work_item_inputs(self, item_id: str) -> None:
+        """Drop a closed item's input values; its digest still marks it done."""
+        self.conn.execute(
+            "UPDATE work_items SET inputs_json = '{}' WHERE item_id = ?", (item_id,)
+        )
+        self.conn.commit()
 
 
 def _update(

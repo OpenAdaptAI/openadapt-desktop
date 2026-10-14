@@ -15,8 +15,10 @@ local index database so that three things stay true:
   record. An item whose run proved that nothing was written may run again.
 
 Input values can identify a patient. They stay in the local database inside
-the customer boundary, reach Flow only through a private short-lived params
-file, and never appear in events, logs, notifications, or Cloud payloads.
+the customer boundary, sealed with a key from the OS keychain
+(``engine/item_vault.py``), and are dropped once the item is closed. They
+reach Flow only through a private short-lived params file, and never appear
+in events, logs, notifications, or Cloud payloads.
 """
 
 from __future__ import annotations
@@ -126,8 +128,13 @@ def validate_inputs(raw: Any, declared: list[dict]) -> dict[str, Any]:
     return values
 
 
-def inputs_digest(workflow_id: str, values: dict[str, Any]) -> str:
-    """Stable digest of one item's values for duplicate and retry checks."""
+def legacy_inputs_digest(workflow_id: str, values: dict[str, Any]) -> str:
+    """The unkeyed digest that earlier versions stored for each item.
+
+    New items store a keyed digest (``IndexDB.work_item_digest``). The
+    duplicate check still matches this form, so an item an earlier version
+    finished is never entered again.
+    """
 
     canonical = json.dumps(
         {"workflow_id": workflow_id, "inputs": values},
@@ -380,8 +387,8 @@ __all__ = [
     "allowed_actions",
     "blocks_more_runs",
     "check_action",
-    "inputs_digest",
     "item_label",
+    "legacy_inputs_digest",
     "new_id",
     "public_item",
     "resolution_status",

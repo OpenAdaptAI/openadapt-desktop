@@ -47,6 +47,9 @@ on every task.
 - Item values reach Flow only through an owner-only params file that exists
   for the length of the call. They never enter a process argument list, an
   event, a log line, a notification, or a Cloud payload.
+- The index database stores item values, labels, and right-record check text
+  encrypted, with the key in the OS keychain. A closed item's values are
+  deleted. Without the key, `run_item` refuses before anything runs.
 - Results count an item as done only when its transaction outcome is
   `VERIFIED`. Items a person finished count under "Needed a person".
 - A first task leaves the read-only first-run path only before anything ran.
