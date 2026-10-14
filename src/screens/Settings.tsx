@@ -1,7 +1,13 @@
 // Settings — deployment lane, PHI mode, hosted host, auth, and updater.
 // Lane and PHI mode are the PHI-boundary routing controls (spec §1.3/§3e).
 import { useEffect, useState } from "react";
-import { CMD, engineInvoke, engineTry, openExternal } from "../lib/engine";
+import {
+  CMD,
+  engineInvoke,
+  engineTry,
+  openExternal,
+  updaterAvailable,
+} from "../lib/engine";
 import type {
   AuthStatus,
   DeploymentLane,
@@ -22,6 +28,8 @@ import {
   overlayPresentationEnabled,
   saveOverlayPresentation,
 } from "../overlay/preferences";
+
+const RELEASES_URL = "https://github.com/OpenAdaptAI/openadapt-desktop/releases";
 
 interface Cfg {
   host: string;
@@ -44,6 +52,8 @@ export function Settings({
     phi_mode: "off",
   });
   const [updateMsg, setUpdateMsg] = useState<string | null>(null);
+  // Null until the shell says whether this build can update itself.
+  const [canUpdate, setCanUpdate] = useState<boolean | null>(null);
   const [policy, setPolicy] = useState<EffectivePolicy | null>(null);
   const [includeOverlay, setIncludeOverlay] = useState(
     overlayPresentationEnabled,
@@ -57,6 +67,7 @@ export function Settings({
     // cloud control plane and fetched fail-closed by the engine. Read-only here;
     // degrade to null (managed-in-cloud note) if the engine cannot resolve it.
     engineTry<EffectivePolicy | null>(CMD.GET_EFFECTIVE_POLICY, {}, null).then(setPolicy);
+    void updaterAvailable().then(setCanUpdate);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -97,7 +108,10 @@ export function Settings({
         setUpdateMsg(`Installed ${update.version}. Restart to apply.`);
       }
     } catch (e) {
-      setUpdateMsg(`Update check unavailable: ${String(e)}`);
+      console.warn("update check failed", e);
+      setUpdateMsg(
+        "OpenAdapt couldn't check for updates. Try again later, or get the latest version from the releases page.",
+      );
     }
   }
 
@@ -258,12 +272,23 @@ export function Settings({
       <Card>
         <CardHead
           title="Version and updates"
-          sub="Automatic updates stay off until signed releases ship. Each new release has to be installed by hand."
+          sub={
+            canUpdate
+              ? "Check for a new version and install it from here."
+              : "Automatic updates stay off until signed releases ship. Each new release has to be installed by hand."
+          }
         />
         <div className="row">
-          <Button variant="ghost" onClick={checkUpdate}>
-            Check for updates
-          </Button>
+          {canUpdate ? (
+            <Button variant="ghost" onClick={checkUpdate}>
+              Check for updates
+            </Button>
+          ) : null}
+          {canUpdate === false ? (
+            <Button variant="ghost" onClick={() => void openExternal(RELEASES_URL)}>
+              Open the releases page
+            </Button>
+          ) : null}
           {updateMsg && <span className="page-sub">{updateMsg}</span>}
         </div>
         <div style={{ marginTop: "var(--space-4)" }}>

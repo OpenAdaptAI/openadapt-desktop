@@ -194,6 +194,19 @@ export async function sidecarRunning(): Promise<boolean> {
   }
 }
 
+/**
+ * Did this build register the updater plugin? Only a build with an update
+ * feed does. False outside Tauri, and false if the shell can't say.
+ */
+export async function updaterAvailable(): Promise<boolean> {
+  if (!inTauri()) return false;
+  try {
+    return (await invoke<boolean>("updater_available")) === true;
+  } catch {
+    return false;
+  }
+}
+
 /** Show/hide the always-on-top control overlay without requesting focus. */
 export async function setControlOverlayVisible(visible: boolean): Promise<void> {
   if (!inTauri()) return;
