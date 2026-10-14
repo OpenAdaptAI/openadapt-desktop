@@ -5,7 +5,7 @@
 // and whether this version is approved and sealed. Nothing is inferred from
 // the UI. The full contract stays in "Advanced: exact checks".
 
-import { humanizeInput, plainStep, sentenceCase } from "./outcomes";
+import { humanizeInput, plainStep, plainTargetStep, sentenceCase } from "./outcomes";
 import type {
   QualificationEditableEffect,
   QualificationNode,
@@ -172,6 +172,17 @@ function caseView(
 const SHOWN_NODE_KINDS = new Set(["action", "terminal", "branch", "loop", "business_decision"]);
 const HIDDEN_STEPS_CAPTION = "Runs a part of the task that isn't shown step by step here";
 
+/** The control a step clicks, by its structure, before the OCR-based title. */
+function stepCaption(
+  node: QualificationNode,
+  control: QualificationProject["controls"]["actions"][string] | undefined,
+): string {
+  return (
+    plainTargetStep(node.action, control?.target) ??
+    plainStep(node.title || node.action || node.id)
+  );
+}
+
 /** Derive the short path from one qualification projection. */
 export function checkPlan(response: QualificationProject): CheckPlan {
   const actions = response.graph.nodes.filter(
@@ -200,7 +211,7 @@ export function checkPlan(response: QualificationProject): CheckPlan {
       if (classification === "read_only" && control?.classification?.operator_confirmed) {
         readCount += 1;
       } else {
-        unproven.push({ id: node.id, caption: plainStep(node.title || node.action || node.id) });
+        unproven.push({ id: node.id, caption: stepCaption(node, control) });
       }
       continue;
     }
@@ -213,7 +224,7 @@ export function checkPlan(response: QualificationProject): CheckPlan {
       .filter((tier): tier is number => typeof tier === "number");
     writes.push({
       id: node.id,
-      caption: plainStep(node.title || node.action || node.id),
+      caption: stepCaption(node, control),
       effects: effects.length
         ? effects.map(describeEffect)
         : node.effects.length

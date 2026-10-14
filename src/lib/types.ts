@@ -517,6 +517,8 @@ export interface QualificationEditableEffect {
 
 export interface QualificationActionControls {
   step_id: string;
+  /** Role and accessible name the recorder saved for the clicked control. */
+  target?: { role?: string | null; name?: string | null } | null;
   execution_paths: ("gui" | "api")[];
   classification?: {
     step_id: string;

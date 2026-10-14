@@ -379,6 +379,26 @@ def task_parameters(bundle_dir: Path, *, bundle_key: str | None = None) -> list[
     return declared_parameters(_load(bundle_dir, key=bundle_key))
 
 
+def _target_view(step) -> dict[str, str | None] | None:
+    """The role and accessible name the recorder saved for a step's target.
+
+    Check it labels a step by this when it exists. Flow's step title quotes
+    OCR text, which can misread a control (a State list showing "Unassigned"
+    became "Jnassigned"). Only the role and name leave the engine, never the
+    selector, frame path or pixels.
+    """
+
+    anchor = getattr(step, "anchor", None)
+    structural = getattr(anchor, "structural", None) if anchor is not None else None
+    if structural is None:
+        return None
+    role = (structural.role or "").strip() or None
+    name = (structural.name or "").strip() or None
+    if role is None and name is None:
+        return None
+    return {"role": role, "name": name}
+
+
 def _qualification_controls(workflow, graph: dict[str, Any]) -> dict[str, Any]:
     """Project writable controls from the executable workflow and canonical project."""
 
@@ -407,6 +427,7 @@ def _qualification_controls(workflow, graph: dict[str, Any]) -> dict[str, Any]:
         identity_policy = project.identity_policies.get(step.id) if project is not None else None
         actions[node["id"]] = {
             "step_id": step.id,
+            "target": _target_view(step),
             "execution_paths": sorted(executable_actuation_paths(step)),
             "classification": (classification.model_dump(mode="json") if classification else None),
             "identity": {

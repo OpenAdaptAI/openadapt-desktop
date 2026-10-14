@@ -736,6 +736,50 @@ def test_inspection_reports_a_save_the_graph_hides_inside_a_sub_task(
     assert "save" in {refusal.get("step_id") for refusal in inspected["report"]["refusals"]}
 
 
+def test_controls_name_each_click_target_from_structure_not_ocr(tmp_path: Path) -> None:
+    """Check it labels a step by the control it clicks, not by OCR text.
+
+    OCR read the State list's current value "Unassigned" as "Jnassigned", and
+    Flow's step intent kept the misread. The recorder also captured the
+    control's role and accessible name, which Check it can show instead.
+    """
+
+    bundle = _bundle(
+        tmp_path / "bundle",
+        Step(
+            id="state",
+            intent="click 'Jnassigned'",
+            action=ActionKind.CLICK,
+            anchor=Anchor(
+                template="state.png",
+                region=(0, 0, 20, 20),
+                click_point=(10, 10),
+                ocr_text="Jnassigned",
+                structural=StructuralLocator(
+                    selector="#form_state", role="combobox", name="form_state"
+                ),
+            ),
+        ),
+        Step(
+            id="pixels",
+            intent="click 'Save'",
+            action=ActionKind.CLICK,
+            anchor=Anchor(
+                template="save.png",
+                region=(0, 0, 20, 20),
+                click_point=(10, 10),
+                ocr_text="Save",
+            ),
+        ),
+    )
+
+    inspected = inspect_bundle(bundle, workflow_id="wf-1")
+
+    actions = inspected["controls"]["actions"]
+    assert actions["state"]["target"] == {"role": "combobox", "name": "form_state"}
+    assert actions["pixels"]["target"] is None
+
+
 def test_encrypted_bundle_inspect_mutate_and_reseal_stays_ciphertext_only(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
