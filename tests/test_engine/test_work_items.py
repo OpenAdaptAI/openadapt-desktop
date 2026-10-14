@@ -206,6 +206,9 @@ class _Bridge:
     def ensure_browser_runtime(self, _progress) -> None:
         pass
 
+    def supports_approval_gate(self) -> bool:
+        return True
+
     def run(self, bundle, config, out_dir=None, params_file=None, env_overrides=None, **_k):
         from engine.flow_bridge import FlowResult
 
@@ -216,7 +219,15 @@ class _Bridge:
                 "mode": oct(Path(params_file).stat().st_mode & 0o777),
                 "values": json.loads(Path(params_file).read_text()),
             }
-        self.calls.append({"bundle": bundle, "config": config, "params_file": staged})
+        self.calls.append(
+            {
+                "bundle": bundle,
+                "config": config,
+                "params_file": staged,
+                "approval_mode": _k.get("approval_mode"),
+                "approval_wait_s": _k.get("approval_wait_s"),
+            }
+        )
         report = self.reports.pop(0)
         (out_dir / "report.json").write_text(json.dumps(report))
         return FlowResult(

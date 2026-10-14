@@ -28,9 +28,11 @@ use, so constructing a dispatcher is cheap and side-effect-free.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import sys
+import threading
 import time
 import uuid
 from contextlib import nullcontext
@@ -229,6 +231,12 @@ class EngineDispatcher:
         # Work items whose run this engine process started and hasn't
         # finished. A queued item that isn't here was interrupted.
         self._running_items: set[str] = set()
+        # Runs that may stop before a save and wait for a person to approve
+        # it, keyed by run directory. Read by ``get_item_approval`` and
+        # ``answer_item_approval``, which the IPC wire serves while a run
+        # waits (they never take the dispatch lock).
+        self._approval_watches: dict[str, dict[str, Any]] = {}
+        self._approval_lock = threading.Lock()
         self._coach: dict[str, Any] = {}
         self._handlers: dict[str, Callable[..., dict | None]] = {}
         self._register()
@@ -272,6 +280,10 @@ class EngineDispatcher:
             "resolve_attention_item": self.resolve_attention_item,
             "get_attention_screenshot": self.get_attention_screenshot,
             "get_results_summary": self.get_results_summary,
+            # Each save waits for a person (Flow's ``each_item`` gate). These
+            # two answer a waiting run while it runs.
+            "get_item_approval": self.get_item_approval,
+            "answer_item_approval": self.answer_item_approval,
             # "Only ask a person about problems": read the switch, turn it off.
             # Nothing here turns it on; that happens in OpenAdapt Cloud.
             "get_approval_mode": self.get_approval_mode,
@@ -1173,6 +1185,17 @@ class EngineDispatcher:
         "This version of the OpenAdapt engine can't run in your signed-in "
         "browser. Update OpenAdapt, or clear the signed-in browser address."
     )
+    _APPROVAL_GATE_UNSUPPORTED = (
+        "This version of the OpenAdapt engine can't stop for your approval "
+        "before each save, so OpenAdapt didn't start. Update OpenAdapt, then "
+        "try again."
+    )
+
+    def _flow_gates_each_save(self) -> bool:
+        """Whether the installed Flow stops before each save for a person."""
+
+        supports = getattr(self.services.flow_bridge, "supports_approval_gate", None)
+        return supports is not None and bool(supports())
 
     def _flow_runs_attached_browser(self) -> bool:
         """Whether the installed Flow honors a signed-in browser address.
@@ -1290,12 +1313,24 @@ class EngineDispatcher:
                 return self._pre_action_refusal(str(exc))
             if target.browser_cdp_endpoint and not self._flow_runs_attached_browser():
                 return self._pre_action_refusal(self._ATTACHED_BROWSER_UNSUPPORTED)
+        qualification_case_execution = params.get("_qualification_case_execution")
+        # Every Desktop run of real items stops before each save until a
+        # person approves it (Flow's ``each_item``). A config without a
+        # profile isn't gated unless the caller asks, so Desktop always asks.
+        # The practice case of Check it is gated by Flow itself; a drill never
+        # asks. A Flow that can't gate never runs.
+        gated_run = run and qualification_case_execution is None
+        practice_case = (
+            qualification_case_execution is not None
+            and qualification_case_execution.get("kind") == "representative"
+        )
+        if (gated_run or practice_case) and not self._flow_gates_each_save():
+            return self._pre_action_refusal(self._APPROVAL_GATE_UNSUPPORTED)
         run_id = uuid.uuid4().hex[:8]
         run_dir = self.config.data_dir / "runs" / f"{'run' if run else 'replay'}-{run_id}"
         run_dir.mkdir(parents=True, exist_ok=True)
         params_file = None
         qualification_case_id = params.get("_qualification_case_id")
-        qualification_case_execution = params.get("_qualification_case_execution")
         # One work item's validated input values (see ``run_item``). They reach
         # Flow only through a private params file that exists for the length of
         # the call; the values never enter argv, events, or logs.
@@ -1418,9 +1453,26 @@ class EngineDispatcher:
                         return self._pre_action_refusal(
                             "Desktop could not save the supervised run state."
                         )
+                watch = None
+                if gated_run or practice_case:
+                    watch = self._open_approval_watch(
+                        workflow_id=str(workflow_id),
+                        run_dir=run_dir,
+                        kind="practice" if practice_case else "item",
+                        values=(
+                            item_inputs
+                            if isinstance(item_inputs, dict)
+                            else (qualification_case_execution or {}).get("values")
+                        ),
+                    )
                 try:
                     invocation_started = True
                     if run:
+                        from engine.flow_bridge import (
+                            APPROVAL_WAIT_S,
+                            DESKTOP_APPROVAL_MODE,
+                        )
+
                         # A missing historical default stays fail-loud in Flow.
                         config_path = staged_config or default_config
                         run_kwargs: dict[str, Any] = {"out_dir": run_dir}
@@ -1429,6 +1481,9 @@ class EngineDispatcher:
                         if bundle_env:
                             run_kwargs["env_overrides"] = bundle_env
                         if qualification_case_execution is not None:
+                            case_kwargs: dict[str, Any] = {}
+                            if practice_case:
+                                case_kwargs["approval_wait_s"] = APPROVAL_WAIT_S
                             result = self.services.flow_bridge.qualify_run_case(
                                 bundle,
                                 config_path,
@@ -1438,11 +1493,14 @@ class EngineDispatcher:
                                 run_id=run_id,
                                 out_dir=run_dir,
                                 env_overrides=bundle_env,
+                                **case_kwargs,
                             )
                         else:
                             result = self.services.flow_bridge.run(
                                 bundle,
                                 config_path,
+                                approval_mode=DESKTOP_APPROVAL_MODE,
+                                approval_wait_s=APPROVAL_WAIT_S,
                                 **run_kwargs,
                             )
                     else:
@@ -1459,6 +1517,9 @@ class EngineDispatcher:
                     # Once invocation begins, delivery/effect state is unknown.
                     # Never echo exception text: it may contain config values.
                     result = None
+                finally:
+                    if watch is not None:
+                        self._close_approval_watch(watch)
         except Exception as exc:
             from engine.private_flow_config import PrivateFlowConfigError
 
@@ -2837,6 +2898,7 @@ class EngineDispatcher:
         )
         from engine.qualification_lifecycle import (
             retain_capability_observation,
+            retain_drill_evidence,
             retain_run_evidence,
             stage_case_runtime_inputs,
             store_case_parameters,
@@ -2855,11 +2917,50 @@ class EngineDispatcher:
                 policy_source=policy,
                 bundle_key=self._qualification_bundle_key(workflow_id),
             )
-            if not any(
-                str(item.get("id")) == case_id
-                for item in (current.get("project") or {}).get("cases", [])
-            ):
+            case_view = next(
+                (
+                    item
+                    for item in (current.get("project") or {}).get("cases", [])
+                    if str(item.get("id")) == case_id
+                ),
+                None,
+            )
+            if case_view is None:
                 raise ValueError(f"Unknown qualification case {case_id!r}")
+            case_kind = str(case_view.get("kind") or "")
+            is_drill = case_kind not in {"representative", "nominal"}
+            bundle_env = self._bundle_env(workflow_id)
+            if is_drill:
+                # A drill needs this computer's local drill campaign (B276).
+                # Flow sets it up from the practice case's inputs and save,
+                # and refuses until the practice item has been set up.
+                supports_drills = getattr(
+                    self.services.flow_bridge, "supports_local_drills", None
+                )
+                if supports_drills is None or not supports_drills():
+                    raise ValueError(
+                        "This version of the OpenAdapt engine can't run the safety "
+                        "drills on this computer. Update OpenAdapt, then try again."
+                    )
+                drills = self.services.flow_bridge.qualify_drills(
+                    bundle, env_overrides=bundle_env
+                )
+                if not drills.get("ok"):
+                    raise ValueError(
+                        "OpenAdapt couldn't set up the safety drills: "
+                        + str(drills.get("error") or "Flow refused")
+                    )
+                current = inspect_bundle(
+                    bundle,
+                    workflow_id=workflow_id,
+                    policy_source=policy,
+                    bundle_key=self._qualification_bundle_key(workflow_id),
+                )
+                case_view = next(
+                    item
+                    for item in (current.get("project") or {}).get("cases", [])
+                    if str(item.get("id")) == case_id
+                )
             secret_params = {
                 str(item["name"])
                 for item in current.get("controls", {}).get("parameters", [])
@@ -2895,12 +2996,20 @@ class EngineDispatcher:
                 workflow=workflow_for_inputs,
                 parameters_path=parameters_path,
             )
+            fault_target = params.get("fault_target")
+            scoped_fault = case_view.get("fault_target")
+            if is_drill and isinstance(scoped_fault, dict) and scoped_fault.get("step_id"):
+                # The drill campaign already named the save this drill changes.
+                fault_target = {
+                    "step_id": scoped_fault["step_id"],
+                    "actuation_path": scoped_fault.get("actuation_path") or "gui",
+                }
             set_local_qualification_case_scope(
                 bundle,
                 workflow_id=workflow_id,
                 case_id=case_id,
                 runtime_input_bytes=runtime_input_bytes,
-                fault_target=params.get("fault_target"),
+                fault_target=fault_target,
                 policy_source=policy,
                 bundle_key=self._qualification_bundle_key(workflow_id),
             )
@@ -2910,13 +3019,58 @@ class EngineDispatcher:
                 policy_source=policy,
                 bundle_key=self._qualification_bundle_key(workflow_id),
             )
+            drill_setup: dict[str, Any] | None = None
+            if not is_drill:
+                # Set up the drills from this practice case now: it changes
+                # the project, and a change after a result would undo it.
+                supports_drills = getattr(
+                    self.services.flow_bridge, "supports_local_drills", None
+                )
+                if supports_drills is not None and supports_drills():
+                    drill_setup = self.services.flow_bridge.qualify_drills(
+                        bundle, env_overrides=bundle_env
+                    )
+                    if drill_setup.get("ok"):
+                        drill_setup = {
+                            "ok": True,
+                            "drills": len(
+                                (drill_setup.get("campaign") or {}).get("drills") or []
+                            ),
+                            "skipped": [
+                                str(item.get("kind"))
+                                for item in (drill_setup.get("campaign") or {}).get(
+                                    "skipped"
+                                )
+                                or []
+                                if isinstance(item, dict)
+                            ],
+                        }
+                else:
+                    drill_setup = {
+                        "ok": False,
+                        "error": "This version of the OpenAdapt engine can't set up safety drills.",
+                    }
+            practice_values: dict[str, Any] | None = None
+            if not is_drill:
+                try:
+                    stored_values = json.loads(Path(parameters_path).read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    stored_values = None
+                if isinstance(stored_values, dict):
+                    practice_values = {
+                        str(name): value
+                        for name, value in stored_values.items()
+                        if str(name) not in secret_params
+                    }
             execution_params = {
                 "workflow_id": workflow_id,
                 "_qualification_case_id": case_id,
                 "_qualification_case_execution": {
                     "case_id": case_id,
+                    "kind": "fault" if is_drill else "representative",
                     "inputs_file": str(inputs_path),
                     "campaign_id": uuid.uuid4().hex,
+                    "values": practice_values,
                 },
             }
             if params.get("target") is not None:
@@ -2945,6 +3099,19 @@ class EngineDispatcher:
                 raise ValueError("Qualification run report is not valid JSON") from exc
             if not isinstance(raw_report, dict):
                 raise ValueError("Qualification run report must be a JSON object")
+            if not is_drill:
+                unanswered = self._practice_not_approved(raw_report)
+                if unanswered is not None:
+                    # Nothing was saved. A person didn't approve the save, so
+                    # the run says nothing about the task: record no result.
+                    return {
+                        "ok": False,
+                        "workflow_id": workflow_id,
+                        "error": unanswered,
+                        "not_approved": True,
+                        "case_run": execution,
+                        "drill_setup": drill_setup,
+                    }
             evidence = retain_run_evidence(
                 bundle,
                 case_id=case_id,
@@ -2953,6 +3120,21 @@ class EngineDispatcher:
                 report_bytes=raw_report_bytes,
                 runtime_input_bytes=runtime_input_bytes,
             )
+            if is_drill:
+                fault_evidence, drill_problem = retain_drill_evidence(
+                    bundle,
+                    case_id=case_id,
+                    run_id=run_id,
+                    run_dir=Path(str(run["run_path"])),
+                )
+                if drill_problem is not None:
+                    return {
+                        "ok": False,
+                        "workflow_id": workflow_id,
+                        "error": drill_problem,
+                        "case_run": execution,
+                    }
+                evidence.extend(fault_evidence)
             from openadapt_flow.traversal import iter_workflow_steps
 
             from engine.flow_bridge import FlowBridge
@@ -3069,10 +3251,43 @@ class EngineDispatcher:
                 bundle_key=self._qualification_bundle_key(workflow_id),
             )
             result["case_run"] = execution
+            if drill_setup is not None:
+                result["drill_setup"] = drill_setup
             self.services.db.update_bundle(workflow_id, status="qualification_pending")
             return result
         except Exception as exc:
             return {"ok": False, "workflow_id": workflow_id, "error": str(exc)}
+
+    @staticmethod
+    def _practice_not_approved(report: dict) -> str | None:
+        """Why a practice run ended without the person's approval, if it did.
+
+        Flow records the approval as ``approval.decision``: ``approved`` once
+        a person approved every save, ``declined`` for Don't save, and
+        ``approval_required`` when nobody answered in time.
+        """
+
+        approval = report.get("approval")
+        if not isinstance(approval, dict):
+            return None
+        decision = approval.get("decision")
+        if decision == "declined":
+            return (
+                "You chose Don't save, so nothing was saved and the practice run "
+                "didn't count. Fix what was wrong, then run the practice item again."
+            )
+        if decision == "approval_required":
+            return (
+                "Nobody approved the save in time, so nothing was saved and the "
+                "practice run didn't count. Run the practice item again and "
+                "approve the save when OpenAdapt asks."
+            )
+        return None
+
+    def _bundle_env(self, workflow_id: str) -> dict[str, str]:
+        from engine.bundle_keys import bundle_key_environment
+
+        return bundle_key_environment(str(workflow_id))
 
     def import_qualification_results(self, **params: Any) -> dict:
         """Import canonical signed results and re-verify every local evidence hash."""
@@ -3554,6 +3769,223 @@ class EngineDispatcher:
             if first.get("capture_id") == capture_id and isinstance(first.get("target"), dict):
                 target = first["target"]
         return target
+
+    # ------------------------------------------------ per-item approval
+
+    #: The largest screenshot Desktop shows on the approval screen.
+    _APPROVAL_SCREENSHOT_MAX_BYTES = 15 * 1024 * 1024
+
+    def _open_approval_watch(
+        self,
+        *,
+        workflow_id: str,
+        run_dir: Path,
+        kind: str,
+        values: Any,
+    ) -> dict[str, Any]:
+        """Remember a run that may wait for a person before a save.
+
+        The input values stay in memory for the approval screen only. They
+        never go to a file, a log or an event.
+        """
+
+        shown_values: list[dict[str, str]] = []
+        if isinstance(values, dict):
+            for name, value in values.items():
+                if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+                    shown_values.append({"name": str(name), "value": str(value)})
+        watch = {
+            "workflow_id": workflow_id,
+            "run_dir": str(run_dir),
+            "kind": kind,
+            "values": shown_values,
+            "started_at": datetime.now(timezone.utc).isoformat(),
+        }
+        with self._approval_lock:
+            self._approval_watches[str(run_dir)] = watch
+        self.emit("item_approval", {"workflow_id": workflow_id, "state": "watching"})
+        return watch
+
+    def _close_approval_watch(self, watch: dict[str, Any]) -> None:
+        with self._approval_lock:
+            self._approval_watches.pop(str(watch["run_dir"]), None)
+        self.emit(
+            "item_approval",
+            {"workflow_id": watch["workflow_id"], "state": "closed"},
+        )
+
+    def _approval_watch(self, workflow_id: str) -> dict[str, Any] | None:
+        with self._approval_lock:
+            watches = [
+                dict(watch)
+                for watch in self._approval_watches.values()
+                if not workflow_id or watch["workflow_id"] == workflow_id
+            ]
+        return watches[0] if len(watches) == 1 else None
+
+    def _approval_screenshot(self, run_dir: Path, row: dict) -> str | None:
+        """The filled form Flow saved for this request, as a data URL.
+
+        Only a PNG inside the run's own folder whose bytes match the digest
+        Flow recorded in the request. Anything else shows no picture, and the
+        approval screen then offers no way to approve.
+        """
+
+        try:
+            root = run_dir.resolve()
+            raw = Path(str(row.get("screenshot") or ""))
+            if raw.is_symlink():
+                return None
+            path = raw.resolve()
+            if not path.is_relative_to(root) or not path.is_file():
+                return None
+            if path.stat().st_size > self._APPROVAL_SCREENSHOT_MAX_BYTES:
+                return None
+            data = path.read_bytes()
+        except (OSError, ValueError):
+            return None
+        expected = str(row.get("screenshot_sha256") or "").removeprefix("sha256:")
+        if hashlib.sha256(data).hexdigest() != expected or not data.startswith(b"\x89PNG"):
+            return None
+        return "data:image/png;base64," + base64.b64encode(data).decode("ascii")
+
+    @staticmethod
+    def _approval_deadline(row: dict) -> str | None:
+        """When the run stops waiting: the request's time plus Desktop's wait."""
+
+        from engine.flow_bridge import APPROVAL_WAIT_S
+
+        try:
+            created = datetime.fromisoformat(str(row.get("created_at")).replace("Z", "+00:00"))
+            expires = datetime.fromisoformat(str(row.get("expires_at")).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        from datetime import timedelta
+
+        return min(created + timedelta(seconds=APPROVAL_WAIT_S), expires).isoformat()
+
+    def get_item_approval(self, **params: Any) -> dict:
+        """The save a running item waits on, for the approval screen.
+
+        Returns ``{"running": False}`` when no run of this task is going.
+        While one runs, ``waiting`` says whether it has stopped before a save.
+        The request carries the filled form and the item's own values.
+        """
+
+        workflow_id = str(params.get("workflow_id") or "")
+        watch = self._approval_watch(workflow_id)
+        if watch is None:
+            return {"ok": True, "running": False, "waiting": False}
+        base = {
+            "ok": True,
+            "running": True,
+            "waiting": False,
+            "workflow_id": watch["workflow_id"],
+            "kind": watch["kind"],
+        }
+        run_dir = Path(watch["run_dir"])
+        if not (run_dir / "item-approval").is_dir():
+            return base
+        try:
+            rows = self.services.flow_bridge.item_approval_show(run_dir)
+        except Exception:
+            logger.exception("Could not list the run's approval requests")
+            return {**base, "ok": False, "error": "Desktop couldn't read the approval request."}
+        waiting = [row for row in rows if row.get("status") == "waiting"]
+        if not waiting:
+            return base
+        row = waiting[0]
+        return {
+            **base,
+            "waiting": True,
+            "request": {
+                "request_id": str(row.get("request_id") or ""),
+                "request_sha256": str(row.get("request_sha256") or ""),
+                "step_id": str(row.get("step_id") or ""),
+                "step_intent": str(row.get("step_intent") or "")[:300],
+                "answer_by": self._approval_deadline(row),
+                "screenshot": self._approval_screenshot(run_dir, row),
+                "values": watch["values"],
+            },
+        }
+
+    def answer_item_approval(self, **params: Any) -> dict:
+        """Approve or decline the save a running item waits on.
+
+        Desktop answers only a request that is waiting right now in a run this
+        engine started, for the exact digest the person saw. Flow checks the
+        answer again before it saves.
+        """
+
+        from engine.flow_bridge import DECLINE_REASONS
+
+        workflow_id = str(params.get("workflow_id") or "")
+        decision = str(params.get("decision") or "")
+        request_id = str(params.get("request_id") or "")
+        request_sha256 = str(params.get("request_sha256") or "")
+        reason = params.get("reason")
+        if decision not in {"approve", "decline"}:
+            return {"ok": False, "error": "Choose Approve and save or Don't save."}
+        if decision == "decline" and reason not in DECLINE_REASONS:
+            return {"ok": False, "error": "Choose why it shouldn't save."}
+        watch = self._approval_watch(workflow_id)
+        if watch is None:
+            return {
+                "ok": False,
+                "error": "That run isn't waiting any more. Nothing was approved.",
+            }
+        run_dir = Path(watch["run_dir"])
+        try:
+            rows = self.services.flow_bridge.item_approval_show(run_dir)
+        except Exception:
+            logger.exception("Could not list the run's approval requests")
+            return {"ok": False, "error": "Desktop couldn't read the approval request."}
+        if not any(
+            row.get("request_id") == request_id
+            and row.get("request_sha256") == request_sha256
+            and row.get("status") == "waiting"
+            for row in rows
+        ):
+            return {
+                "ok": False,
+                "error": "That request isn't waiting any more. Nothing was approved.",
+            }
+        try:
+            answer = self.services.flow_bridge.item_approval_answer(
+                run_dir,
+                decision=decision,  # type: ignore[arg-type]
+                request_id=request_id,
+                request_sha256=request_sha256,
+                reason=str(reason) if decision == "decline" else None,
+            )
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        except Exception:
+            logger.exception("Could not answer the approval request")
+            return {
+                "ok": False,
+                "error": "Desktop couldn't send your answer. Nothing was approved.",
+            }
+        if not answer.get("ok"):
+            return {
+                "ok": False,
+                "error": "Flow refused the answer, so nothing was approved.",
+                "code": str(answer.get("code") or ""),
+            }
+        if answer.get("resume_required"):
+            # The run stopped waiting before the answer arrived. Desktop
+            # doesn't resume it: run the item again.
+            return {
+                "ok": False,
+                "error": (
+                    "The run had already stopped waiting, so nothing was saved. "
+                    "Run the item again."
+                ),
+            }
+        return {
+            "ok": True,
+            "decision": "approved" if decision == "approve" else "declined",
+        }
 
     def run_item(self, **params: Any) -> dict:
         """Run a task once on one item's input values and record the outcome.

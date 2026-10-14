@@ -188,7 +188,9 @@ def status_after_run(
         return OPEN
     if approval.get("decision") == "no_person" and transaction_outcome != "VERIFIED":
         return OPEN
-    if approval.get("decision") not in {"no_person", "not_gated"}:
+    # ``approved``: a person approved every save of the item before it was
+    # made (``each_item``), and the record check confirmed it.
+    if approval.get("decision") not in {"no_person", "not_gated", "approved"}:
         return OPEN
     return DONE
 
@@ -207,10 +209,15 @@ def allowed_actions(item: dict) -> list[str]:
     if item.get("status") not in {OPEN, TEACHING}:
         return []
     approval = item.get("approval") or {}
-    if item.get("nothing_written") and approval.get("decision") == "approval_required":
-        # Flow held the save for a person's approval. Approving and saving
-        # from Desktop isn't built yet, and running it again would stop at the
-        # same check, so the person skips it or enters it by hand.
+    if (
+        item.get("nothing_written")
+        and approval.get("decision") == "approval_required"
+        and approval.get("mode") != "each_item"
+    ):
+        # "Only ask a person about problems" held the save for a person.
+        # Running it again would stop at the same check, so the person skips
+        # it or enters it by hand. (Under ``each_item`` nobody answered in
+        # time; running it again asks again.)
         return ["skip", "decline", "done_by_person"]
     if item.get("nothing_written"):
         return ["retry", "skip", "decline", "teach"]

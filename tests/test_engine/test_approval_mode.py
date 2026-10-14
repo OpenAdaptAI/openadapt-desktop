@@ -174,9 +174,13 @@ class _Bridge:
     def ensure_browser_runtime(self, _progress) -> None:
         pass
 
+    def supports_approval_gate(self) -> bool:
+        return True
+
     def run(self, bundle, config, out_dir=None, params_file=None, env_overrides=None, **_k):
         from engine.flow_bridge import FlowResult
 
+        assert _k.get("approval_mode") == "each_item"
         self.calls += 1
         report = self.reports.pop(0)
         (out_dir / "report.json").write_text(json.dumps(report))
@@ -258,7 +262,7 @@ def test_a_switch_on_in_cloud_is_not_used_while_pieces_are_missing(task) -> None
     # Flow's governed run can't take the gate yet, so nothing here is checked
     # before each save: the switch must not read as on.
     assert mode["state"] == "not_used_here"
-    assert "engine_cannot_check_before_save" in mode["blockers"]
+    assert "field_change_check" in mode["blockers"]
     assert mode["can_turn_off"] is True
     assert mode["turned_on"]["name"] == "Sam Ortiz"
     assert mode["turned_on"]["role"] == "admin"

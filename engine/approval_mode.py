@@ -77,17 +77,17 @@ OFF_REASONS = frozenset(
 #: from taking effect on this computer; remove a code only together with the
 #: code that builds it.
 #:
-#: ``engine_cannot_check_before_save``  Flow's pre-save gate runs only when the
-#:     caller hands one to the Replayer. The governed ``openadapt-flow run``
-#:     that Desktop calls doesn't take one yet (Flow ``docs/APPROVAL_MODES.md``,
-#:     "Not built yet"), so no Desktop run is checked before each save.
+#: ``field_change_check``  Flow can't yet check that a save changed only
+#:     the fields it was given, and the three drills for that check don't
+#:     exist (Flow ``docs/APPROVAL_MODES.md``). Until they do, Desktop asks
+#:     Flow for ``each_item`` on every run: a person approves each save.
 #: ``cloud_status``  Desktop has no client for Cloud's signed switch status,
 #:     which Flow's P1 check needs before every save.
 #: ``spot_checks``   Mandatory spot checks (design 7.7) aren't built.
 #: ``list_queue``    Lists run from the window, not from an engine-held queue,
 #:     so a paused list doesn't survive closing the window.
 NOT_BUILT: tuple[str, ...] = (
-    "engine_cannot_check_before_save",
+    "field_change_check",
     "cloud_status",
     "spot_checks",
     "list_queue",
