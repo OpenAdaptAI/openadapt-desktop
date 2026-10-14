@@ -33,6 +33,8 @@ from typing import TYPE_CHECKING
 
 from loguru import logger
 
+from engine.private_fs import ensure_private_dir, make_private_file
+
 if TYPE_CHECKING:
     from engine.db import IndexDB
     from engine.flow_bridge import FlowBridge
@@ -150,9 +152,9 @@ class RecordingController:
         capture_id = uuid.uuid4().hex[:8]
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
         capture_dir = self.captures_dir / f"{ts}_{capture_id}"
-        capture_dir.mkdir(parents=True, exist_ok=True)
-        (capture_dir / "screenshots").mkdir(exist_ok=True)
-        (capture_dir / "video").mkdir(exist_ok=True)
+        # Owner-only: a capture holds screenshots of whatever was on screen.
+        for directory in (capture_dir, capture_dir / "screenshots", capture_dir / "video"):
+            ensure_private_dir(directory, root=self.captures_dir)
 
         started_at = _now_iso()
 
@@ -170,10 +172,12 @@ class RecordingController:
                 raise ValueError(f"Recording metadata cannot replace reserved fields: {names}")
             meta.update(metadata)
         (capture_dir / "meta.json").write_text(json.dumps(meta, indent=2))
+        make_private_file(capture_dir / "meta.json")
 
         state_path = capture_dir / "state.json"
         state = {"status": "starting", "started_at": started_at, "capture_id": capture_id}
         state_path.write_text(json.dumps(state, indent=2))
+        make_private_file(state_path)
 
         recorder = None
         try:
@@ -364,7 +368,7 @@ class RecordingController:
         if self._flow_bridge is None:
             return None
         bundles_dir = self._bundles_dir or (self.captures_dir.parent / "bundles")
-        bundles_dir.mkdir(parents=True, exist_ok=True)
+        ensure_private_dir(bundles_dir)
         bundle_id = uuid.uuid4().hex[:8]
         bundle_path = bundles_dir / f"{capture_id}_{bundle_id}"
         try:

@@ -48,9 +48,10 @@ def _init_engine(config: EngineConfig) -> types.SimpleNamespace:
     """Initialize engine subsystems."""
     from engine.audit import AuditLogger
     from engine.db import IndexDB
+    from engine.private_fs import ensure_private_dir
     from engine.storage_manager import StorageManager
 
-    config.data_dir.mkdir(parents=True, exist_ok=True)
+    ensure_private_dir(config.data_dir)
 
     audit = AuditLogger(config.audit_log_path, enabled=config.network_audit_log)
     db = IndexDB(config.data_dir / "index.db")
@@ -866,6 +867,11 @@ _COMMANDS = {
 
 def main(argv: list[str] | None = None) -> None:
     """CLI entry point."""
+    from engine.private_fs import apply_private_umask
+
+    # Before anything writes to disk: captures, run folders and the reports
+    # Flow writes into them stay readable only by this account.
+    apply_private_umask()
     parser = argparse.ArgumentParser(
         prog="openadapt-desktop",
         description="OpenAdapt Desktop local authoring and governed execution CLI",

@@ -32,6 +32,7 @@ from pathlib import Path
 
 from engine.config import EngineConfig
 from engine.db import IndexDB
+from engine.private_fs import ensure_private_dir
 
 
 def _dir_size(path: Path) -> int:
@@ -74,9 +75,12 @@ class StorageManager:
             - tombstones/ for cold-tier metadata-only records
             - index.db SQLite database with WAL mode
         """
-        self.captures_dir.mkdir(parents=True, exist_ok=True)
-        self.archive_dir.mkdir(parents=True, exist_ok=True)
-        self.tombstones_dir.mkdir(parents=True, exist_ok=True)
+        # Owner-only: captures and archives can hold patient details. This
+        # also tightens folders an earlier version created at 0755.
+        data_dir = self.config.data_dir
+        ensure_private_dir(data_dir)
+        for directory in (self.captures_dir, self.archive_dir, self.tombstones_dir):
+            ensure_private_dir(directory, root=data_dir)
 
         self._db = IndexDB(self.index_db_path)
         self._db.initialize()

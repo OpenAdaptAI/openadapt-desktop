@@ -14,6 +14,8 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
+from engine.private_fs import ensure_private_dir, secure_sqlite_files
+
 _CAPTURES_COLUMNS = frozenset({
     "capture_path", "scrubbed_path", "started_at", "stopped_at",
     "duration_secs", "event_count", "size_bytes", "review_status",
@@ -191,10 +193,17 @@ class IndexDB:
 
     def initialize(self) -> None:
         """Open or create the database, enable WAL mode, create tables."""
-        self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        # The index can name patients (capture titles, work-item labels), so
+        # the database and its WAL files are owner-only. SQLite creates the
+        # WAL and shared-memory files with the database file's own mode.
+        ensure_private_dir(self._db_path.parent)
+        if not self._db_path.exists():
+            self._db_path.touch(mode=0o600)
+        secure_sqlite_files(self._db_path)
         self._conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
+        secure_sqlite_files(self._db_path)
         self._conn.executescript(_SCHEMA)
         self._migrate()
 

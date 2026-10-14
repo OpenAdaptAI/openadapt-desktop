@@ -45,6 +45,7 @@ from urllib.parse import urlsplit
 from loguru import logger
 
 from engine.config import EngineConfig
+from engine.private_fs import ensure_private_dir
 
 EmitFn = Callable[[str, dict], None]
 
@@ -145,7 +146,7 @@ class EngineServices:
         if self._db is None:
             from engine.db import IndexDB
 
-            self.config.data_dir.mkdir(parents=True, exist_ok=True)
+            ensure_private_dir(self.config.data_dir)
             self._db = IndexDB(self.config.data_dir / "index.db")
             self._db.initialize()
         return self._db
@@ -1328,7 +1329,8 @@ class EngineDispatcher:
             return self._pre_action_refusal(self._APPROVAL_GATE_UNSUPPORTED)
         run_id = uuid.uuid4().hex[:8]
         run_dir = self.config.data_dir / "runs" / f"{'run' if run else 'replay'}-{run_id}"
-        run_dir.mkdir(parents=True, exist_ok=True)
+        # Owner-only: Flow writes the report and screenshots of the record here.
+        ensure_private_dir(run_dir, root=self.config.data_dir)
         params_file = None
         qualification_case_id = params.get("_qualification_case_id")
         # One work item's validated input values (see ``run_item``). They reach

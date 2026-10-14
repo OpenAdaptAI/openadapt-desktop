@@ -162,6 +162,11 @@ def _run_embedded_playwright() -> None:
 
 def main() -> None:
     """Initialize the engine and start the appropriate mode."""
+    from engine.private_fs import apply_private_umask
+
+    # Before anything writes to disk, in every process mode (the embedded
+    # Flow modes included): local data stays readable only by this account.
+    apply_private_umask()
     _configure_frozen_browser_cache()
     if sys.argv[1:2] == [EMBEDDED_FLOW_MODE]:
         _run_embedded_flow()
