@@ -138,6 +138,26 @@ export function attentionCopy(item: AttentionItem): AttentionCopy {
     };
   }
 
+  // A person approves each save. Nobody answered in time, or the person
+  // chose Don't save. Nothing was written.
+  if (
+    item.nothing_written &&
+    item.approval &&
+    ((item.approval.mode === "each_item" && item.approval.decision === "approval_required") ||
+      item.approval.decision === "declined")
+  ) {
+    return {
+      question:
+        item.approval.decision === "declined"
+          ? `${sentenceCase(who)} wasn't saved`
+          : `${sentenceCase(who)} waited for your approval`,
+      sentence: whyItCameToYou(item) ?? "OpenAdapt stopped before saving.",
+      prevented: "It stopped before saving. Nothing was written.",
+      preventedTone: "ok",
+      choices,
+    };
+  }
+
   // "Only ask a person about problems" held the save for a person. Nothing
   // was written; the sentence says which check sent it here.
   if (item.nothing_written && item.approval?.decision === "approval_required") {

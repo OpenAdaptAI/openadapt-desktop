@@ -65,10 +65,17 @@ export function offAutomatically(reason: OffReason | null | undefined): boolean 
   return Boolean(reason) && reason !== "turned_off";
 }
 
+/** The reasons a person can give for Don't save, as Flow records them. */
+export const DECLINED: Record<string, string> = {
+  wrong_values: "the values are wrong",
+  wrong_record: "it's the wrong record",
+  screen_problem: "something on the screen is wrong",
+};
+
 const BLOCKERS: Record<string, string> = {
   engine_without_switch: "The OpenAdapt engine on this computer doesn't have this switch yet.",
-  engine_cannot_check_before_save:
-    "The OpenAdapt engine on this computer can't run the checks before each save yet.",
+  field_change_check:
+    "OpenAdapt can't check yet that a save changed only the fields it was given.",
   cloud_status: "This computer can't confirm the switch with OpenAdapt Cloud yet.",
   spot_checks: "Spot checks aren't available on this computer yet.",
   list_queue: "A paused list can't continue safely on this computer yet.",
@@ -235,7 +242,19 @@ export function whyItCameToYou(
   item: { result: string | null; approval?: ItemApproval | null },
 ): string | null {
   const approval = item.approval;
-  if (!approval || !approval.needs_person) return null;
+  if (!approval) return null;
+  // A person already answered this save (or nobody did in time). Say so
+  // whether or not Flow sends the item to a person.
+  if (approval.mode === "each_item" && approval.decision === "approval_required") {
+    return "Nobody approved the save in time, so OpenAdapt stopped before saving. Run it again and approve the save when OpenAdapt asks, or skip it.";
+  }
+  if (approval.decision === "declined") {
+    const why = approval.reason ? DECLINED[approval.reason] : undefined;
+    return why
+      ? `You chose Don't save because ${why}. OpenAdapt didn't save it.`
+      : "You chose Don't save. OpenAdapt didn't save it.";
+  }
+  if (!approval.needs_person) return null;
   if (confirmedButNeedsLook(item)) return confirmedButNeedsLookSentence(approval);
   if (approval.decision === "unverified") {
     return "OpenAdapt couldn't confirm this item's checks, so a person looks at it.";

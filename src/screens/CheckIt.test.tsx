@@ -406,3 +406,72 @@ it("runs one drill at a time in the signed-in browser", async () => {
   expect(await screen.findByText(/then run the next drill/)).toBeTruthy();
   expect(ran).toEqual(["fault-identity-swap"]);
 });
+
+it("counts nothing when the practice save wasn't approved, and passes IT's settings file", async () => {
+  engine(project());
+  const calls: Record<string, unknown>[] = [];
+  vi.mocked(engineInvoke).mockImplementation(async (command, params) => {
+    if (command === CMD.GET_QUALIFICATION) return project();
+    if (command === CMD.ADD_QUALIFICATION_CASE) {
+      return project({ cases: [{ id: "practice-1", kind: "representative", status: null }] });
+    }
+    if (command === CMD.RUN_QUALIFICATION_CASE) {
+      calls.push(params as Record<string, unknown>);
+      return {
+        ok: false,
+        workflow_id: "wf-1",
+        not_approved: true,
+        error:
+          "Nobody approved the save in time, so nothing was saved and the practice run didn't count. Run the practice item again and approve the save when OpenAdapt asks.",
+        case_run: { outcome: "HALTED", transaction_outcome: "HALTED_BEFORE_EFFECT" },
+      };
+    }
+    throw new Error(`unexpected ${command}`);
+  });
+  render(<CheckIt workflowId="wf-1" onExactChecks={() => {}} onRun={() => {}} />);
+
+  const run = await screen.findByRole("button", { name: "Run the practice item" });
+  expect(screen.getByText(/Before it saves, it shows you the filled form and waits for you to approve/)).toBeTruthy();
+  fireEvent.change(screen.getByLabelText("Deployment settings file (for IT)"), {
+    target: { value: "/tmp/deployment.claims.yaml" },
+  });
+  expect(screen.getByText(/with your deployment settings file/)).toBeTruthy();
+  fireEvent.click(
+    screen.getByRole("checkbox", {
+      name: "These are test values, and I'll keep the app in view while it runs.",
+    }),
+  );
+  fireEvent.click(run);
+
+  expect(await screen.findByText(/Nobody approved the save in time/)).toBeTruthy();
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(calls[0]).toEqual(expect.objectContaining({ deployment_config: "/tmp/deployment.claims.yaml" }));
+});
+
+it("describes each drill as the change Flow makes before the save", async () => {
+  const ready = project({
+    cases: [
+      { id: "practice-1", kind: "representative", status: "passed" },
+      { id: "drill-wrong-record-save", kind: "wrong_identity", status: null },
+      { id: "drill-two-matches-save", kind: "ambiguity", status: null },
+      { id: "drill-record-changed-save", kind: "stale_identity", status: null },
+      { id: "drill-save-not-confirmed-save", kind: "missing_effect", status: null },
+      { id: "drill-weak-record-check-save", kind: "weak_effect", status: null },
+    ],
+  });
+  engine(ready);
+  render(<CheckIt workflowId="wf-1" onExactChecks={() => {}} onRun={() => {}} />);
+
+  expect(await screen.findByText(/no drill asks you to approve/)).toBeTruthy();
+  for (const label of [
+    "Wrong record",
+    "Two possible matches",
+    "Record changed mid-task",
+    "No record check",
+    "Weak record check",
+  ]) {
+    expect(screen.getByText(label)).toBeTruthy();
+  }
+  expect(screen.getByText(/A second copy of the save button appears/)).toBeTruthy();
+  expect(screen.getByText(/The record check is taken away/)).toBeTruthy();
+});

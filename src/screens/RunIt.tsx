@@ -242,6 +242,17 @@ export function RunIt({
           needsPerson,
         };
         setStates([...next]);
+        if (
+          response.item.approval?.mode === "each_item" &&
+          response.item.approval?.decision === "approval_required"
+        ) {
+          // Nobody answered: the next items would only wait the same way.
+          setStoppedAt(item.position);
+          setBatchNote(
+            `Nobody approved the save for item ${item.position + 1} in time, so OpenAdapt stopped the list there. Nothing was saved for that item. Run the rest as a new list when you're at the computer.`,
+          );
+          break;
+        }
         if (onlyProblems && needsPerson) {
           // With the switch on, any item that needs a person stops the list.
           const label = response.item.label ? ` (${response.item.label})` : "";
@@ -306,7 +317,7 @@ export function RunIt({
         sub={
           onlyProblems
             ? "Only problems come to you. OpenAdapt saves each item without asking first, reads the record back, and stops the list at the first item that needs you."
-            : "Give OpenAdapt the items to work on. It does them one at a time, checks each record after it saves, and stops to ask you when something doesn't match."
+            : "Give OpenAdapt the items to work on. It does them one at a time. Before each save, it shows you the filled form and waits for you to approve. After it saves, it checks the record, and it stops to ask you when something doesn't match."
         }
       />
 

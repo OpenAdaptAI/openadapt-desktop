@@ -313,6 +313,7 @@ export function CheckIt({
   const [inputs, setInputs] = useState<QualificationParameter[]>([]);
   const [values, setValues] = useState<Record<string, string>>({});
   const [target, setTarget] = useState<ExecutionTarget | null>(null);
+  const [deploymentConfig, setDeploymentConfig] = useState("");
   const [attested, setAttested] = useState(false);
   const [practiceNote, setPracticeNote] = useState("");
   const [drillNote, setDrillNote] = useState("");
@@ -546,6 +547,12 @@ export function CheckIt({
     return JSON.stringify(clean);
   }
 
+  /** The deployment settings file IT gave for the record check, if any. */
+  function runSettings(): { deployment_config?: string } {
+    const path = deploymentConfig.trim();
+    return path ? { deployment_config: path } : {};
+  }
+
   async function runPractice() {
     if (!plan || !target) return;
     setBusy("practice");
@@ -572,7 +579,13 @@ export function CheckIt({
         case_id: caseId,
         parameters_json: parameters,
         target,
+        ...runSettings(),
       });
+      if (response.not_approved) {
+        // Nothing was saved and nothing was recorded: say why in plain words.
+        setPracticeNote(String(response.error || "The save wasn't approved, so nothing was saved."));
+        return;
+      }
       const copy = caseResult(response);
       if (copy) setPracticeNote(`${copy.label}. ${copy.sentence}`);
       if (!response.ok) {
@@ -604,6 +617,7 @@ export function CheckIt({
           case_id: drill.id,
           parameters_json: parameters,
           target,
+          ...runSettings(),
           ...(drill.faultStepId
             ? { fault_target: { step_id: drill.faultStepId, actuation_path: "gui" } }
             : {}),
@@ -708,7 +722,10 @@ export function CheckIt({
           ))}
         </div>
       )}
-      <p className="simple-sub">Runs in: {targetSummary(target)}</p>
+      <p className="simple-sub">
+        Runs in: {targetSummary(target)}
+        {deploymentConfig.trim() ? ", with your deployment settings file" : ""}
+      </p>
       {attachedBrowser(target) && (
         <p className="simple-sub">
           It starts from the screen your signed-in browser shows. Open the
@@ -726,6 +743,21 @@ export function CheckIt({
               disabled={busy !== null}
             />
           )}
+          <Field
+            label="Deployment settings file (for IT)"
+            hint="Optional. A local YAML or JSON file with record-check and policy settings. The practice item and the drills use it."
+            htmlFor={`${idPrefix}-config`}
+          >
+            <input
+              id={`${idPrefix}-config`}
+              className="input mono"
+              value={deploymentConfig}
+              disabled={busy !== null}
+              spellCheck={false}
+              placeholder="/path/to/deployment.yaml"
+              onChange={(event) => setDeploymentConfig(event.target.value)}
+            />
+          </Field>
         </div>
       </details>
       <label className="record-check">
@@ -989,8 +1021,10 @@ export function CheckIt({
           >
             <p>
               OpenAdapt does the task once, start to finish, on a test record you
-              choose, with every check on. It saves for real in the app, so use
-              a test record. Keep the app where you can see it.
+              choose, with every check on. Before it saves, it shows you the
+              filled form and waits for you to approve. Then it saves for real
+              in the app, so use a test record. Keep the app where you can see
+              it.
             </p>
             {plan.practiceState === "done" && practiceNote === "" ? (
               <details className="technical">
@@ -1011,8 +1045,10 @@ export function CheckIt({
             ) : (
               <>
                 <p>
-                  OpenAdapt makes the task go wrong on purpose, then checks that
-                  it reacts the way each drill below says.
+                  Each drill runs the task with your test values and changes one
+                  thing on purpose right before the save. A drill passes only
+                  when OpenAdapt's own check catches the change and stops before
+                  saving. Nothing is saved, and no drill asks you to approve.
                 </p>
                 <ul className="drill-list">
                   {plan.drills.map((drill: CaseView) => (

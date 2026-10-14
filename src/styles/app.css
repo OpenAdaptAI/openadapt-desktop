@@ -2972,3 +2972,87 @@ select.input:focus {
   color: var(--text-muted);
   font-size: var(--fs-caption);
 }
+
+/* -----------------------------------------------------------------------------
+   Approve each save: a run waits before a save for a person (ItemApproval.tsx)
+----------------------------------------------------------------------------- */
+.approval-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: var(--space-6) var(--space-4);
+  overflow-y: auto;
+  background: color-mix(in srgb, var(--bg) 70%, transparent);
+}
+.approval-panel {
+  width: min(1040px, 100%);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-2);
+  padding: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+.approval-head h2 {
+  margin: 0 0 var(--space-1);
+}
+.approval-body {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(0, 2fr);
+  gap: var(--space-5);
+  align-items: start;
+}
+@media (max-width: 760px) {
+  .approval-body {
+    grid-template-columns: 1fr;
+  }
+}
+.approval-body h3 {
+  margin: 0 0 var(--space-2);
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+}
+.approval-values dl {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.approval-values dt {
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+}
+.approval-values dd {
+  margin: 0;
+  color: var(--text-strong);
+  overflow-wrap: anywhere;
+}
+.approval-step {
+  margin-top: var(--space-3);
+}
+.approval-form {
+  margin: 0;
+}
+.approval-form img {
+  display: block;
+  max-width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-1);
+}
+.approval-decline {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.approval-decline legend {
+  font-weight: var(--fw-semibold);
+  color: var(--text-strong);
+  margin-bottom: var(--space-2);
+}

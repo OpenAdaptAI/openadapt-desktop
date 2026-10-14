@@ -69,7 +69,7 @@ describe("the switch state", () => {
       ok: true,
       workflow_id: "wf-1",
       state: "none",
-      blockers: ["engine_cannot_check_before_save"],
+      blockers: ["field_change_check"],
     };
     expect(
       notAvailableLine({
@@ -84,7 +84,7 @@ describe("the switch state", () => {
       }),
     ).toBe("Not available yet: this version needs an active admission in OpenAdapt Cloud.");
     expect(notAvailableLine(base)).toBe(
-      "Not available yet: the OpenAdapt engine on this computer can't run the checks before each save yet.",
+      "Not available yet: OpenAdapt can't check yet that a save changed only the fields it was given.",
     );
   });
 });

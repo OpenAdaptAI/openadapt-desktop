@@ -33,7 +33,7 @@ it("shows an off switch with the first unmet requirement and a way to Cloud, nev
   render(
     <ApprovalSwitch
       mode={state({
-        blockers: ["engine_cannot_check_before_save"],
+        blockers: ["field_change_check"],
         requirements: {
           available: true,
           items: [{ code: "E1", met: false, reason: "no_active_admission", checked_by: "software" }],
@@ -83,7 +83,7 @@ it("never reads as on when this computer can't apply it", () => {
         state: "not_used_here",
         recorded_state: "on",
         can_turn_off: true,
-        blockers: ["engine_cannot_check_before_save", "cloud_status"],
+        blockers: ["field_change_check", "cloud_status"],
         evidence: EVIDENCE,
         ...PEOPLE,
       })}
@@ -94,7 +94,7 @@ it("never reads as on when this computer can't apply it", () => {
   expect(screen.queryByText("On")).toBeNull();
   expect(screen.getByText("Not used on this computer")).toBeTruthy();
   expect(
-    screen.getByText(/^On in OpenAdapt Cloud, but not used on this computer: .*can't run the checks before each save yet/),
+    screen.getByText(/^On in OpenAdapt Cloud, but not used on this computer: .*can't check yet that a save changed only the fields it was given/),
   ).toBeTruthy();
   expect(screen.queryByText(/Only problems come to you/)).toBeNull();
   // Turning off still works: it reaches the local switch log.

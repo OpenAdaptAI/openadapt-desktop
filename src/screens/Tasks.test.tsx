@@ -128,7 +128,7 @@ it("keeps today's words when the switch is on in Cloud but not used here", async
     state: "not_used_here",
     recorded_state: "on",
     can_turn_off: true,
-    blockers: ["engine_cannot_check_before_save"],
+    blockers: ["field_change_check"],
     ...SWITCH_PEOPLE,
   });
   render(<Tasks attention={0} {...actions()} />);
@@ -163,7 +163,7 @@ it("turns the switch off from the card", async () => {
 });
 
 it("shows no switch on a task this computer has no switch for", async () => {
-  switchEngine({ state: "none", visible: false, blockers: ["engine_cannot_check_before_save"] });
+  switchEngine({ state: "none", visible: false, blockers: ["field_change_check"] });
   render(<Tasks attention={0} {...actions()} />);
 
   const card = await screen.findByRole("article", { name: "Referral intake" });

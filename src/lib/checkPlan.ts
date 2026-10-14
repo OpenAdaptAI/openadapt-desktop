@@ -104,31 +104,33 @@ export function describeEffect(effect: QualificationEditableEffect): string {
     : `Saves an entry on ${record}.`;
 }
 
+// What each drill changes, as Flow's local drill campaign makes it (B276):
+// right before the save, in the page or in the record check it's handed.
 const CASE_COPY: Record<string, { label: string; explanation: string }> = {
   wrong_identity: {
     label: "Wrong record",
     explanation:
-      "OpenAdapt is given a record that doesn't match the screen. It must stop before saving.",
-  },
-  missing_effect: {
-    label: "Save didn't land",
-    explanation:
-      "The app says it saved, but the record stays empty. OpenAdapt must notice and stop.",
+      "The record shown on screen is swapped for a different one. OpenAdapt must stop before saving.",
   },
   ambiguity: {
     label: "Two possible matches",
     explanation:
-      "The screen offers more than one match. OpenAdapt must stop instead of guessing.",
+      "A second copy of the save button appears on the page. OpenAdapt must stop instead of guessing.",
   },
   stale_identity: {
     label: "Record changed mid-task",
     explanation:
-      "The record changes after OpenAdapt finds it. It must find it again or stop.",
+      "The record on screen changes after OpenAdapt checked it. OpenAdapt must stop before saving.",
+  },
+  missing_effect: {
+    label: "No record check",
+    explanation:
+      "The record check is taken away. OpenAdapt must refuse to save without it.",
   },
   weak_effect: {
     label: "Weak record check",
     explanation:
-      "The record check is weaker than agreed. OpenAdapt must refuse to call the item done.",
+      "The record check is swapped for one that only looks at the screen. OpenAdapt must refuse to save with it.",
   },
 };
 

@@ -198,6 +198,8 @@ export interface ItemApproval {
     | "stop_before_saving"
     | "problem"
     | "not_gated"
+    | "approved"
+    | "declined"
     | "unverified"
     | null;
   reason: string | null;
@@ -1081,4 +1083,34 @@ export interface EffectivePolicy {
   grounding_model: GroundingModelConfig;
   resolved_at?: string;
   offline?: boolean;
+}
+
+/** A run waiting for a person to approve a save (``get_item_approval``). */
+export interface ItemApprovalState {
+  ok: boolean;
+  running: boolean;
+  waiting: boolean;
+  workflow_id?: string;
+  /** "practice" for Check it's practice item, "item" for Run it. */
+  kind?: "practice" | "item";
+  error?: string;
+  request?: {
+    request_id: string;
+    request_sha256: string;
+    step_id: string;
+    step_intent: string;
+    /** When the run stops waiting and stops without saving. */
+    answer_by: string | null;
+    /** The filled form as a data URL, or null when it can't be shown. */
+    screenshot: string | null;
+    /** The item's own values, as given. Local only. */
+    values: { name: string; value: string }[];
+  };
+}
+
+export interface ItemApprovalAnswer {
+  ok: boolean;
+  decision?: "approved" | "declined";
+  error?: string;
+  code?: string;
 }

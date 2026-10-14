@@ -209,3 +209,29 @@ it("sends an empty optional field as an empty value, never leaving it to the rec
     expect.objectContaining({ inputs: { member_id: "M-7", note: "" } }),
   );
 });
+
+it("stops the list when nobody approved a save in time", async () => {
+  engine();
+  const waited = item(0, "HALTED", "HALTED_BEFORE_EFFECT", "stopped_before_saving", true);
+  (waited.item as Record<string, unknown>).approval = {
+    validated: true,
+    mode: "each_item",
+    decision: "approval_required",
+    reason: null,
+    needs_person: true,
+    counts_toward_problems: false,
+    switch_off_reason: null,
+    failed_check: null,
+    post_checks: { verified: false, whole_run_clean: false },
+    saves_without_person: 0,
+  };
+  vi.mocked(engineInvoke).mockResolvedValueOnce(waited);
+  render(<RunIt workflowId="wf-1" onCheck={() => {}} onNeedsYou={() => {}} onResults={() => {}} />);
+
+  expect(await screen.findByText(/Before each save, it shows you the filled form/)).toBeTruthy();
+  await paste("member_id,note\nM-1,Reviewed\nM-2,Reviewed");
+  fireEvent.click(await screen.findByRole("button", { name: "Run 2 items" }));
+
+  expect(await screen.findByText(/Nobody approved the save for item 1 in time/)).toBeTruthy();
+  expect(engineInvoke).toHaveBeenCalledTimes(1);
+});
