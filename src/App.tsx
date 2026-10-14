@@ -21,8 +21,8 @@ import type {
   SyncState,
   Workflow,
 } from "./lib/types";
-import { StatusDot, Pill } from "./ui/primitives";
-import { GearMenu } from "./ui/simple";
+import { Button, StatusDot, Pill } from "./ui/primitives";
+import { GearMenu, PageHead } from "./ui/simple";
 import { Login } from "./screens/Login";
 import { Onboarding } from "./screens/Onboarding";
 import { Welcome } from "./screens/Welcome";
@@ -178,6 +178,25 @@ function DesktopBrand({ onOpen }: { onOpen?: () => void }) {
   );
 }
 
+// Shown when the engine didn't answer the library question at start. An
+// engine that didn't answer is not an empty library, so Desktop must not send
+// someone with tasks back to first run, or claim anything about their setup.
+function EngineOffline({ onRetry, busy }: { onRetry: () => void; busy: boolean }) {
+  return (
+    <div className="content simple">
+      <PageHead
+        title="Waiting for the local engine"
+        sub="Desktop can't reach the OpenAdapt engine on this computer, so it can't show your tasks yet. It tries again when the engine starts. If this doesn't clear, quit and reopen OpenAdapt."
+      />
+      <div className="row">
+        <Button variant="primary" disabled={busy} onClick={onRetry}>
+          {busy ? "Trying…" : "Try again"}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function DesktopEntryShell({ children }: { children: React.ReactNode }) {
   return (
     <div className="desktop-entry-shell">
@@ -194,7 +213,11 @@ function DesktopEntryShell({ children }: { children: React.ReactNode }) {
 export default function App() {
   const [auth, setAuth] = useState<AuthStatus | null>(null);
   const [checkedAuth, setCheckedAuth] = useState(false);
-  const [onboarded, setOnboarded] = useState(false);
+  // null while the engine hasn't answered whether any task exists yet.
+  const [onboarded, setOnboarded] = useState<boolean | null>(null);
+  const onboardedRef = useRef<boolean | null>(null);
+  onboardedRef.current = onboarded;
+  const [entryRetrying, setEntryRetrying] = useState(false);
   const [showLogin, setShowLogin] = useState(false);
   const [route, setRoute] = useState<Route>({ name: "tasks" });
   const [screenBusy, setScreenBusy] = useState(false);
@@ -265,6 +288,48 @@ export default function App() {
     return result.state;
   }
 
+  // Which entry screen to show: first run or the tasks. It needs a real
+  // answer from the engine for both questions.
+  async function loadEntry(): Promise<boolean> {
+    const [wf, firstWorkflow] = await Promise.all([
+      engineTry<Workflow[] | null>(CMD.GET_WORKFLOWS, {}, null),
+      engineTry<FirstWorkflowStateResponse | null>(
+        CMD.GET_FIRST_WORKFLOW_STATE,
+        {},
+        null,
+      ),
+    ]);
+    if (!Array.isArray(wf) || !firstWorkflow) return false;
+    // A person may have moved on while this was in flight.
+    if (onboardedRef.current === true) return true;
+    const resumedRoute = routeForFirstWorkflow(firstWorkflow.state);
+    setFirstWorkflowState(firstWorkflow.state);
+    setOnboarded(wf.length > 0 || resumedRoute !== null);
+    if (resumedRoute) setRoute(resumedRoute);
+    return true;
+  }
+
+  async function retryEntry() {
+    if (onboardedRef.current !== null) return;
+    setEntryRetrying(true);
+    try {
+      if (await loadEntry()) {
+        // These were fallbacks too while the engine was down.
+        setAuth(
+          await engineTry<AuthStatus>(
+            CMD.GET_AUTH_STATUS,
+            {},
+            { authenticated: false },
+          ),
+        );
+        await refreshAttention();
+        setSync(await engineTry<SyncState | null>(CMD.GET_SYNC_STATE, {}, null));
+      }
+    } finally {
+      setEntryRetrying(false);
+    }
+  }
+
   // Bootstrap: auth status, sidecar liveness, and the status channels.
   // Authoring bind is optional — a missing status must not leave the shell
   // on Loading, or first-workflow navigation never mounts.
@@ -278,18 +343,7 @@ export default function App() {
           { authenticated: false },
         );
         setAuth(a);
-        const [wf, firstWorkflow] = await Promise.all([
-          engineTry<Workflow[]>(CMD.GET_WORKFLOWS, {}, []),
-          engineTry<FirstWorkflowStateResponse>(
-            CMD.GET_FIRST_WORKFLOW_STATE,
-            {},
-            { ok: true, state: null },
-          ),
-        ]);
-        const resumedRoute = routeForFirstWorkflow(firstWorkflow.state);
-        setFirstWorkflowState(firstWorkflow.state);
-        setOnboarded(wf.length > 0 || resumedRoute !== null);
-        if (resumedRoute) setRoute(resumedRoute);
+        await loadEntry();
         const na = await engineTry<NeedsAttention>(
           CMD.GET_NEEDS_ATTENTION,
           {},
@@ -315,9 +369,10 @@ export default function App() {
     })();
 
     const unsubs = [
-      onEngineEvent(EVT.SIDECAR_STATE, (d: { running: boolean }) =>
-        setEngineUp(!!d?.running),
-      ),
+      onEngineEvent(EVT.SIDECAR_STATE, (d: { running: boolean }) => {
+        setEngineUp(!!d?.running);
+        if (d?.running && onboardedRef.current === null) void retryEntry();
+      }),
       onEngineEvent(EVT.STATUS_UPDATE, (s: { recording?: boolean }) =>
         setRecording(!!s?.recording),
       ),
@@ -678,6 +733,19 @@ export default function App() {
               setShowLogin(false);
             }}
           />
+        </DesktopEntryShell>
+      </>
+    );
+  }
+
+  if (onboarded === null) {
+    return (
+      <>
+        {pairingNotice}
+        {authoringNotice}
+        {firstWorkflowStageNotice}
+        <DesktopEntryShell>
+          <EngineOffline busy={entryRetrying} onRetry={() => void retryEntry()} />
         </DesktopEntryShell>
       </>
     );
