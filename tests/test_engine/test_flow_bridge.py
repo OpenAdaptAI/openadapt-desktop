@@ -972,6 +972,41 @@ def test_required_flow_version_is_the_build_pin() -> None:
     assert bundled_flow_pin()[0] == REQUIRED_FLOW_VERSION
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="the stand-in is a POSIX shell script")
+def test_a_program_named_openadapt_flow_on_path_is_never_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end: the first ``openadapt-flow`` on PATH is not Desktop's Flow (B105).
+
+    This uses only names that existed before the fix, so it fails on the old
+    PATH lookup rather than on a missing helper.
+    """
+    import os
+
+    from openadapt_desktop import flow_bridge
+
+    stand_in = tmp_path / "bin" / "openadapt-flow"
+    stand_in.parent.mkdir()
+    stand_in.write_text("#!/bin/sh\nexit 0\n")
+    stand_in.chmod(0o755)
+    monkeypatch.setattr(flow_bridge, "_is_frozen", lambda: False)
+    monkeypatch.delenv("OPENADAPT_DESKTOP_FLOW_BIN", raising=False)
+    monkeypatch.setenv("PATH", f"{stand_in.parent}{os.pathsep}{os.environ.get('PATH', '')}")
+    calls: list[list[str]] = []
+
+    def runner(cmd, **_kwargs):
+        calls.append([str(part) for part in cmd])
+        return FakeProc(returncode=0)
+
+    assert str(stand_in) not in (flow_bridge._flow_command() or [])
+    assert str(stand_in) not in flow_bridge.flow_runtime_source()
+    try:
+        FlowBridge(runner=runner).compile(tmp_path / "recording", tmp_path / "bundle")
+    except FlowNotAvailableError:
+        pass
+    assert not [cmd for cmd in calls if str(stand_in) in cmd]
+
+
 def test_recording_refuses_an_unpinned_flow(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

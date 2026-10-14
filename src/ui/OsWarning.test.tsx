@@ -1,5 +1,5 @@
 import { cleanup, render } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { OsWarning, detectPlatform, type DesktopPlatform } from "./OsWarning";
 
 afterEach(cleanup);
@@ -51,5 +51,34 @@ describe("detectPlatform", () => {
     [{ platform: "", userAgent: "" }, "other"],
   ])("reads %o as %s", (nav, expected) => {
     expect(detectPlatform(nav)).toBe(expected);
+  });
+});
+
+// The real path: no platform prop, so OsWarning reads the computer it runs on.
+// The module is loaded fresh after the stub, because an earlier version read
+// navigator once at import.
+describe("OsWarning on the computer it runs on", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.resetModules();
+  });
+
+  async function shown(platform: string, userAgent: string): Promise<string> {
+    vi.stubGlobal("navigator", { platform, userAgent });
+    vi.resetModules();
+    const { OsWarning: OnThisComputer } = await import("./OsWarning");
+    return render(<OnThisComputer />).container.textContent ?? "";
+  }
+
+  it("gives a Linux computer Linux steps, never the Windows SmartScreen text", async () => {
+    const copy = await shown("Linux x86_64", "Mozilla/5.0 (X11; Linux x86_64)");
+    expect(copy).not.toMatch(/SmartScreen|Windows/);
+    expect(copy).toMatch(/SHA256SUMS/);
+  });
+
+  it("gives a Mac the Privacy & Security path, not only Control-click", async () => {
+    const copy = await shown("MacIntel", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)");
+    expect(copy).toContain("Privacy & Security");
+    expect(copy).toContain("Open Anyway");
   });
 });
