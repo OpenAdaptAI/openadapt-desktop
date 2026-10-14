@@ -245,14 +245,27 @@ const INPUT_WORDS: Record<string, string> = {
   url: "URL",
 };
 
+// Whole names that EMR patient tables abbreviate or write in database word
+// order, so "fname" reads "first name" and "phone_home" reads "home phone".
+const INPUT_PHRASES: Record<string, string> = {
+  fname: "first name",
+  mname: "middle name",
+  lname: "last name",
+  "phone home": "home phone",
+  "phone cell": "mobile phone",
+  "phone biz": "work phone",
+};
+
 /** "member_id" -> "member ID", "patientName" -> "patient name". */
 export function humanizeInput(name: string): string {
   const words = name
     .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
     .split(/[_\-\s]+/)
     .filter(Boolean)
-    .map((word) => INPUT_WORDS[word.toLowerCase()] ?? word.toLowerCase());
-  return words.join(" ") || name;
+    .map((word) => word.toLowerCase());
+  const phrase = INPUT_PHRASES[words.join(" ")];
+  if (phrase) return phrase;
+  return words.map((word) => INPUT_WORDS[word] ?? word).join(" ") || name;
 }
 
 /** Sentence-case a phrase: "member ID" -> "Member ID". */

@@ -90,20 +90,39 @@ function parameterName(expression: { source: string; value?: string | null } | n
   return humanizeInput(expression.value);
 }
 
+/**
+ * One plain line for what a save changes: the field, and where its value
+ * comes from. A field line doesn't repeat the input that finds the record;
+ * "How it makes sure it's the right record" covers that.
+ */
 export function describeEffect(effect: QualificationEditableEffect): string {
-  const match = Object.values(effect.match ?? {})
-    .map(parameterName)
-    .find(Boolean);
   const value = parameterName(effect.value);
-  const record = match ? `the record for the ${match} you give it` : "the record";
-  if (effect.kind === "field_equals" && effect.field) {
-    return value
-      ? `Sets ${humanizeInput(effect.field)} on ${record} to the ${value} you give it.`
-      : `Sets ${humanizeInput(effect.field)} on ${record}.`;
+  const field = effect.field ? humanizeInput(effect.field) : null;
+  if (effect.kind === "field_equals" && field) {
+    if (value) {
+      return value === field
+        ? `Sets the ${field} you give it.`
+        : `Sets the ${field} to the ${value} you give it.`;
+    }
+    return effect.value?.source === "literal"
+      ? `Sets the ${field} to the same value every time.`
+      : `Sets the ${field}.`;
   }
-  return effect.field && value
-    ? `Saves a ${humanizeInput(effect.field)} on ${record}, from the ${value} you give it.`
-    : `Saves an entry on ${record}.`;
+  const keys = [
+    ...new Set(
+      Object.values(effect.match ?? {})
+        .map(parameterName)
+        .filter((name): name is string => Boolean(name)),
+    ),
+  ];
+  const given = keys.length ? ` with the ${keys.join(" and ")} you give it` : "";
+  if (effect.expected_count === 0) return `Checks that no record${given} is saved.`;
+  if (field && value) {
+    return value === field
+      ? `Saves the ${field} you give it.`
+      : `Saves a ${field} from the ${value} you give it.`;
+  }
+  return `Saves a record${given}.`;
 }
 
 // What each drill changes, as Flow's local drill campaign makes it (B276):
