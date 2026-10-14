@@ -238,7 +238,12 @@ export function Settings({
         </Field>
       </Card>
 
-      <GroundingModelCard policy={policy} host={cfg.host} />
+      <GroundingModelCard
+        policy={policy}
+        host={cfg.host}
+        signedIn={auth.authenticated}
+        onConnectCloud={onConnectCloud}
+      />
 
       <Card>
         <CardHead
@@ -315,13 +320,22 @@ function ReadRow({ label, value }: { label: string; value: string }) {
 function GroundingModelCard({
   policy,
   host,
+  signedIn,
+  onConnectCloud,
 }: {
   policy: EffectivePolicy | null;
   host: string;
+  signedIn: boolean;
+  onConnectCloud: () => void;
 }) {
   const gm = policy?.grounding_model ?? null;
   const isAdmin = Boolean(policy?.is_admin);
   const enabled = Boolean(gm?.enabled);
+  // The engine's fail-closed default is not an organization's policy: neither
+  // Cloud nor a saved copy answered. With nobody signed in, there is no
+  // organization at all, so the card must not point to an admin.
+  const noOrgPolicy = policy?.source === "fail-closed-default";
+  const localOnly = noOrgPolicy && !signedIn;
 
   return (
     <Card>
@@ -345,7 +359,22 @@ function GroundingModelCard({
         </div>
       </details>
 
-      {gm === null ? (
+      {policy === null ? (
+        <p className="page-sub" style={{ marginTop: "var(--space-3)" }}>
+          Desktop can't read this setting from the local engine right now.
+        </p>
+      ) : noOrgPolicy ? (
+        <>
+          <Field label="Grounding-model rung">
+            <Pill tone="ok">Off (local only)</Pill>
+          </Field>
+          <p className="page-sub">
+            {localOnly
+              ? "No OpenAdapt Cloud workspace is connected, so the model stays off and OpenAdapt finds buttons and fields on this computer only. Connect a workspace to use your organization's setting."
+              : "OpenAdapt Cloud can't be reached and there's no saved copy of your organization's setting, so the model stays off for now."}
+          </p>
+        </>
+      ) : gm === null ? (
         <p className="page-sub" style={{ marginTop: "var(--space-3)" }}>
           Your organization manages this setting in OpenAdapt Cloud. Sign in
           and open the dashboard to see or change it.
@@ -377,21 +406,30 @@ function GroundingModelCard({
         </>
       )}
 
-      <div className="row" style={{ marginTop: "var(--space-4)" }}>
-        <Pill tone="neutral">read-only</Pill>
-        <span className="page-sub">
-          {isAdmin
-            ? "Admins change this in the cloud dashboard (the single canonical write path)."
-            : "Only an organization admin can change this."}
-        </span>
-        <span className="spacer" />
-        <Button
-          variant="ghost"
-          onClick={() => openExternal(`${host}/dashboard/settings`)}
-        >
-          {isAdmin ? "Manage in cloud dashboard" : "Open cloud dashboard"}
-        </Button>
-      </div>
+      {localOnly ? (
+        <div className="row" style={{ marginTop: "var(--space-4)" }}>
+          <span className="spacer" />
+          <Button variant="ghost" onClick={onConnectCloud}>
+            Connect to OpenAdapt Cloud
+          </Button>
+        </div>
+      ) : policy !== null ? (
+        <div className="row" style={{ marginTop: "var(--space-4)" }}>
+          <Pill tone="neutral">read-only</Pill>
+          <span className="page-sub">
+            {isAdmin
+              ? "Admins change this in the cloud dashboard (the single canonical write path)."
+              : "Only an organization admin can change this."}
+          </span>
+          <span className="spacer" />
+          <Button
+            variant="ghost"
+            onClick={() => openExternal(`${host}/dashboard/settings`)}
+          >
+            {isAdmin ? "Manage in cloud dashboard" : "Open cloud dashboard"}
+          </Button>
+        </div>
+      ) : null}
     </Card>
   );
 }

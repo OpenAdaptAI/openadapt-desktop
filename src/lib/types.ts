@@ -1086,6 +1086,11 @@ export interface EffectivePolicy {
   grounding_model: GroundingModelConfig;
   resolved_at?: string;
   offline?: boolean;
+  /**
+   * Where the engine got it: "network", "cache", or "fail-closed-default"
+   * when neither Cloud nor a saved copy answered (no organization policy).
+   */
+  source?: string;
 }
 
 /** A run waiting for a person to approve a save (``get_item_approval``). */
