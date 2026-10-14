@@ -94,6 +94,42 @@ Each gap below is stated precisely so the next change can close it.
    existing teach screen and leaves the item waiting until a person closes it
    in Needs you.
 
+## A person approves each save
+
+Every Desktop run of real items stops before each save and waits for a
+person (Flow's `each_item` approval mode, openadapt-flow PR 486). A run
+without a profile isn't gated unless the caller asks, so Desktop always
+passes `--approval-mode each_item`, and refuses to start on a Flow that can't
+gate. Check it's practice item is gated by Flow itself (`qualify run-case`
+runs under Standard); a drill never asks.
+
+| Screen | What it shows | Engine commands |
+| --- | --- | --- |
+| Any screen, while a run waits | A dialog: the item's own values next to Flow's screenshot of the filled form, the step it's about to take, and when the run stops waiting (10 minutes after it asks). Approve and save, or Don't save with one of three reasons (wrong values, wrong record, something wrong on the screen). Approve isn't offered when the screenshot is missing or doesn't match the digest in Flow's request. | `get_item_approval`, `answer_item_approval`; event `item_approval` |
+| Run it | The list stops at an item nobody approved in time. A declined item goes to Needs you with the reason the person gave. | `run_item` |
+| Check it, part 4 | The practice item stops before its save for the same approval. A practice save nobody approved, or one the person declined, records no result. The deployment settings file for the record check goes under Change where it runs. | `run_qualification_case` |
+| Check it, part 5 | Each drill runs with the practice item's values. Flow changes one thing right before the save; the drill passes only when Flow's own check refuses it before saving. | `run_qualification_case` |
+
+How it works:
+
+- `get_item_approval` and `answer_item_approval` are served while a run
+  holds the command queue (`engine/ipc.py` `CONCURRENT_COMMANDS`). They read
+  and answer only a run this engine started and hasn't finished, and only a
+  request that is waiting now, for the exact digest the person saw.
+- Desktop has no person-level sign-in (its Cloud credential belongs to the
+  organization), so each answer is recorded with `--unauthenticated` and
+  `--route desktop_run_it`. Flow re-checks the answer, re-reads the form and
+  runs the right-record check again before it saves.
+- A late answer (the run already stopped waiting) is never turned into a
+  save: Desktop doesn't resume the run, and says to run the item again.
+- Before the practice item runs, Desktop calls `openadapt-flow qualify drills
+  BUNDLE --json`. It adds the five drills for the practice case's first save
+  and trusts this computer's drill key. It changes the project, so it runs
+  before any result is recorded. After a drill, Desktop keeps
+  `qualification-fault/receipt.json` and `mutation.json` as the result's
+  `fault_receipt` and `fault_mutation` evidence. A drill whose
+  `status.json` says `staged: false` hasn't passed, and nothing is recorded.
+
 ## Only ask a person about problems
 
 This switch lets a clinic stop approving routine items one by one. With it
@@ -159,18 +195,17 @@ Safety rules:
   Needs you, blocks more items of the task, and offers no re-run.
   `src/lib/outcome-cases.json` `switch_cases` pins this for both the engine
   and the screens.
-- An item Flow held for approval before saving offers skip, decline, or
-  finished by hand. Approving and saving from Desktop isn't built, and
-  running it again would stop at the same check.
+- An item the switch held for approval before saving offers skip, decline,
+  or finished by hand: running it again would stop at the same check. An
+  item nobody approved in time under `each_item` can run again.
 
 What isn't built yet, so the switch can't take effect on any computer
 (`engine/approval_mode.py` `NOT_BUILT`; each is listed under "Missing on
 this computer"):
 
-1. **Flow's governed run doesn't take the gate.** Flow asks its approval
-   gate only when a caller hands one to the Replayer. `openadapt-flow run`,
-   which Desktop calls, has no way to take one yet, so no Desktop run is
-   checked before each save and Desktop passes no approval mode to Flow.
+1. **No field-change check.** Flow can't yet check that a save changed
+   only the fields it was given, and the three drills for that check don't
+   exist. Until they do, Desktop passes `each_item`, never `problems_only`.
 2. **No Cloud status client.** Flow's P1 check needs a fresh signed status
    from Cloud before every save. Desktop doesn't fetch one, and no Cloud
    endpoint issues one yet.
@@ -180,8 +215,7 @@ this computer"):
 5. **No runner setup.** The design shows the switch only on runners with a
    current runner setup, so the card shows the switch only for a task that
    already has one on this computer.
-6. **No approve-and-save path** for an item held for approval, and no
-   per-item approval (phase 0) in Run it.
+6. **No approve-and-save path** for an item the switch held for approval.
 
 ## Screenshots
 
