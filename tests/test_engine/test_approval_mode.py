@@ -232,7 +232,14 @@ def _run(disp, member: str) -> dict:
 def test_desktop_has_no_command_that_turns_the_switch_on(task) -> None:
     disp, _db, _config, _digest = task
     commands = {name for name in disp._handlers if "approval" in name or "switch" in name}
-    assert commands == {"get_approval_mode", "turn_off_approval_mode"}
+    # The item-approval pair answers one save a running item waits on
+    # (``each_item``); neither reads or writes a switch record.
+    assert commands == {
+        "get_approval_mode",
+        "turn_off_approval_mode",
+        "get_item_approval",
+        "answer_item_approval",
+    }
     source = Path(__file__).resolve().parents[2] / "engine" / "dispatch.py"
     assert "accept_switch" not in source.read_text()
 
