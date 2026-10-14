@@ -284,3 +284,40 @@ class TestCLI:
         args, _kwargs = governed_push.call_args
         assert args[0].path == str(raw)
         assert args[0].kind == "recording"
+
+
+def test_doctor_flags_wrong_flow_version(cli_config: EngineConfig, capsys, monkeypatch) -> None:
+    """An unrelated Flow on PATH is not "OK" (ledger B105)."""
+    from engine import flow_bridge
+
+    monkeypatch.setattr(flow_bridge, "_is_frozen", lambda: False)
+    monkeypatch.delenv("OPENADAPT_DESKTOP_FLOW_BIN", raising=False)
+    monkeypatch.setattr(flow_bridge.shutil, "which", lambda *_a, **_k: "/tmp/x/openadapt-flow")
+    monkeypatch.setattr(flow_bridge, "version", lambda _name: "1.19.0")
+    with patch("engine.cli.EngineConfig", return_value=cli_config):
+        main(["doctor"])
+    out = capsys.readouterr().out
+    (line,) = [row for row in out.splitlines() if "openadapt-flow (loop engine)" in row]
+    assert "[OK]" not in line
+    assert "1.19.0" in line and "1.35.1" in line
+
+
+def test_compile_reports_failure_when_no_bundle(
+    cli_config: EngineConfig, tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """Exit code 0 without a bundle is not "Compiled." (ledger B105)."""
+    from engine.flow_bridge import FlowBridge, FlowResult
+
+    out_dir = tmp_path / "bundle"
+    monkeypatch.setattr(
+        FlowBridge,
+        "compile",
+        lambda self, recording, out, name=None, timeout=None: FlowResult(
+            ok=True, returncode=0, out_dir=out
+        ),
+    )
+    with patch("engine.cli.EngineConfig", return_value=cli_config):
+        with pytest.raises(SystemExit) as exited:
+            main(["compile", str(tmp_path / "rec"), "--out", str(out_dir)])
+    assert exited.value.code != 0
+    assert "Compiled." not in capsys.readouterr().out

@@ -2198,8 +2198,8 @@ class TestLibraryCommands:
             )()
 
         monkeypatch.setattr(
-            "engine.flow_bridge.shutil.which",
-            lambda _name: "/usr/bin/openadapt-flow",
+            "engine.flow_bridge._pinned_flow_command",
+            lambda: ["/usr/bin/openadapt-flow"],
         )
         monkeypatch.setattr("engine.dispatch.sys.platform", "linux")
         bridge = FlowBridge(runner=runner)

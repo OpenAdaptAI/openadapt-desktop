@@ -28,9 +28,11 @@ import re
 import shutil
 import subprocess
 import sys
+import sysconfig
 import time
 from dataclasses import dataclass
 from importlib import import_module
+from importlib.metadata import PackageNotFoundError, version
 from importlib.util import find_spec
 from pathlib import Path
 from types import ModuleType
@@ -39,6 +41,14 @@ from typing import Callable, Literal, cast
 from loguru import logger
 
 FLOW_BIN = "openadapt-flow"
+#: The exact Flow release Desktop is built and tested against. It equals the
+#: ``openadapt-flow`` pin in the ``build`` extra of pyproject.toml, which the
+#: native installer freezes (tests/test_engine/test_flow_bridge.py checks).
+REQUIRED_FLOW_VERSION = "1.35.1"
+#: A developer who runs another Flow (a source checkout, say) names it here.
+#: The signed installer ignores it.
+FLOW_OVERRIDE_ENV = "OPENADAPT_DESKTOP_FLOW_BIN"
+FLOW_INSTALL_HINT = f"pip install 'openadapt-flow[browser,console]=={REQUIRED_FLOW_VERSION}'"
 EMBEDDED_FLOW_MODE = "__openadapt_flow__"
 EMBEDDED_FLOW_RECORD_MODE = "__openadapt_flow_record_config__"
 FlowOutcome = Literal[
@@ -398,18 +408,72 @@ def _is_frozen() -> bool:
     return bool(getattr(sys, "frozen", False))
 
 
+def _installed_flow_version() -> str | None:
+    """The ``openadapt-flow`` version installed in this Python environment."""
+
+    try:
+        return version("openadapt-flow")
+    except PackageNotFoundError:
+        return None
+
+
+def _flow_override() -> str | None:
+    override = os.environ.get(FLOW_OVERRIDE_ENV, "").strip()
+    if not override:
+        return None
+    return shutil.which(override)
+
+
+def _pinned_flow_command() -> list[str] | None:
+    """The pinned Flow installed next to this interpreter, never one on PATH."""
+
+    if _installed_flow_version() != REQUIRED_FLOW_VERSION:
+        return None
+    name = "openadapt-flow.exe" if os.name == "nt" else "openadapt-flow"
+    script = Path(sysconfig.get_path("scripts")) / name
+    if script.is_file():
+        return [str(script)]
+    # Isolated mode keeps the working directory off sys.path, so a folder
+    # named openadapt_flow there can't stand in for the installed package.
+    return [sys.executable, "-I", "-m", "openadapt_flow"]
+
+
 def _flow_command(flow_bin: str = FLOW_BIN) -> list[str] | None:
-    """Resolve Flow without ever trusting PATH in the installed application."""
+    """Resolve the exact Flow Desktop was built for, never any Flow on PATH."""
 
     if flow_bin == FLOW_BIN and _is_frozen():
         return [sys.executable, EMBEDDED_FLOW_MODE]
-    resolved = shutil.which(flow_bin)
-    return [resolved] if resolved else None
+    if flow_bin != FLOW_BIN:
+        # A caller that names another executable chose it explicitly.
+        resolved = shutil.which(flow_bin)
+        return [resolved] if resolved else None
+    override = _flow_override()
+    if override:
+        return [override]
+    return _pinned_flow_command()
 
 
 def flow_available(flow_bin: str = FLOW_BIN) -> bool:
-    """Whether the bundled or development ``openadapt-flow`` CLI is usable."""
+    """Whether the bundled, pinned, or developer-named ``openadapt-flow`` is usable."""
     return _flow_command(flow_bin) is not None
+
+
+def flow_problem(flow_bin: str = FLOW_BIN) -> str | None:
+    """Why Desktop won't run Flow here, or None when it will."""
+
+    if flow_available(flow_bin):
+        return None
+    if flow_bin == FLOW_BIN and os.environ.get(FLOW_OVERRIDE_ENV, "").strip():
+        return f"{FLOW_OVERRIDE_ENV} names a program that doesn't exist"
+    installed = _installed_flow_version()
+    if installed is None:
+        return f"not installed. Desktop needs {REQUIRED_FLOW_VERSION}: {FLOW_INSTALL_HINT}"
+    if installed != REQUIRED_FLOW_VERSION:
+        return (
+            f"openadapt-flow {installed} found, Desktop requires {REQUIRED_FLOW_VERSION}: "
+            f"{FLOW_INSTALL_HINT}"
+        )
+    return f"openadapt-flow {installed} is installed but can't be started"
 
 
 def flow_runtime_source(flow_bin: str = FLOW_BIN) -> str:
@@ -417,8 +481,16 @@ def flow_runtime_source(flow_bin: str = FLOW_BIN) -> str:
 
     if _is_frozen():
         return "bundled with OpenAdapt Desktop"
+    if flow_bin == FLOW_BIN:
+        override = _flow_override()
+        if override:
+            return f"unpinned developer override at {override}"
     command = _flow_command(flow_bin)
-    return f"on PATH at {command[0]}" if command else "not on PATH"
+    if command is None:
+        return flow_problem(flow_bin) or "not found"
+    if flow_bin != FLOW_BIN:
+        return f"{flow_bin} at {command[0]}"
+    return f"openadapt-flow {REQUIRED_FLOW_VERSION} in this Python environment"
 
 
 def _subprocess_env() -> dict[str, str]:
@@ -556,7 +628,7 @@ class FlowBridge:
         prefix = _flow_command(self.flow_bin)
         if prefix is None:
             raise FlowNotAvailableError(
-                f"'{self.flow_bin}' not found on PATH; install openadapt-flow."
+                f"openadapt-flow isn't available: {flow_problem(self.flow_bin)}"
             )
         cmd = [*prefix, *args]
         logger.debug("flow: {cmd}", cmd=_safe_command_for_log(cmd))
@@ -711,6 +783,11 @@ class FlowBridge:
                 raise FlowNotAvailableError(
                     "openadapt-flow is not importable by the Desktop runtime"
                 )
+            if (
+                _flow_override() is None
+                and _installed_flow_version() != REQUIRED_FLOW_VERSION
+            ):
+                raise FlowNotAvailableError(f"openadapt-flow isn't available: {flow_problem()}")
             command = [
                 sys.executable,
                 "-m",

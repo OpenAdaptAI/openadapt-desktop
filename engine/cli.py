@@ -367,6 +367,12 @@ def cmd_compile(args: argparse.Namespace, engine: types.SimpleNamespace) -> None
     except FlowNotAvailableError as exc:
         print(str(exc))
         sys.exit(1)
+    if result.ok and not any(
+        (out / name).is_file() for name in ("workflow.json", "workflow.json.enc")
+    ):
+        # Flow exited 0 but wrote no program: never report that as compiled.
+        print(f"Compile failed: openadapt-flow exited without writing a bundle to {out}")
+        sys.exit(1)
     print("Compiled." if result.ok else f"Compile failed:\n{result.stderr}")
     if not result.ok:
         sys.exit(result.returncode or 1)
@@ -774,14 +780,14 @@ def cmd_doctor(args: argparse.Namespace, engine: types.SimpleNamespace) -> None:
         checks.append(("keyring (credential store)", False, "not installed"))
 
     # openadapt-flow (the loop engine)
-    from engine.flow_bridge import flow_available, flow_runtime_source
+    from engine.flow_bridge import flow_available, flow_problem, flow_runtime_source
 
     flow_ready = flow_available()
     checks.append(
         (
             "openadapt-flow (loop engine)",
             flow_ready,
-            flow_runtime_source() if flow_ready else "not found (pip install openadapt-flow)",
+            flow_runtime_source() if flow_ready else (flow_problem() or "not found"),
         )
     )
 

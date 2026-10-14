@@ -22,6 +22,15 @@ from engine.flow_bridge import (
 from engine.targets import ExecutionTarget
 
 
+def _fake_pinned_flow(monkeypatch) -> None:
+    """Stand in for the pinned openadapt-flow installed next to this Python."""
+
+    monkeypatch.setattr(
+        "engine.flow_bridge._pinned_flow_command",
+        lambda: ["/usr/bin/openadapt-flow"],
+    )
+
+
 class FakeProc:
     def __init__(self, returncode=0, stdout="", stderr=""):
         self.returncode = returncode
@@ -64,7 +73,7 @@ class TestFlowBridgeInvocation:
             FlowBridge.hosted_runner_contract()
 
     def test_compile_builds_args(self, tmp_path: Path, monkeypatch) -> None:
-        monkeypatch.setattr("engine.flow_bridge.shutil.which", lambda _: "/usr/bin/openadapt-flow")
+        _fake_pinned_flow(monkeypatch)
         calls: list = []
         bridge = FlowBridge(runner=_runner(calls, stdout="ok"))
         result = bridge.compile(tmp_path / "rec", tmp_path / "bundle")
@@ -78,7 +87,7 @@ class TestFlowBridgeInvocation:
         assert command[command.index("--name") + 1] == "bundle"
 
     def test_qualify_from_demo_builds_args(self, tmp_path: Path, monkeypatch) -> None:
-        monkeypatch.setattr("engine.flow_bridge.shutil.which", lambda _: "/usr/bin/openadapt-flow")
+        _fake_pinned_flow(monkeypatch)
         calls: list = []
         bridge = FlowBridge(runner=_runner(calls, stdout="{}"))
         rec = tmp_path / "rec"
@@ -92,7 +101,7 @@ class TestFlowBridgeInvocation:
         assert "--policy-pack" in command
 
     def test_report_break_keeps_token_out_of_argv(self, tmp_path: Path, monkeypatch) -> None:
-        monkeypatch.setattr("engine.flow_bridge.shutil.which", lambda _: "/usr/bin/openadapt-flow")
+        _fake_pinned_flow(monkeypatch)
         calls: list = []
         bridge = FlowBridge(runner=_runner(calls, stdout="Nothing emitted: no halt"))
 
@@ -109,7 +118,7 @@ class TestFlowBridgeInvocation:
         assert env["OPENADAPT_INGEST_TOKEN"] == "secret-value"
 
     def test_push_keeps_token_and_local_name_out_of_argv(self, tmp_path: Path, monkeypatch) -> None:
-        monkeypatch.setattr("engine.flow_bridge.shutil.which", lambda _: "/usr/bin/openadapt-flow")
+        _fake_pinned_flow(monkeypatch)
         calls: list = []
         bridge = FlowBridge(runner=_runner(calls, stdout="--json\nok"))
 
@@ -132,8 +141,8 @@ class TestFlowBridgeInvocation:
         self, tmp_path: Path, monkeypatch
     ) -> None:
         monkeypatch.setattr(
-            "engine.flow_bridge.shutil.which",
-            lambda _: "/usr/bin/openadapt-flow",
+            "engine.flow_bridge._pinned_flow_command",
+            lambda: ["/usr/bin/openadapt-flow"],
         )
         calls: list = []
         bridge = FlowBridge(runner=_runner(calls, stdout="ok"))
@@ -150,7 +159,7 @@ class TestFlowBridgeInvocation:
         ]
 
     def test_run_builds_args(self, tmp_path: Path, monkeypatch) -> None:
-        monkeypatch.setattr("engine.flow_bridge.shutil.which", lambda _: "/usr/bin/openadapt-flow")
+        _fake_pinned_flow(monkeypatch)
         calls: list = []
         bridge = FlowBridge(runner=_runner(calls))
         bridge.run(tmp_path / "bundle", tmp_path / "cfg.yaml", out_dir=tmp_path / "run")
@@ -163,7 +172,7 @@ class TestFlowBridgeInvocation:
     def test_qualify_run_case_uses_flow_owned_authorization(
         self, tmp_path: Path, monkeypatch
     ) -> None:
-        monkeypatch.setattr("engine.flow_bridge.shutil.which", lambda _: "/usr/bin/openadapt-flow")
+        _fake_pinned_flow(monkeypatch)
         calls: list = []
         bridge = FlowBridge(runner=_runner(calls))
 
@@ -187,7 +196,7 @@ class TestFlowBridgeInvocation:
     def test_qualification_inputs_and_bundle_key_stay_out_of_argv(
         self, tmp_path: Path, monkeypatch
     ) -> None:
-        monkeypatch.setattr("engine.flow_bridge.shutil.which", lambda _: "/usr/bin/openadapt-flow")
+        _fake_pinned_flow(monkeypatch)
         calls: list = []
         bridge = FlowBridge(runner=_runner(calls))
         params = tmp_path / "case-params.json"
@@ -204,7 +213,7 @@ class TestFlowBridgeInvocation:
         assert run_env["OPENADAPT_BUNDLE_KEY"] == "protected-key"
 
     def test_replay_uses_run_dir(self, tmp_path: Path, monkeypatch) -> None:
-        monkeypatch.setattr("engine.flow_bridge.shutil.which", lambda _: "/usr/bin/openadapt-flow")
+        _fake_pinned_flow(monkeypatch)
         calls: list = []
         bridge = FlowBridge(runner=_runner(calls))
         bridge.replay(tmp_path / "bundle", out_dir=tmp_path / "run")
@@ -216,7 +225,7 @@ class TestFlowBridgeInvocation:
     def test_config_only_replay_never_injects_web_backend(
         self, tmp_path: Path, monkeypatch
     ) -> None:
-        monkeypatch.setattr("engine.flow_bridge.shutil.which", lambda _: "/usr/bin/openadapt-flow")
+        _fake_pinned_flow(monkeypatch)
         calls: list = []
         bridge = FlowBridge(runner=_runner(calls))
         deployment = tmp_path / "deployment.yaml"
@@ -241,7 +250,7 @@ class TestFlowBridgeInvocation:
     def test_run_uses_only_private_config_path_for_target_details(
         self, tmp_path: Path, monkeypatch
     ) -> None:
-        monkeypatch.setattr("engine.flow_bridge.shutil.which", lambda _: "/usr/bin/openadapt-flow")
+        _fake_pinned_flow(monkeypatch)
         calls: list = []
         bridge = FlowBridge(runner=_runner(calls))
         deployment = tmp_path / ".deployment-private.yaml"
@@ -267,6 +276,10 @@ class TestFlowBridgeInvocation:
         self, tmp_path: Path, monkeypatch
     ) -> None:
         monkeypatch.setattr("engine.flow_bridge.find_spec", lambda _name: object())
+        monkeypatch.setattr(
+            "engine.flow_bridge._installed_flow_version",
+            lambda: "1.35.1",
+        )
         calls: list = []
 
         def popen(command, **kwargs):
@@ -521,7 +534,7 @@ class TestFlowBridgeInvocation:
         assert "12345" not in rendered
 
     def test_nonzero_returncode(self, tmp_path: Path, monkeypatch) -> None:
-        monkeypatch.setattr("engine.flow_bridge.shutil.which", lambda _: "/usr/bin/openadapt-flow")
+        _fake_pinned_flow(monkeypatch)
         bridge = FlowBridge(runner=_runner([], returncode=1, stderr="boom"))
         result = bridge.replay(tmp_path / "bundle")
         assert not result.ok
@@ -574,7 +587,7 @@ class TestFlowBridgeInvocation:
     def test_push_refuses_before_upload_when_structured_result_is_missing(
         self, tmp_path: Path, monkeypatch
     ) -> None:
-        monkeypatch.setattr("engine.flow_bridge.shutil.which", lambda _: "/usr/bin/openadapt-flow")
+        _fake_pinned_flow(monkeypatch)
         calls: list = []
         bridge = FlowBridge(runner=_runner(calls, stdout="legacy push help"))
 
@@ -594,7 +607,7 @@ class TestFlowBridgeInvocation:
     def test_attached_browser_support_is_probed_once_from_run_help(
         self, monkeypatch, help_text: str, supported: bool
     ) -> None:
-        monkeypatch.setattr("engine.flow_bridge.shutil.which", lambda _: "/usr/bin/openadapt-flow")
+        _fake_pinned_flow(monkeypatch)
         calls: list = []
         bridge = FlowBridge(runner=_runner(calls, stdout=help_text))
 
@@ -876,10 +889,102 @@ def test_tutorial_runs_the_local_sample_with_optional_signals_off(tmp_path, monk
 
 def test_flow_runtime_source_names_the_flow_it_found(monkeypatch: pytest.MonkeyPatch) -> None:
     """Doctor says which openadapt-flow it found, not "development PATH"."""
-    from engine.flow_bridge import flow_runtime_source
+    from engine import flow_bridge
+    from engine.flow_bridge import REQUIRED_FLOW_VERSION, flow_runtime_source
 
     monkeypatch.setattr("engine.flow_bridge._is_frozen", lambda: False)
-    monkeypatch.setattr("engine.flow_bridge.shutil.which", lambda _bin: "/venv/bin/openadapt-flow")
-    assert flow_runtime_source() == "on PATH at /venv/bin/openadapt-flow"
+    monkeypatch.delenv(flow_bridge.FLOW_OVERRIDE_ENV, raising=False)
+    monkeypatch.setattr(flow_bridge, "version", _installed(REQUIRED_FLOW_VERSION))
+    assert flow_runtime_source() == (
+        f"openadapt-flow {REQUIRED_FLOW_VERSION} in this Python environment"
+    )
     monkeypatch.setattr("engine.flow_bridge._is_frozen", lambda: True)
     assert flow_runtime_source() == "bundled with OpenAdapt Desktop"
+
+
+# ------------------------------------------------- which Flow Desktop runs (B105)
+
+
+def _installed(version_or_error):
+    def fake(name: str) -> str:
+        assert name == "openadapt-flow"
+        if isinstance(version_or_error, Exception):
+            raise version_or_error
+        return version_or_error
+
+    return fake
+
+
+def test_unfrozen_ignores_unpinned_path_flow(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Any ``openadapt-flow`` on PATH is not the engine Desktop was built for."""
+    from importlib.metadata import PackageNotFoundError
+
+    from engine import flow_bridge
+
+    monkeypatch.setattr(flow_bridge, "_is_frozen", lambda: False)
+    monkeypatch.delenv(flow_bridge.FLOW_OVERRIDE_ENV, raising=False)
+    monkeypatch.setattr(flow_bridge.shutil, "which", lambda *_a, **_k: "/tmp/x/openadapt-flow")
+
+    monkeypatch.setattr(flow_bridge, "version", _installed(PackageNotFoundError("openadapt-flow")))
+    assert flow_available() is False
+
+    monkeypatch.setattr(flow_bridge, "version", _installed("1.19.0"))
+    assert flow_available() is False
+    assert "1.19.0" in flow_bridge.flow_problem()
+    assert flow_bridge.REQUIRED_FLOW_VERSION in flow_bridge.flow_problem()
+
+    monkeypatch.setattr(flow_bridge, "version", _installed(flow_bridge.REQUIRED_FLOW_VERSION))
+    assert flow_available() is True
+    command = flow_bridge._flow_command()
+    assert command is not None
+    assert "/tmp/x/openadapt-flow" not in command
+    assert flow_bridge.flow_problem() is None
+
+
+def test_developer_override_is_explicit_and_labelled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from engine import flow_bridge
+
+    dev = tmp_path / "openadapt-flow"
+    dev.write_text("#!/bin/sh\n")
+    dev.chmod(0o755)
+    monkeypatch.setattr(flow_bridge, "_is_frozen", lambda: False)
+    monkeypatch.setattr(flow_bridge, "version", _installed("1.19.0"))
+    monkeypatch.setenv(flow_bridge.FLOW_OVERRIDE_ENV, str(dev))
+
+    assert flow_bridge._flow_command() == [str(dev)]
+    assert "unpinned developer override" in flow_bridge.flow_runtime_source()
+
+    # The signed installer never takes an override from the environment.
+    monkeypatch.setattr(flow_bridge, "_is_frozen", lambda: True)
+    assert flow_bridge._flow_command() == [sys.executable, EMBEDDED_FLOW_MODE]
+
+
+def test_required_flow_version_is_the_build_pin() -> None:
+    from engine.flow_bridge import REQUIRED_FLOW_VERSION
+    from scripts.frozen_notices import bundled_flow_pin
+
+    assert bundled_flow_pin()[0] == REQUIRED_FLOW_VERSION
+
+
+def test_recording_refuses_an_unpinned_flow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from engine import flow_bridge
+
+    monkeypatch.setattr(flow_bridge, "_is_frozen", lambda: False)
+    monkeypatch.delenv(flow_bridge.FLOW_OVERRIDE_ENV, raising=False)
+    monkeypatch.setattr(flow_bridge, "find_spec", lambda _name: object())
+    monkeypatch.setattr(flow_bridge, "version", _installed("1.19.0"))
+    calls: list = []
+    bridge = FlowBridge(popen=lambda command, **kwargs: FakePopen(calls, command, **kwargs))
+
+    with pytest.raises(FlowNotAvailableError, match="1.19.0"):
+        bridge.start_record(
+            tmp_path / "recording",
+            request=tmp_path / ".request.yaml",
+            stop_path=tmp_path / ".stop",
+            ready_path=tmp_path / ".ready",
+        )
+    assert calls == []
