@@ -11,8 +11,8 @@ The [README](../README.md) covers what the app does and how to run it.
 > governed runtime are `openadapt-flow`; this repository publishes release
 > candidates around them. A release becomes the active Production default only
 > while the canonical signed lifecycle ledger holds a current admission for its
-> exact artifacts. Absent, inactive, expired, or revoked, and that release is
-> **not actively admitted**.
+> exact artifacts. If that admission is absent, inactive, expired, or revoked,
+> the release is **not actively admitted**.
 
 None of the compiler or the runtime lives here. This repository is the desktop
 shell, the local engine that wires it to Flow, and the release machinery for
@@ -99,10 +99,11 @@ deployment HIPAA-compliant.
 
 ## Phone decisions
 
-A paired phone receives a request, not an approval. Tapping it doesn't bless a
-stale screenshot and doesn't prove a business effect. The runner goes back to
-the live application, repeats the state, identity, and target checks, and
-returns a typed result; a refusal leaves the run paused where it was.
+A paired phone receives a request for a decision. A tap doesn't approve the
+screenshot the phone showed, and it doesn't prove that anything was saved. The
+runner goes back to the live application, repeats the state, identity, and
+target checks, and returns a typed result. If a check fails, the run stays
+paused where it was.
 
 Pairing authenticates the device session, not the named operator principal
 that a qualification contract may require for attribution. Design approval

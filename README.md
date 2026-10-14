@@ -5,15 +5,15 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/OpenAdaptAI/openadapt-desktop/blob/main/LICENSE)
 
 OpenAdapt Desktop automates repeated data entry in the apps your team already
-uses: web apps, EMRs, payer portals, desktop apps, and apps reached over RDP or
-Citrix. You do a task once while OpenAdapt records it. It compiles the
-recording into a program that runs on your computer and repeats the task for
-each item on a list. Before it types, it checks that the screen shows the right
-record. After it saves, it reads the record back. When something doesn't match,
-it stops and asks a person. A healthy run makes no calls to a generative AI
-model.
+uses: web apps, electronic medical records (EMRs), insurance portals, desktop
+apps, and apps reached over RDP or Citrix. You do a task once while OpenAdapt
+records it. It compiles the recording into a program that runs on your computer
+and repeats the task for each item on a list. Before it types, it checks that
+the screen shows the right record. After it saves, it reads the record back to
+confirm the save, once you've told it how. When something doesn't match, it
+stops and asks a person. A healthy run makes no calls to a generative AI model.
 
-It's for teams that key the same fields into the same systems every day, and
+It's for teams that type the same fields into the same systems every day, and
 for the developers and IT staff who set it up for them. This repository holds
 the desktop app (Tauri and React) and the Python engine it runs locally. The
 compiler and runtime are in
@@ -21,8 +21,8 @@ compiler and runtime are in
 
 ## Quick start
 
-To see it work in a couple of minutes without building the app, run the
-sample that the app's **See it work on a sample app** button runs. You need
+To see it work without building the app, run the same sample as the app's
+**See it work on a sample app** button. It takes about two minutes and needs
 Python 3.10, 3.11, or 3.12.
 
 ```bash
@@ -35,9 +35,14 @@ it, and runs it twice. The first run saves a note and confirms the save by
 reading the record back. The second run uses a backend that drops the save
 after the screen says "saved", and OpenAdapt stops instead of reporting
 success. The reports are written under `tutorials/`. The first run downloads
-Chromium.
+Chromium (about 300 MB).
 
-To run the desktop app from source, install
+In the output, *system of record* means the sample app's database, `VERIFIED`
+means the save was read back, and `HALTED` means it stopped. A warning that
+patient data isn't scrubbed is expected, because the sample's patients are
+made up.
+
+There's no signed installer yet, so the desktop app runs from source. Install
 [uv](https://docs.astral.sh/uv/), [Rust](https://rustup.rs), Node.js 22, and
 the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for your
 operating system. Then:
@@ -53,8 +58,7 @@ npm run tauri dev
 
 `scripts/dev_sidecar.py` connects the app to the engine in your checkout. On
 Windows, run it with `--frozen` to build the packaged engine instead; that
-takes several minutes. There's no signed installer to download yet (see
-[Limits](#limits)).
+takes several minutes.
 
 ## How it works
 
@@ -70,11 +74,11 @@ takes several minutes. There's no signed installer to download yet (see
   <img src="https://raw.githubusercontent.com/OpenAdaptAI/openadapt-desktop/main/docs/assets/operator/tasks.png" width="860" alt="OpenAdapt Desktop Tasks screen with synthetic data: three tasks, each with one status and one next step">
 </p>
 
-Three tabs cover the rest of the day. **Tasks** shows each task's next step.
+The app has three main tabs. **Tasks** shows each task's next step.
 **Needs you** holds every item OpenAdapt stopped on, each with one question to
 answer. **Results** shows what got done and checked, what needed a person, the
 wrong-record saves it prevented, and an estimate of time saved that shows its
-own baseline. Settings and the expert tools are behind the gear menu.
+own baseline. Settings and the advanced tools are behind the gear menu.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/OpenAdaptAI/openadapt-desktop/main/docs/assets/operator/needs-you.png" width="430" alt="Needs you with synthetic data: OpenAdapt was given member M-4821, the screen showed M-4822, and it stopped before saving">
@@ -91,6 +95,7 @@ that run:
 | Check the record | A save may have gone through. A person checks the record before anything is retried. OpenAdapt never retries it on its own. |
 | Finished, not checked | It did the steps but didn't confirm the saved result. |
 | Didn't finish | It couldn't complete the task. The result says whether anything could have been written. |
+| Didn't start | It refused before it touched the app. Nothing was written. |
 
 The app shows "Nothing was written" only when the engine's outcome proves it.
 The screenshots use synthetic data from the app's fixture harness.
@@ -99,20 +104,21 @@ The screenshots use synthetic data from the app's fixture harness.
 
 A recorded browser script, such as one from Playwright codegen, finds each
 target with one locator and fails when that locator stops matching. OpenAdapt
-keeps several ways to find each target: the app's structure (the web page or
-the accessibility tree) when there is one, and the target's text, appearance,
-and position on screen. When a layout, label, or theme changes, the run tries
-them in that order and continues on a valid match. If nothing matches, it
-stops at that step instead of clicking something that looks close, and a
-person can show OpenAdapt the right way once from **Needs you**. OpenAdapt
-records each fallback as a proposed repair and never changes the task on its
-own.
+keeps several ways to find each target: the app's structure (the web page's
+elements or the accessibility tree) when there is one, then the target's
+appearance, its text, and its position on screen. When a layout, label, or
+theme changes, the run tries them in that order and continues on a valid
+match. If nothing matches, it stops at that step instead of clicking something
+that looks close, and a person can show OpenAdapt the right way once from
+**Needs you**. OpenAdapt records each fallback as a proposed repair and never
+changes the task on its own.
 
 In Flow's [drift benchmark](https://github.com/OpenAdaptAI/openadapt-flow/blob/main/benchmark/structural_action/STRUCTURAL_ACTION.md),
-15 of 21 targets were moved, relabeled, and re-themed. Lookup by structure
-found all 21. Matching by appearance alone found only the 6 that didn't change.
-On apps with no structure to read, such as a Citrix window, OpenAdapt has only
-the screen to go on, so a redesign is more likely to stop a run.
+a synthetic page of 21 buttons was redrawn with 15 of them moved, relabeled,
+and re-themed. Every button kept its element ID. Lookup by structure found
+all 21. Matching on the screen alone found only the 6 that didn't change. On
+apps with no structure to read, such as a Citrix window, OpenAdapt has only the
+screen to go on, so a redesign is more likely to stop a run.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/OpenAdaptAI/openadapt-flow/main/docs/showcase/demo.gif" width="860" alt="One recording replayed by openadapt-flow on the interface it was recorded on and, side by side, under a theme it had never seen">
@@ -125,21 +131,22 @@ Every frame is a screenshot the replayer saved.
 
 The right-record check before typing reads the screen, so it needs no other
 access. Confirming the save afterwards needs a way to read the record back.
-IT sets it once per system in the deployment settings file that **Run it**
-takes:
+**Check it** asks how for each step that saves:
 
-- An API or database read (REST, GraphQL, FHIR, or SQL), a file, or a document
-  hash. These check the record from outside the app.
-- A screen read-back, for systems where you have no API or database access.
-  OpenAdapt re-reads the saved value in the app itself. This is a weaker check
-  than an outside read, because it shows only what the app displays.
+- From the system's records: an API or database read (REST, GraphQL, FHIR, or
+  SQL), a file, or a document hash. This checks the record from outside the
+  app. IT connects it once per system in the deployment settings file that
+  **Run it** takes.
+- By opening the saved record again on screen, for systems where you have no
+  API or database access. This is a weaker check than an outside read, because
+  it shows only what the app displays.
 
-Without either, a completed run shows **Finished, not checked** and doesn't
-count as done.
+Without one of these, a completed run shows **Finished, not checked** and
+doesn't count as done.
 
 ## Answering a stop from your phone
 
-When a run stops and needs a person, you can answer from your phone. Desktop
+When a run stops and needs a person, you can answer from your phone. The app
 pairs the phone with a one-time QR code and a matching code. The phone shows
 what the run stopped on, as far as your settings allow, and only the choices
 allowed at that point. Your answer goes back to the computer running the task,
@@ -227,6 +234,9 @@ openadapt-flow, this file and openadapt-flow are current.
 - There's no signed installer yet. The next macOS and Windows packages wait on
   code-signing certificates, so run the app from source for now.
 - Lists run one item at a time, as one Flow process per item.
+- Each app type needs its own driver. Windows apps run through an agent from
+  openadapt-flow on the Windows computer, and Citrix needs the Citrix Workspace
+  app. `openadapt-desktop capabilities` says what's missing on your computer.
 - **Run it** reads CSV and TSV files, not `.xlsx`.
 - The practice run in **Check it** saves for real, so use a test record.
 - Phone pairing identifies the device, not a named person.

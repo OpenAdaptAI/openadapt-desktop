@@ -96,3 +96,14 @@ def test_frozen_copies_the_ci_build(tmp_path: Path) -> None:
     assert dev_sidecar.build_frozen(target, root=tmp_path, run=run) == target
     assert calls == [[sys.executable, str(tmp_path / "scripts" / "build_frozen_engine.py")]]
     assert target.read_bytes() == b"frozen"
+
+
+def test_release_build_refuses_the_launcher() -> None:
+    """src-tauri/build.rs stops a release build that would package the launcher.
+
+    It finds the launcher by the same marker line, so the two must match.
+    """
+
+    build_rs = (Path(dev_sidecar.ROOT) / "src-tauri" / "build.rs").read_text(encoding="utf-8")
+    assert f'"{dev_sidecar.LAUNCHER_MARKER}"' in build_rs
+    assert 'env::var("PROFILE").as_deref() != Ok("release")' in build_rs

@@ -13,7 +13,8 @@ anywhere, to test the packaged engine) ``--frozen`` runs the same PyInstaller
 build that CI runs and copies the result into place.
 
 The launcher is for development only. ``src-tauri/binaries/`` is ignored by
-git, and a release build must use the frozen engine.
+git, and ``src-tauri/build.rs`` stops a release build that would package the
+launcher.
 
 Usage::
 
