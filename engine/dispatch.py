@@ -3251,12 +3251,28 @@ class EngineDispatcher:
                 bundle_key=self._qualification_bundle_key(workflow_id),
             )
             result["case_run"] = execution
+            stopped = self._first_failed_step(raw_report)
+            if stopped is not None:
+                result["stop_reason"] = stopped
             if drill_setup is not None:
                 result["drill_setup"] = drill_setup
             self.services.db.update_bundle(workflow_id, status="qualification_pending")
             return result
         except Exception as exc:
             return {"ok": False, "workflow_id": workflow_id, "error": str(exc)}
+
+    @staticmethod
+    def _first_failed_step(report: dict) -> str | None:
+        """Flow's own words for the step a case run stopped at, if one failed.
+
+        Shown only on this computer, under Check it's technical details.
+        """
+
+        for row in report.get("results") or []:
+            if isinstance(row, dict) and row.get("ok") is False and row.get("error"):
+                intent = str(row.get("intent") or row.get("step_id") or "A step")
+                return f"{intent}: {row['error']}"[:600]
+        return None
 
     @staticmethod
     def _practice_not_approved(report: dict) -> str | None:

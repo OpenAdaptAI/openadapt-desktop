@@ -142,7 +142,8 @@ function attachedBrowser(target: ExecutionTarget | null): boolean {
 }
 
 /** Where a case run stopped and Flow's reason, for the technical details. */
-function stopReason(run: RunReport | undefined): string {
+function stopReason(run: RunReport | undefined, flowWords?: unknown): string {
+  if (typeof flowWords === "string" && flowWords) return flowWords;
   if (!run) return "";
   const halt = run.halt;
   if (halt?.reason) {
@@ -606,7 +607,7 @@ export function CheckIt({
       const ran = checkPlan(response as QualificationProject).practice;
       if (ran && ran.status !== "passed") {
         // Say where and why it stopped: the result word alone doesn't.
-        fail("The practice run didn't pass.", stopReason(response.case_run as RunReport | undefined));
+        fail("The practice run didn't pass.", stopReason(response.case_run as RunReport | undefined, response.stop_reason));
       }
     } catch (error) {
       fail("The practice run didn't finish.", String(error));
@@ -644,7 +645,7 @@ export function CheckIt({
         latest = response as QualificationProject;
         const result = checkPlan(latest).drills.find((item) => item.id === drill.id);
         if (result && result.status !== "passed") {
-          fail(`The "${drill.label}" drill didn't pass.`, stopReason(response.case_run as RunReport | undefined));
+          fail(`The "${drill.label}" drill didn't pass.`, stopReason(response.case_run as RunReport | undefined, response.stop_reason));
           break;
         }
       }

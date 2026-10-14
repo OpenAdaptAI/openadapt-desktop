@@ -500,6 +500,7 @@ it("says where and why a practice run that ran didn't pass", async () => {
     if (command === CMD.RUN_QUALIFICATION_CASE) {
       return {
         ...failed,
+        stop_reason: "observe exact qualification environment: qualification environment observer does not match the project",
         case_run: {
           outcome: "HALTED",
           transaction_outcome: "HALTED_BEFORE_EFFECT",
@@ -520,5 +521,7 @@ it("says where and why a practice run that ran didn't pass", async () => {
   fireEvent.click(run);
 
   expect(await screen.findByText("The practice run didn't pass.")).toBeTruthy();
-  expect(screen.getByText(/type <member_id>: qualification environment observer does not match the project/)).toBeTruthy();
+  expect(
+    screen.getByText(/observe exact qualification environment: qualification environment observer does not match the project/),
+  ).toBeTruthy();
 });

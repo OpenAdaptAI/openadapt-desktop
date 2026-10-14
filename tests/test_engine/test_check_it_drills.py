@@ -244,3 +244,22 @@ def test_drill_evidence_is_kept_only_when_the_drill_made_its_change(tmp_path: Pa
     kept = bundle / "qualification-evidence" / "d-1" / "r1"
     assert (kept / "fault-receipt.json").read_bytes() == receipt
     assert (kept / "fault-mutation.json").read_bytes() == mutation
+
+
+def test_a_case_run_that_stopped_says_where_in_flows_words() -> None:
+    report = {
+        "results": [
+            {"step_id": "open", "intent": "click 'Open'", "ok": True},
+            {
+                "step_id": "<qualification-environment>",
+                "intent": "observe exact qualification environment",
+                "ok": False,
+                "error": "qualification environment observer does not match the project",
+            },
+        ]
+    }
+    assert EngineDispatcher._first_failed_step(report) == (
+        "observe exact qualification environment: "
+        "qualification environment observer does not match the project"
+    )
+    assert EngineDispatcher._first_failed_step({"results": [{"ok": True}]}) is None
