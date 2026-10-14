@@ -43,7 +43,7 @@ type PillTone = "neutral" | "ok" | "run" | "warn" | "crit";
 
 /**
  * Pill copy per detected capability state. "Available" is shown ONLY when the
- * engine's detection (engine/capabilities.py) reports it; before the report
+ * engine's detection (openadapt_desktop/capabilities.py) reports it; before the report
  * arrives, or without an engine, the pill says the state is being checked.
  */
 export const CAPABILITY_PILLS: Record<

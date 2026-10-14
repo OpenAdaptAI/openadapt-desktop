@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from engine.config import EngineConfig
+from openadapt_desktop.config import EngineConfig
 
 
 class FakeRecorder:
@@ -37,7 +37,7 @@ class FakeRecorder:
 def fake_native_recorder(monkeypatch):
     """Prevent unit tests from injecting real mouse/keyboard/screen capture."""
 
-    monkeypatch.setattr("engine.controller._load_capture_recorder", lambda: FakeRecorder)
+    monkeypatch.setattr("openadapt_desktop.controller._load_capture_recorder", lambda: FakeRecorder)
 
 
 @pytest.fixture(autouse=True)

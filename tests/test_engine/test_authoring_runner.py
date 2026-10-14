@@ -12,15 +12,15 @@ from typing import Any
 import httpx
 import pytest
 
-from engine.auth.store import load_authoring_lease
-from engine.authoring_runner import (
+from openadapt_desktop.auth.store import load_authoring_lease
+from openadapt_desktop.authoring_runner import (
     POLL_WAIT_S,
     AuthoringCoachOnly,
     AuthoringError,
     AuthoringRunner,
     project_observe,
 )
-from engine.config import EngineConfig
+from openadapt_desktop.config import EngineConfig
 
 BIND = "oab_" + "A" * 43
 PACK = "p.abcdefghijkl"
@@ -210,7 +210,7 @@ def test_claim_maps_mailbox_failures(tmp_path: Path, status: int) -> None:
 
 def test_poll_wait_is_zero_not_twenty_five(tmp_path: Path) -> None:
     assert POLL_WAIT_S == 0
-    source = Path("engine/authoring_runner.py").read_text(encoding="utf-8")
+    source = Path("openadapt_desktop/authoring_runner.py").read_text(encoding="utf-8")
     assert "DEFAULT_WAIT_S" not in source
     assert '"wait_seconds": POLL_WAIT_S' in source
     assert "from openadapt_flow.backends.win_agent" not in source
@@ -412,7 +412,7 @@ def test_node_table_is_mode_0600(tmp_path: Path) -> None:
 
 
 def test_projector_drops_value_title_and_six_digit_names(tmp_path: Path) -> None:
-    from engine.authoring_runner import NodeTable
+    from openadapt_desktop.authoring_runner import NodeTable
 
     table = NodeTable(tmp_path / "nodes.json", b"key")
     payload = project_observe(
@@ -447,8 +447,8 @@ def test_projector_drops_value_title_and_six_digit_names(tmp_path: Path) -> None
 
 
 def test_dispatch_resume_and_stop_use_authoring_when_bound(tmp_path: Path) -> None:
-    from engine.db import IndexDB
-    from engine.dispatch import EngineDispatcher, EngineServices
+    from openadapt_desktop.db import IndexDB
+    from openadapt_desktop.dispatch import EngineDispatcher, EngineServices
 
     runner, _requests, recorder, _audit = _mailbox(tmp_path)
     runner.claim_uri(URI, start_loop=False)

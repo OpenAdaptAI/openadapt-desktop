@@ -41,7 +41,7 @@ export interface ExecutionTarget {
 }
 
 /**
- * Capability-aware surface availability (engine/capabilities.py), schema
+ * Capability-aware surface availability (openadapt_desktop/capabilities.py), schema
  * "openadapt-desktop.capability-report/v1". The engine's detection is the
  * single source of truth; the UI never claims "Available" without it.
  */
@@ -169,7 +169,7 @@ export interface WorkItem {
   saved_without_person?: boolean;
 }
 
-/** Flow's per-item approval block, projected by engine/approval_mode.py. */
+/** Flow's per-item approval block, projected by openadapt_desktop/approval_mode.py. */
 export interface ItemApproval {
   /**
    * False when Flow's own model rejected the block, or when Desktop's own
@@ -1078,7 +1078,7 @@ export interface GroundingModelConfig {
 }
 
 // A minimal view of GET /api/policy/effective (resolved by the cloud control
-// plane, fetched + cached fail-closed by the engine — see engine/policy.py /
+// plane, fetched + cached fail-closed by the engine — see openadapt_desktop/policy.py /
 // docs/POLICY_SYNC.md). Only the fields the grounding-model section needs are
 // typed here.
 export interface EffectivePolicy {

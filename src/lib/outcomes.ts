@@ -1,6 +1,6 @@
 // Plain results derived from Flow's transaction outcome.
 //
-// This mirrors engine/outcomes.py. Both read the same cases from
+// This mirrors openadapt_desktop/outcomes.py. Both read the same cases from
 // outcome-cases.json in their tests, so the two copies cannot drift apart.
 //
 // The safety rule: a label may say "nothing was written" or offer a retry

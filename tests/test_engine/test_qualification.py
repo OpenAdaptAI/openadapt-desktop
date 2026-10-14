@@ -9,10 +9,10 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from engine.config import EngineConfig
-from engine.db import IndexDB
-from engine.dispatch import EngineDispatcher, EngineServices
-from engine.qualification import (
+from openadapt_desktop.config import EngineConfig
+from openadapt_desktop.db import IndexDB
+from openadapt_desktop.dispatch import EngineDispatcher, EngineServices
+from openadapt_desktop.qualification import (
     QualificationError,
     add_qualification_case,
     arm_action_identity,
@@ -31,11 +31,11 @@ from engine.qualification import (
     set_local_qualification_case_scope,
     set_project_minimum_effect_tier,
 )
-from engine.qualification_capabilities import (
+from openadapt_desktop.qualification_capabilities import (
     collect_qualification_capabilities,
     sign_qualification_capability_observation,
 )
-from engine.qualification_lifecycle import (
+from openadapt_desktop.qualification_lifecycle import (
     retain_capability_observation,
     retain_run_evidence,
     stage_case_runtime_inputs,
@@ -278,7 +278,7 @@ def test_local_case_result_refuses_unbound_retained_evidence(
         format=serialization.PublicFormat.Raw,
     )
     monkeypatch.setattr(
-        "engine.qualification_keys.qualification_signer",
+        "openadapt_desktop.qualification_keys.qualification_signer",
         lambda: (private_raw, b64encode(public_raw).decode("ascii")),
     )
     prepared = prepare_local_qualification_runner(bundle, workflow_id="wf-1")
@@ -442,7 +442,10 @@ def test_desktop_binds_canonical_inputs_and_action_scope_before_case_run(
         case_id="representative-1",
         kind="representative",
     )
-    from engine.qualification_lifecycle import stage_case_runtime_inputs, store_case_parameters
+    from openadapt_desktop.qualification_lifecycle import (
+        stage_case_runtime_inputs,
+        store_case_parameters,
+    )
 
     parameters_path, _ = store_case_parameters(
         tmp_path / "state",
@@ -583,7 +586,7 @@ def test_dispatcher_forwards_dual_path_fault_target_to_flow_scope(
         raise RuntimeError("stop after retained scope")
 
     monkeypatch.setattr(
-        "engine.qualification.prepare_local_qualification_runner",
+        "openadapt_desktop.qualification.prepare_local_qualification_runner",
         stop_after_scope,
     )
     try:
@@ -1395,7 +1398,7 @@ def _sealed_scoped_case_for_flow_command(
         format=serialization.PublicFormat.Raw,
     )
     monkeypatch.setattr(
-        "engine.qualification_keys.qualification_signer",
+        "openadapt_desktop.qualification_keys.qualification_signer",
         lambda: (private_raw, b64encode(public_raw).decode("ascii")),
     )
     data_dir = tmp_path / ".openadapt"

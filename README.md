@@ -198,7 +198,7 @@ Cloud with `push`.
 ```bash
 uv sync --python 3.12 --extra dev --extra build
 uv run pytest tests -q
-uv run ruff check engine tests scripts
+uv run ruff check openadapt_desktop tests scripts
 npm run test:ui
 ```
 
@@ -227,11 +227,11 @@ openadapt-flow: record -> compile -> check -> run -> stop or repair
 ```
 
 ```text
-engine/       Python engine: recording, review, sign-in, sync, and the Flow bridge
-src-tauri/    Rust shell: starts and restarts the engine, tray socket wiring
-src/          React screens and the engine client
-scripts/      Build, release, screenshot, and development scripts
-tests/        Python unit and end-to-end tests
+openadapt_desktop/  Python engine: recording, review, sign-in, sync, and the Flow bridge
+src-tauri/          Rust shell: starts and restarts the engine, tray socket wiring
+src/                React screens and the engine client
+scripts/            Build, release, screenshot, and development scripts
+tests/              Python unit and end-to-end tests
 ```
 
 [DESIGN.md](https://github.com/OpenAdaptAI/openadapt-desktop/blob/main/DESIGN.md)

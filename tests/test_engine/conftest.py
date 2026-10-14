@@ -33,7 +33,7 @@ def all_surfaces_capable(monkeypatch):
     available; capability tests exercise the real probes directly and refusal
     tests monkeypatch ``detect_capability`` with a non-available state.
     """
-    from engine import capabilities
+    from openadapt_desktop import capabilities
 
     def _available(surface: str) -> capabilities.SurfaceCapability:
         return capabilities.SurfaceCapability(
@@ -55,7 +55,7 @@ def fake_keyring(monkeypatch) -> FakeKeyring:
     by name to grab the in-memory backend; the rest just get isolation for free.
     """
     fake = FakeKeyring()
-    monkeypatch.setattr("engine.auth.store._keyring", lambda: fake)
+    monkeypatch.setattr("openadapt_desktop.auth.store._keyring", lambda: fake)
     # Ensure no ambient ingest token leaks in from the environment.
     monkeypatch.delenv("OPENADAPT_INGEST_TOKEN", raising=False)
     return fake

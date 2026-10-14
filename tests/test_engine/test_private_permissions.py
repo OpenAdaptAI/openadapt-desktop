@@ -16,11 +16,11 @@ from pathlib import Path
 
 import pytest
 
-from engine.config import EngineConfig
-from engine.controller import RecordingController
-from engine.db import IndexDB
-from engine.dispatch import EngineDispatcher, EngineServices
-from engine.storage_manager import StorageManager
+from openadapt_desktop.config import EngineConfig
+from openadapt_desktop.controller import RecordingController
+from openadapt_desktop.db import IndexDB
+from openadapt_desktop.dispatch import EngineDispatcher, EngineServices
+from openadapt_desktop.storage_manager import StorageManager
 
 pytestmark = pytest.mark.skipif(
     sys.platform == "win32", reason="POSIX permission bits do not apply on Windows"
@@ -131,7 +131,7 @@ def test_replay_run_folder_is_private(tmp_path: Path) -> None:
 
     class Bridge:
         def replay(self, _bundle, out_dir, *, config):
-            from engine.flow_bridge import FlowResult
+            from openadapt_desktop.flow_bridge import FlowResult
 
             seen["runs"] = _mode(out_dir.parent)
             seen["run"] = _mode(out_dir)
@@ -156,8 +156,8 @@ def test_replay_run_folder_is_private(tmp_path: Path) -> None:
 def test_cli_and_sidecar_entrypoints_restrict_the_umask(tmp_path: Path, monkeypatch) -> None:
     """Files Flow writes into a run folder inherit the engine's umask."""
 
-    from engine import cli
-    from engine import main as engine_main
+    from openadapt_desktop import cli
+    from openadapt_desktop import main as engine_main
 
     config = _config(tmp_path / ".openadapt")
     monkeypatch.setattr(cli, "EngineConfig", lambda: config)

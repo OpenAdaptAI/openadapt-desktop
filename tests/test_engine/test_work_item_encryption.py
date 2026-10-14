@@ -16,10 +16,10 @@ from pathlib import Path
 
 import pytest
 
-from engine.auth.store import SERVICE_NAME
-from engine.config import EngineConfig
-from engine.db import IndexDB
-from engine.dispatch import EngineDispatcher, EngineServices
+from openadapt_desktop.auth.store import SERVICE_NAME
+from openadapt_desktop.config import EngineConfig
+from openadapt_desktop.db import IndexDB
+from openadapt_desktop.dispatch import EngineDispatcher, EngineServices
 from tests.test_engine.test_work_items import (
     TARGET,
     _Audit,
@@ -240,7 +240,7 @@ def test_no_keychain_refuses_before_anything_runs(task, monkeypatch) -> None:
         def delete_password(self, *_a):
             raise RuntimeError("no backend")
 
-    monkeypatch.setattr("engine.auth.store._keyring", lambda: NoKeyring())
+    monkeypatch.setattr("openadapt_desktop.auth.store._keyring", lambda: NoKeyring())
 
     result = _run(disp, MEMBER)
 

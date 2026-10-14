@@ -19,10 +19,10 @@ from pathlib import Path
 
 import pytest
 
-from engine.config import EngineConfig
-from engine.db import IndexDB
-from engine.dispatch import EngineDispatcher, EngineServices
-from engine.flow_bridge import APPROVAL_WAIT_S, FlowBridge, FlowResult
+from openadapt_desktop.config import EngineConfig
+from openadapt_desktop.db import IndexDB
+from openadapt_desktop.dispatch import EngineDispatcher, EngineServices
+from openadapt_desktop.flow_bridge import APPROVAL_WAIT_S, FlowBridge, FlowResult
 from tests.test_engine.test_work_items import _verified_report
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"filled form"
@@ -34,7 +34,7 @@ def _fake_pinned_flow(monkeypatch) -> None:
     """Stand in for the pinned openadapt-flow installed next to this Python."""
 
     monkeypatch.setattr(
-        "engine.flow_bridge._pinned_flow_command",
+        "openadapt_desktop.flow_bridge._pinned_flow_command",
         lambda: ["/usr/bin/openadapt-flow"],
     )
 
@@ -392,7 +392,7 @@ def test_the_wire_answers_an_approval_while_a_run_waits(
 ) -> None:
     """A run holds the command queue; the approval still gets through."""
 
-    from engine.ipc import IPCHandler
+    from openadapt_desktop.ipc import IPCHandler
 
     config = EngineConfig(data_dir=tmp_path / ".openadapt", log_level="WARNING")
     handler = IPCHandler(config=config)
