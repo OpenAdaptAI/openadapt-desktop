@@ -488,3 +488,37 @@ it("before the check starts, says drills come with the practice item and the rec
   expect(screen.getByText(/will read the saved record back to check the\s+entries listed in part 1/)).toBeTruthy();
   expect(screen.queryByText(/didn't see where this save lands/)).toBeNull();
 });
+
+it("says where and why a practice run that ran didn't pass", async () => {
+  engine(project());
+  const failed = project({ cases: [{ id: "practice-1", kind: "representative", status: "failed" as never }] });
+  vi.mocked(engineInvoke).mockImplementation(async (command) => {
+    if (command === CMD.GET_QUALIFICATION) return project();
+    if (command === CMD.ADD_QUALIFICATION_CASE) {
+      return project({ cases: [{ id: "practice-1", kind: "representative", status: null }] });
+    }
+    if (command === CMD.RUN_QUALIFICATION_CASE) {
+      return {
+        ...failed,
+        case_run: {
+          outcome: "HALTED",
+          transaction_outcome: "HALTED_BEFORE_EFFECT",
+          halt: { step_index: 0, step_intent: "type <member_id>", reason: "qualification environment observer does not match the project" },
+        },
+      };
+    }
+    throw new Error(`unexpected ${command}`);
+  });
+  render(<CheckIt workflowId="wf-1" onExactChecks={() => {}} onRun={() => {}} />);
+
+  const run = await screen.findByRole("button", { name: "Run the practice item" });
+  fireEvent.click(
+    screen.getByRole("checkbox", {
+      name: "These are test values, and I'll keep the app in view while it runs.",
+    }),
+  );
+  fireEvent.click(run);
+
+  expect(await screen.findByText("The practice run didn't pass.")).toBeTruthy();
+  expect(screen.getByText(/type <member_id>: qualification environment observer does not match the project/)).toBeTruthy();
+});

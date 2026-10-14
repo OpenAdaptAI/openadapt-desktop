@@ -141,6 +141,16 @@ function attachedBrowser(target: ExecutionTarget | null): boolean {
   return Boolean(target?.backend === "web" && target.browser_cdp_endpoint?.trim());
 }
 
+/** Where a case run stopped and Flow's reason, for the technical details. */
+function stopReason(run: RunReport | undefined): string {
+  if (!run) return "";
+  const halt = run.halt;
+  if (halt?.reason) {
+    return halt.step_intent ? `${halt.step_intent}: ${halt.reason}` : halt.reason;
+  }
+  return run.error ?? "";
+}
+
 function caseResult(response: { case_run?: RunReport } & Record<string, unknown>) {
   const run = response.case_run;
   if (!run) return null;
@@ -593,6 +603,11 @@ export function CheckIt({
         return;
       }
       setProject(response as QualificationProject);
+      const ran = checkPlan(response as QualificationProject).practice;
+      if (ran && ran.status !== "passed") {
+        // Say where and why it stopped: the result word alone doesn't.
+        fail("The practice run didn't pass.", stopReason(response.case_run as RunReport | undefined));
+      }
     } catch (error) {
       fail("The practice run didn't finish.", String(error));
     } finally {
@@ -627,6 +642,11 @@ export function CheckIt({
           break;
         }
         latest = response as QualificationProject;
+        const result = checkPlan(latest).drills.find((item) => item.id === drill.id);
+        if (result && result.status !== "passed") {
+          fail(`The "${drill.label}" drill didn't pass.`, stopReason(response.case_run as RunReport | undefined));
+          break;
+        }
       }
       if (latest) {
         setProject(latest);
