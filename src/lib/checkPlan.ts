@@ -26,6 +26,8 @@ export interface WriteStep {
   identityText: string;
   checked: boolean;
   checkText: string;
+  /** The program already says what this step saves (it has record checks). */
+  hasRecordChecks: boolean;
 }
 
 export interface CaseView {
@@ -225,6 +227,7 @@ export function checkPlan(response: QualificationProject): CheckPlan {
         ? `Before saving, it checks that the record on screen matches the ${params.join(" and ")} you give it. If they differ, it stops and asks you.`
         : "Before saving, it checks the record on screen against the details it saw when you showed the task. If they differ, it stops and asks you.",
       checked: effects.length > 0 && tiers.length === effects.length,
+      hasRecordChecks: effects.length > 0 || node.effects.length > 0,
       checkText: effects.length
         ? `After saving, it ${tierText(Math.min(...(tiers.length ? tiers : [0])))} to confirm the entry.`
         : "OpenAdapt doesn't know yet how to confirm this save.",
@@ -292,11 +295,14 @@ export function checkPlan(response: QualificationProject): CheckPlan {
         : "missing";
   const practiceState: StepState =
     practice?.status === "passed" ? "done" : "todo";
+  // Drills are needed whenever a step may save. Flow sets them up from the
+  // practice item (``qualify drills``), so a task with a save has none until
+  // then: that is "to do", never "not needed".
   const drillsState: StepState =
     drills.length === 0
-      ? unknownWrites
-        ? "todo"
-        : "not_needed"
+      ? provenReadOnly
+        ? "not_needed"
+        : "todo"
       : drills.every((item) => item.status === "passed")
         ? "done"
         : "todo";

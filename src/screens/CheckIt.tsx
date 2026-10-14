@@ -935,7 +935,14 @@ export function CheckIt({
                     onSave={(answer) => void bindEffect(step, answer)}
                   />
                 )}
-                {!step.checked && !plan.hasProject && (
+                {!step.checked && !plan.hasProject && step.hasRecordChecks && (
+                  <p className="question">
+                    OpenAdapt will read the saved record back to check the
+                    entries listed in part 1. Confirm the parts above to set
+                    up how it reads the record.
+                  </p>
+                )}
+                {!step.checked && !plan.hasProject && !step.hasRecordChecks && (
                   <p className="question">
                     OpenAdapt didn't see where this save lands in your system,
                     so it will ask you a few questions about it. Start the check
@@ -1039,8 +1046,9 @@ export function CheckIt({
           <CheckSection index={5} title="Safety drills" doneWord="Passed" state={plan.drillsState}>
             {plan.drills.length === 0 ? (
               <p>
-                No drills are set up for this task. OpenAdapt adds them when it
-                knows which step saves.
+                {plan.drillsState === "not_needed"
+                  ? "No drills are needed, because no step saves anything."
+                  : "OpenAdapt sets up five drills from your practice item when you run it. Each one makes the task go wrong on purpose right before the save, and must stop before saving."}
               </p>
             ) : (
               <>

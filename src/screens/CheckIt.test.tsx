@@ -475,3 +475,16 @@ it("describes each drill as the change Flow makes before the save", async () => 
   expect(screen.getByText(/A second copy of the save button appears/)).toBeTruthy();
   expect(screen.getByText(/The record check is taken away/)).toBeTruthy();
 });
+
+it("before the check starts, says drills come with the practice item and the record check is known", async () => {
+  // The recorded program declares its record checks; no project exists yet.
+  const fresh = project({ tier: null });
+  (fresh as { project: unknown }).project = null;
+  engine(fresh);
+  render(<CheckIt workflowId="wf-1" onExactChecks={() => {}} onRun={() => {}} />);
+
+  expect(await screen.findByText(/sets up five drills from your practice item/)).toBeTruthy();
+  expect(screen.queryByText("Not needed")).toBeNull();
+  expect(screen.getByText(/will read the saved record back to check the\s+entries listed in part 1/)).toBeTruthy();
+  expect(screen.queryByText(/didn't see where this save lands/)).toBeNull();
+});
