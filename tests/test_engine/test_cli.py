@@ -132,6 +132,19 @@ class TestCLI:
         captured = capsys.readouterr()
         assert f"[OK] openadapt-privacy: {version('openadapt-privacy')}" in captured.out
 
+    def test_doctor_names_the_login_command_this_package_installs(
+        self, cli_config: EngineConfig, capsys
+    ) -> None:
+        """The console script is openadapt-desktop; the launcher has no login."""
+        with (
+            patch("engine.cli.EngineConfig", return_value=cli_config),
+            patch("engine.auth.store.auth_header", return_value={}),
+        ):
+            main(["doctor"])
+        out = capsys.readouterr().out
+        assert "run 'openadapt-desktop login'" in out
+        assert "run 'openadapt login'" not in out
+
     def test_doctor_does_not_fail_a_local_install_on_optional_items(
         self, cli_config: EngineConfig, capsys
     ) -> None:
