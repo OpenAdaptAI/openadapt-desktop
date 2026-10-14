@@ -173,8 +173,17 @@ def _mailbox(
     return runner, requests, recorder, audit
 
 
-def _envelope(tool: str, *, sub: str = SUB, args: dict[str, Any] | None = None) -> dict[str, Any]:
-    return {
+_NO_DISPLAY = object()
+
+
+def _envelope(
+    tool: str,
+    *,
+    sub: str = SUB,
+    args: dict[str, Any] | None = None,
+    client_display: Any = "ChatGPT",
+) -> dict[str, Any]:
+    envelope = {
         "schema_version": "openadapt.authoring.command/v1",
         "command_id": f"cmd_{tool}",
         "pack_id": PACK,
@@ -182,8 +191,11 @@ def _envelope(tool: str, *, sub: str = SUB, args: dict[str, Any] | None = None) 
         "args": args or {},
         "oauth_sub_sha256": sub,
         "client_id_sha256": CLIENT,
-        "client_display": "ChatGPT",
+        "client_display": client_display,
     }
+    if client_display is _NO_DISPLAY:
+        del envelope["client_display"]
+    return envelope
 
 
 def test_claim_stores_lease_without_returning_the_secret(tmp_path: Path) -> None:
@@ -487,6 +499,44 @@ def test_replace_allow_required_for_a_second_sub(tmp_path: Path) -> None:
     assert runner._allowed_sub == SUB
     runner.allow(replace=True)
     assert runner._allowed_sub == OTHER_SUB
+
+
+@pytest.mark.parametrize("display", ["Claude", "ChatGPT"])
+def test_allow_prompts_name_the_client_that_asked(tmp_path: Path, display: str) -> None:
+    runner, _requests, _recorder, _audit = _mailbox(tmp_path)
+    events: list[tuple[str, dict[str, Any]]] = []
+    runner.emit = lambda event, data: events.append((event, data))
+    runner.claim_uri(URI, start_loop=False)
+    runner.handle_envelope(_envelope("bind_pack", client_display=display))
+    runner.allow()
+    assert runner.status()["status"] == "bound"
+    assert runner.status()["client_display"] == display
+    runner.handle_envelope(_envelope("bind_pack", sub=OTHER_SUB, client_display=display))
+
+    prompts = [data["prompt"] for _event, data in events if "prompt" in data]
+    assert prompts == [
+        f"Allow {display} to drive this job",
+        f"A different {display} account is asking. Allow it to replace the current one?",
+    ]
+
+
+@pytest.mark.parametrize("display", [_NO_DISPLAY, None, "", "Gemini"])
+def test_allow_prompts_never_guess_a_client(tmp_path: Path, display: Any) -> None:
+    runner, _requests, _recorder, _audit = _mailbox(tmp_path)
+    events: list[tuple[str, dict[str, Any]]] = []
+    runner.emit = lambda event, data: events.append((event, data))
+    runner.claim_uri(URI, start_loop=False)
+    runner.handle_envelope(_envelope("bind_pack", client_display=display))
+    assert runner.allow()["client_display"] is None
+    assert runner.status()["client_display"] is None
+    runner.handle_envelope(_envelope("bind_pack", sub=OTHER_SUB, client_display=display))
+
+    prompts = [data["prompt"] for _event, data in events if "prompt" in data]
+    assert prompts == [
+        "Allow your assistant to drive this job",
+        "A different assistant account is asking. Allow it to replace the current one?",
+    ]
+    assert "ChatGPT" not in json.dumps([data for _event, data in events])
 
 
 def test_macos_without_unique_window_is_coach_only(tmp_path: Path) -> None:

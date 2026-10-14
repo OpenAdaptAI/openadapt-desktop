@@ -484,14 +484,14 @@ export default function App() {
             ? authoring.error || "The authoring bind could not be completed."
             : authoring.status === "bound"
               ? authoring.coach_only
-                ? "This job is coach-only on this window. ChatGPT can suggest; you click."
+                ? `This job is coach-only on this window. ${authoring.client_display || "Your assistant"} can suggest; you click.`
                 : authoring.allowed
                   ? "Pin the browser URL or use this window. Titles stay on this computer."
-                  : "This computer is bound. Pin the window, then Allow ChatGPT to drive this job."
+                  : `This computer is bound. Pin the window, then Allow ${authoring.client_display || "your assistant"} to drive this job.`
               : authoring.prompt ||
                 (authoring.status === "replace_allow"
-                  ? `A different ${authoring.client_display || "ChatGPT"} account is asking. Allow it to replace the current one?`
-                  : `Allow ${authoring.client_display || "ChatGPT"} to drive this job`)}
+                  ? `A different ${authoring.client_display || "assistant"} account is asking. Allow it to replace the current one?`
+                  : `Allow ${authoring.client_display || "your assistant"} to drive this job`)}
         </span>
         {(authoring.status === "pending_allow" ||
           authoring.status === "replace_allow") && (

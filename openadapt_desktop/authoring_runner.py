@@ -178,10 +178,26 @@ def filter_coach_hint(text: object) -> str | None:
     return collapsed
 
 
-def _client_display(value: object) -> str:
+def _client_display(value: object) -> str | None:
+    """Return the client's product name, or None when it isn't one we know.
+
+    The Allow prompt is a consent prompt. Naming a product the person did not
+    connect, such as ChatGPT for a Claude.ai job, is wrong, so an unknown or
+    missing name stays unnamed.
+    """
+
     if value in CLIENT_DISPLAYS:
         return str(value)
-    return "ChatGPT"
+    return None
+
+
+def _allow_prompt(display: str | None, *, replace: bool) -> str:
+    if replace:
+        return (
+            f"A different {display or 'assistant'} account is asking. "
+            "Allow it to replace the current one?"
+        )
+    return f"Allow {display or 'your assistant'} to drive this job"
 
 
 class NodeTable:
@@ -572,6 +588,9 @@ class AuthoringRunner:
         self._lease_secret: str | None = None
         self._allowed_sub: str | None = None
         self._allowed_client_id: str | None = None
+        # The product name of the allowed client, kept only in memory. A
+        # restored lease has no name, so the notice falls back to a neutral one.
+        self._allowed_display: str | None = None
         self._pending_allow: dict[str, Any] | None = None
         self._pin: dict[str, Any] = {"backend": "macos", "window_title_unique": False}
         self._node_table: NodeTable | None = None
@@ -634,7 +653,11 @@ class AuthoringRunner:
             "status": state,
             "pack_bound": bool(self._pack),
             "allowed": bool(self._allowed_sub),
-            "client_display": pending.get("client_display") if pending else None,
+            "client_display": (
+                pending.get("client_display")
+                if pending
+                else self._allowed_display if self._allowed_sub else None
+            ),
             "coach_only": self._pin.get("backend") in COACH_ONLY_BACKENDS,
         }
 
@@ -840,11 +863,7 @@ class AuthoringRunner:
             if self._allowed_sub and self._allowed_sub != sub
             else "pending_allow"
         )
-        copy = (
-            f"A different {display} account is asking. Allow it to replace the current one?"
-            if status == "replace_allow"
-            else f"Allow {display} to drive this job"
-        )
+        copy = _allow_prompt(display, replace=status == "replace_allow")
         self.emit(
             "authoring_state",
             {"status": status, "client_display": display, "prompt": copy},
@@ -872,6 +891,7 @@ class AuthoringRunner:
         granted_at = _utc_now()
         self._allowed_sub = pending["oauth_sub_sha256"]
         self._allowed_client_id = pending.get("client_id_sha256")
+        self._allowed_display = display
         stored = load_authoring_lease(self._pack or "") if self._pack else None
         if stored is not None:
             stored["allowed_sub"] = self._allowed_sub
