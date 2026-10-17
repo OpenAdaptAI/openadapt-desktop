@@ -22,7 +22,9 @@ full = ["enterprise", "community", "federated"]
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-shell = "2"
 tauri-plugin-notification = "2"
-tauri-plugin-updater = "2"
+# Drop the default `zip` feature: it only serves Tauri v1 compressed bundles
+# (.msi.zip, .AppImage.tar.gz) and pulls zip 4.x (RUSTSEC-2026-0367/0368/0369).
+tauri-plugin-updater = { version = "2", default-features = false, features = ["rustls-tls", "system-proxy"] }
 tauri-plugin-deep-link = "2"
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 serde = { version = "1", features = ["derive"] }
