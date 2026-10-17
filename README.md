@@ -168,6 +168,17 @@ stays paused.
 [docs/DECISION_PORTAL.md](https://github.com/OpenAdaptAI/openadapt-desktop/blob/main/docs/DECISION_PORTAL.md)
 covers pairing, what the phone can see, and how a decision is applied.
 
+## Shadow mode
+
+Shadow mode is off unless you turn it on in **Settings**, after reading a
+notice. While it's on, the header and the tray say so. It notices a task you
+repeat in your recordings and offers to make a draft from it ("You did this 6
+times today."). Everything it keeps stays encrypted on your computer for at
+most 24 hours, and **Delete everything and turn off** removes it in one click.
+A draft never runs; a person still records the task and admits the automation.
+[docs/SHADOW_MODE.md](https://github.com/OpenAdaptAI/openadapt-desktop/blob/main/docs/SHADOW_MODE.md)
+has the details.
+
 ## Engine command line
 
 The engine also runs without the app. In a source checkout, put `uv run` in

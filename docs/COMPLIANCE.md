@@ -101,6 +101,19 @@ deployment HIPAA-compliant.
   `PLAYWRIGHT_BROWSERS_PATH` at a version-matched prebundle. Native, RDP, and
   Citrix workflows never use that path.
 
+## Shadow mode
+
+Shadow mode is off by default and has no remote, admin, policy, or
+configuration-file switch. A person turns it on in the Desktop window after
+accepting a versioned notice; the engine checks the notice hash and writes the
+acceptance time to an owner-only local file. The header and the tray show
+when it's on. Its record is an encrypted local buffer of at most 24 hours; the
+key is in the OS keychain (or in memory) and is destroyed, with the buffer,
+every 24 hours. Shadow mode makes no network connections, and its commands
+aren't accepted on the local socket. **Delete everything and turn off**
+removes the buffer, the key, the ignore list, and drafts, and withdraws the
+acceptance. [SHADOW_MODE.md](SHADOW_MODE.md) has the details.
+
 ## Phone decisions
 
 A paired phone receives a request for a decision. A tap doesn't approve the
