@@ -160,6 +160,21 @@ def _run_embedded_playwright() -> None:
     playwright_main()
 
 
+ENGINE_LOG_FORMAT = "{time:YYYY-MM-DD HH:mm:ss} | {level:<8} | {name}:{function}:{line} - {message}"
+
+
+def configure_engine_logging(level: str) -> None:
+    """Send engine logs to stderr, without variable values in tracebacks.
+
+    loguru's ``diagnose`` mode prints the value of every variable on each
+    traceback line. A failure while handling a recording or shadow-mode event
+    would then copy typed text, labels, or URLs into the log, so it is off.
+    """
+
+    logger.remove()
+    logger.add(sys.stderr, level=level, format=ENGINE_LOG_FORMAT, diagnose=False)
+
+
 def main() -> None:
     """Initialize the engine and start the appropriate mode."""
     from openadapt_desktop.private_fs import apply_private_umask
@@ -188,12 +203,7 @@ def main() -> None:
     # IPC mode: piped stdin from Tauri shell
     config = EngineConfig()
 
-    logger.remove()
-    logger.add(
-        sys.stderr,
-        level=config.log_level,
-        format="{time:YYYY-MM-DD HH:mm:ss} | {level:<8} | {name}:{function}:{line} - {message}",
-    )
+    configure_engine_logging(config.log_level)
 
     logger.info("OpenAdapt Desktop Engine starting (v{version})", version=ENGINE_VERSION)
     logger.info("Storage mode: {mode}", mode=config.storage_mode)
