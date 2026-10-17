@@ -96,7 +96,7 @@ recording is running.
 
 Browser steps count only on the sites in **Work sites**. On any other site,
 shadow mode notes only that a browser was in use. The list is empty until you
-add a site, and it stays on this computer.
+add a site, and OpenAdapt doesn't send it anywhere.
 
 ## The offer
 

@@ -504,7 +504,7 @@ export default function App() {
               ? authoring.coach_only
                 ? `This job is coach-only on this window. ${authoring.client_display || "Your assistant"} can suggest; you click.`
                 : authoring.allowed
-                  ? "Pin the browser URL or use this window. Titles stay on this computer."
+                  ? "Pin the browser URL or use this window. OpenAdapt doesn't send window titles to your assistant."
                   : `This computer is bound. Pin the window, then Allow ${authoring.client_display || "your assistant"} to drive this job.`
               : authoring.prompt ||
                 (authoring.status === "replace_allow"

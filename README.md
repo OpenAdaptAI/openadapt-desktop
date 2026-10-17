@@ -211,8 +211,9 @@ setting.
 | `storage`, `health`, `cleanup`, `config` | Inspect and maintain local storage and settings |
 | `upload`, `backends` | Older upload commands. `upload --backend hosted_ingest` runs `push`; upload to your own S3 storage is turned off in this release. |
 
-Recordings stay on your computer unless you choose to send one to OpenAdapt
-Cloud with `push`.
+OpenAdapt doesn't send a recording anywhere unless you choose to send it to
+OpenAdapt Cloud with `push`. Backup, sync, and endpoint security software on
+the computer can still copy local files.
 
 ## Develop
 
