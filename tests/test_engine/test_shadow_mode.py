@@ -187,6 +187,107 @@ def test_resume_after_restart_only_with_a_standing_acknowledgement(svc):
     assert third.resume() is False
 
 
+def test_a_resume_that_cant_happen_deletes_the_buffer_and_key(svc):
+    service, _events, store, root = svc
+    service.set_work_domains(["erp.example.com"])
+    service.enable(service.notice()["sha256"], acknowledged=True)
+    stream, _ = _invoice_events(1_000_000.0 - 3000)
+    for event in stream:
+        service._observer.observe(event)
+    service._observer.symbols()
+    service.close()
+    assert (root / "shadow" / "buffer.db").exists() and store.get(ACTIVE_ACCOUNT)
+    # A new notice version: the old acknowledgement no longer counts, so
+    # shadow mode can't come back on. It must not keep the buffer either.
+    data = json.loads((root / "shadow" / "consent.json").read_text())
+    data["events"][-1]["notice_version"] = "2000-01-01"
+    (root / "shadow" / "consent.json").write_text(json.dumps(data))
+    again = ShadowModeService(root, key_store=store, autostart_scanner=False)
+    assert again.resume() is False
+    assert not (root / "shadow" / "buffer.db").exists()
+    assert store.get(ACTIVE_ACCOUNT) is None and store._values == {}
+    assert json.loads((root / "shadow" / "state.json").read_text()) == {"active": False}
+
+
+def test_live_tap_follows_the_current_observer(svc):
+    service, _events, _store, _root = svc
+    service.enable(service.notice()["sha256"], acknowledged=True)
+    tap = service.live_tap()
+    ax = {
+        "element": {"role": "AXTextField", "name": "Amount"},
+        "process": {"process_name": "Numbers"},
+    }
+
+    def press(t, ch):
+        tap.publish(t, "action", {"name": "press", "key_char": ch, "structural_observation": ax})
+
+    press(999_990.0, "1")
+    # A work-site change replaces the observer while the recording runs.
+    service.set_work_domains(["erp.example.com"])
+    press(999_995.0, "2")
+    tap.close()
+    kinds = [s.kind for s in service._observer.symbols()]
+    assert kinds.count("type") >= 1
+    # After Delete everything and turn off, the same tap records nothing.
+    tap2 = service.live_tap()
+    service.purge_and_disable()
+    tap2.publish(
+        999_996.0, "action", {"name": "press", "key_char": "3", "structural_observation": ax}
+    )
+    tap2.close()
+    assert service._observer is None and not (service.dir / "buffer.db").exists()
+
+
+class _StubbornStore(MemoryKeyStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.refuse = False
+
+    def delete(self, account: str) -> bool:
+        if self.refuse and account.startswith("shadow-key|") and not account.endswith("retired"):
+            return False
+        return super().delete(account)
+
+
+def test_purge_says_so_when_the_keychain_kept_the_key(tmp_path):
+    store = _StubbornStore()
+    service = ShadowModeService(tmp_path, key_store=store, autostart_scanner=False)
+    service.enable(service.notice()["sha256"], acknowledged=True)
+    store.refuse = True
+    result = service.purge_and_disable()
+    assert result["active"] is False and result["key_deleted"] is False
+    assert not (tmp_path / "shadow" / "buffer.db").exists()
+    store.refuse = False
+    again = ShadowModeService(tmp_path, key_store=store, autostart_scanner=False)
+    assert again.purge_and_disable()["key_deleted"] is True and store._values == {}
+
+
+def test_shadow_files_are_owner_only_from_the_start(svc, monkeypatch):
+    import os
+
+    service, _events, _store, root = svc
+    service.set_work_domains(["erp.example.com"])
+    service.enable(service.notice()["sha256"], acknowledged=True)
+    stream, _ = _invoice_events(1_000_000.0 - 3000)
+    for event in stream:
+        service._observer.observe(event)
+    (prompt,) = service.scan()
+    opened: list[tuple[str, int]] = []
+    real_open = os.open
+
+    def spy(path, flags, mode=0o777, *a, **k):
+        opened.append((str(path), mode))
+        return real_open(path, flags, mode, *a, **k)
+
+    monkeypatch.setattr(os, "open", spy)
+    result = service.decide(prompt["motif_id"], "review_draft")
+    monkeypatch.setattr(os, "open", real_open)
+    assert opened and all(mode == 0o600 for _p, mode in opened)
+    draft = Path(result["draft_path"])
+    assert oct(draft.stat().st_mode & 0o777) == "0o600"
+    assert not list(draft.parent.glob(".*.tmp"))
+
+
 def test_live_tap_feeds_the_miner_while_on(svc):
     service, _events, _store, _root = svc
     service.enable(service.notice()["sha256"], acknowledged=True)

@@ -28,6 +28,7 @@ seconds while shadow mode is on.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import threading
 import time
@@ -45,6 +46,17 @@ PROMPT_EVENT = "shadow_prompt"
 BUFFER_HOURS = 24
 
 
+def _write_private(path: Path, text: str) -> None:
+    """Write ``text`` to a file that is owner-only from the moment it exists."""
+
+    tmp = path.with_name(f".{path.name}.tmp")
+    fd = os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as handle:
+        handle.write(text)
+    make_private_file(tmp)
+    os.replace(tmp, path)
+
+
 class ShadowModeUnavailable(RuntimeError):
     """The installed OpenAdapt Capture has no shadow mode."""
 
@@ -60,6 +72,24 @@ def _capture_shadow() -> Any:
     if not hasattr(shadow, "ConsentLedger"):
         raise ShadowModeUnavailable("this OpenAdapt Capture's shadow mode has no notice")
     return shadow
+
+
+class _CurrentObserver:
+    """What a recording's live tap feeds: whichever observer is current.
+
+    A tap lives for one recording, but the observer can be replaced while it
+    runs (a work-site change) or shut (Delete everything and turn off). Each
+    event goes to the observer that is current when it arrives, or nowhere.
+    """
+
+    def __init__(self, service: ShadowModeService) -> None:
+        self._service = service
+
+    def observe(self, event: Any) -> None:
+        with self._service._lock:
+            observer = self._service._observer
+            if observer is not None and observer.enabled:
+                observer.observe(event)
 
 
 class _Notifier:
@@ -114,9 +144,8 @@ class ShadowModeService:
         return _capture_shadow().ConsentLedger(self.dir / "consent.json")
 
     def _write_json(self, path: Path, data: Any) -> None:
-        ensure_private_dir(self.dir, root=self.data_dir)
-        path.write_text(json.dumps(data, indent=2, sort_keys=True))
-        make_private_file(path)
+        ensure_private_dir(path.parent, root=self.data_dir)
+        _write_private(path, json.dumps(data, indent=2, sort_keys=True))
 
     def _read_json(self, path: Path, default: Any) -> Any:
         try:
@@ -192,8 +221,13 @@ class ShadowModeService:
             shadow = _capture_shadow()
             ack = self._ledger().current()
         except ShadowModeUnavailable:
-            return False
+            ack = None
         if ack is None:
+            # It was left on, but can't come back on: the notice changed, or
+            # this Capture has no shadow mode. Don't leave its buffer and key
+            # behind waiting for a resume that will never happen.
+            logger.info("shadow mode can't resume; deleting what it kept")
+            self.purge_and_disable()
             return False
         with self._lock:
             self._start(shadow, ack)
@@ -226,9 +260,9 @@ class ShadowModeService:
         with self._lock:
             observer, self._observer = self._observer, None
             if observer is not None:
-                observer.purge_and_disable()
+                key_deleted = observer.purge_and_disable() is not False
             else:
-                self._purge_without_observer()
+                key_deleted = self._purge_without_observer()
             self._pending.clear()
             shutil.rmtree(self._drafts_dir, ignore_errors=True)
             for name in ("buffer.db", "buffer.db-journal", "ignored.json"):
@@ -242,14 +276,16 @@ class ShadowModeService:
                 pass
             self._write_json(self._state_path, {"active": False})
         self._emit_state()
-        return self.status()
+        # The buffer is gone either way. If the keychain refused to delete the
+        # key, say so: it's retried on the next start, but it isn't gone yet.
+        return {**self.status(), "key_deleted": key_deleted}
 
-    def _purge_without_observer(self) -> None:
+    def _purge_without_observer(self) -> bool:
         try:
             from openadapt_capture.shadow.keys import destroy_keys
         except Exception:
-            return
-        destroy_keys(self._key_store)
+            return True  # no shadow mode, so no key was ever made here
+        return bool(destroy_keys(self._key_store))
 
     # ------------------------------------------------------------- settings
 
@@ -298,8 +334,7 @@ class ShadowModeService:
             if export is not None:
                 ensure_private_dir(self._drafts_dir, root=self.data_dir)
                 path = self._drafts_dir / f"{export['motif_id']}.episodes.json"
-                path.write_text(json.dumps(export, indent=1, sort_keys=True))
-                make_private_file(path)
+                _write_private(path, json.dumps(export, indent=1, sort_keys=True))
                 result.update(
                     {
                         "draft_path": str(path),
@@ -324,7 +359,7 @@ class ShadowModeService:
             from openadapt_capture.live import LiveEventTap
 
             shadow = _capture_shadow()
-            return LiveEventTap(shadow.RecorderShadowBridge(self._observer)).start()
+            return LiveEventTap(shadow.RecorderShadowBridge(_CurrentObserver(self))).start()
 
     # ------------------------------------------------------------- scanner
 
