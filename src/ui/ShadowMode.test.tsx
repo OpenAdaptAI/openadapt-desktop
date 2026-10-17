@@ -27,7 +27,7 @@ import {
 } from "./ShadowMode";
 
 const NOTICE = {
-  version: "2026-10-17",
+  version: "2026-10-17.2",
   sha256: "a".repeat(64),
   title: "Turn on shadow mode?",
   intro: "Shadow mode watches for a task you repeat.",

@@ -110,7 +110,10 @@ acceptance time to an owner-only local file. The header and the tray show
 when it's on. Its record is an encrypted local buffer of at most 24 hours; the
 key is in the OS keychain (or in memory) and is destroyed, with the buffer,
 every 24 hours. Shadow mode makes no network connections, and its commands
-aren't accepted on the local socket. **Delete everything and turn off**
+aren't accepted on the local socket. These controls stop OpenAdapt, an
+employer, and other apps from turning it on or reading it through OpenAdapt;
+they don't stop an OS administrator or software running as the user from
+inspecting the buffer while shadow mode is on, and the notice says so. **Delete everything and turn off**
 removes the buffer, the key, the ignore list, and drafts, and withdraws the
 acceptance. [SHADOW_MODE.md](SHADOW_MODE.md) has the details.
 

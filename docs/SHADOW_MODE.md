@@ -77,7 +77,10 @@ buffer, the key, the ignore list, and any saved drafts, and it records that
 the acceptance was withdrawn. Turning shadow mode on again needs the notice
 again.
 
-## What no one else can do
+## What others can and can't do
+
+OpenAdapt, your employer, and other apps can't turn shadow mode on or read its
+record through OpenAdapt:
 
 - There is no configuration file setting, environment variable, Cloud policy,
   or admin setting that turns shadow mode on. It is not part of
@@ -86,6 +89,12 @@ again.
   socket that other OpenAdapt apps use doesn't accept them.
 - Shadow mode makes no network connections, and nothing it records is synced
   or uploaded.
+
+That doesn't protect the record from the computer itself. The record is
+encrypted with a key that is destroyed at least every 24 hours, but the key
+sits in your keychain (or in memory) while shadow mode is on. Someone with
+administrator access to this computer, or software running under your
+account, could still inspect the record while it's on. The notice says so.
 
 ## Engine commands
 
