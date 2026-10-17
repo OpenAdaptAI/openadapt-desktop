@@ -255,6 +255,13 @@ def main() -> None:
         except Exception:
             logger.exception("Runner loop failed to start (lane stays off)")
 
+    # Start shadow mode now, not on the window's first status request, so a
+    # buffer left by a crash is erased at once and a standing opt-in resumes.
+    try:
+        _ = handler.dispatcher.shadow
+    except Exception as exc:
+        logger.warning("Shadow mode didn't start: {}", type(exc).__name__)
+
     try:
         handler.run()
     except KeyboardInterrupt:
@@ -267,6 +274,10 @@ def main() -> None:
             services.runner.stop()
         socket_server.stop()
         monitor.stop()
+        try:
+            handler.dispatcher.close_shadow()
+        except Exception as exc:
+            logger.warning("Shadow mode didn't close cleanly: {}", type(exc).__name__)
         db.close()
         logger.info("Engine stopped")
 

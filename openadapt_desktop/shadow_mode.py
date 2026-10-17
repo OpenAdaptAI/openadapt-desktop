@@ -13,12 +13,21 @@ apps and offers "You did this N times today." with **Review draft** and
 * **The notice is Capture's.** :meth:`notice` returns it as Capture defines
   it, and :meth:`enable` records the acknowledgement time locally through
   Capture's consent ledger.
-* **One off switch.** :meth:`purge_and_disable` deletes the buffer, the key,
-  the ignore list, and any saved drafts, records the revocation time, and
-  stays off until the person opts in again.
-* **Local only.** Everything lives under ``<data_dir>/shadow`` with owner-only
-  permissions. Nothing here opens a network connection, and nothing here is
-  uploaded or synced.
+* **Off erases it.** :meth:`turn_off` erases the buffer, its key, and any
+  saved drafts. :meth:`purge_and_disable` also erases the ignore list and
+  records the revocation time. :meth:`pause` stops recording until
+  :meth:`unpause`, and stays paused across a restart.
+* **Cleared on exit.** :meth:`close` (a clean engine exit, or ``atexit``)
+  erases the buffer and its key. A buffer left by a crash is erased at the
+  next start, before a new one begins.
+* **Unsynced app data.** Everything lives in the platform's app-data folder
+  (``~/Library/Application Support/ai.openadapt.desktop/shadow`` on macOS,
+  ``%LOCALAPPDATA%\\ai.openadapt.desktop\\shadow`` on Windows), not under
+  ``data_dir``, which a person may point at a synced folder. Shadow mode
+  refuses to start if that folder resolves inside a known sync root.
+  OpenAdapt never sends shadow mode data off this computer, and nothing here
+  opens a network connection. OS backup, sync, or endpoint security tools
+  can still copy local files; the notice says so.
 
 Events reach the miner through the recorder's live tap while Desktop records
 (see :meth:`live_tap`). The miner is scanned every ``scan_interval_s``
@@ -27,11 +36,14 @@ seconds while shadow mode is on.
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import shutil
+import sys
 import threading
 import time
+import weakref
 from pathlib import Path
 from typing import Any, Callable
 
@@ -44,6 +56,25 @@ EmitFn = Callable[[str, dict], None]
 STATE_EVENT = "shadow_state"
 PROMPT_EVENT = "shadow_prompt"
 BUFFER_HOURS = 24
+APP_ID = "ai.openadapt.desktop"
+_BUFFER_FILES = ("buffer.db", "buffer.db-journal", "buffer.db-wal", "buffer.db-shm")
+
+
+def default_shadow_dir() -> Path:
+    """Desktop's shadow folder in the platform's local, unsynced app data."""
+
+    try:
+        from openadapt_capture.shadow.storage import app_data_dir
+    except Exception:  # an older Capture; same rule, computed here
+        home = Path.home()
+        if sys.platform == "darwin":
+            base = home / "Library" / "Application Support"
+        elif sys.platform == "win32":
+            base = Path(os.environ.get("LOCALAPPDATA") or home / "AppData" / "Local")
+        else:
+            base = Path(os.environ.get("XDG_DATA_HOME") or home / ".local" / "share")
+        return base / APP_ID / "shadow"
+    return app_data_dir(APP_ID) / "shadow"
 
 
 def _write_private(path: Path, text: str) -> None:
@@ -55,6 +86,12 @@ def _write_private(path: Path, text: str) -> None:
         handle.write(text)
     make_private_file(tmp)
     os.replace(tmp, path)
+
+
+def _close_at_exit(ref: weakref.ref) -> None:
+    service = ref()
+    if service is not None:
+        service.close()
 
 
 class ShadowModeUnavailable(RuntimeError):
@@ -108,13 +145,16 @@ class ShadowModeService:
         data_dir: Path,
         emit: EmitFn | None = None,
         *,
+        shadow_dir: Path | None = None,
         key_store: Any = None,
         clock: Callable[[], float] = time.time,
         scan_interval_s: float = 60.0,
         autostart_scanner: bool = True,
     ) -> None:
         self.data_dir = Path(data_dir)
-        self.dir = self.data_dir / "shadow"
+        self.dir = Path(shadow_dir) if shadow_dir is not None else default_shadow_dir()
+        # Earlier builds of this branch kept shadow files under data_dir.
+        self._legacy_dir = self.data_dir / "shadow"
         self._emit = emit or (lambda event, data: None)
         self._key_store = key_store
         self._clock = clock
@@ -125,8 +165,18 @@ class ShadowModeService:
         self._pending: dict[str, dict[str, Any]] = {}
         self._stop = threading.Event()
         self._scanner: threading.Thread | None = None
+        self._atexit_registered = False
 
     # ------------------------------------------------------------- paths
+
+    def _check_location(self) -> None:
+        """Refuse to keep anything in a folder a sync client may copy."""
+
+        try:
+            from openadapt_capture.shadow.storage import require_unsynced
+        except Exception:
+            return  # an older Capture has no shadow mode to start anyway
+        require_unsynced(self.dir)
 
     @property
     def _state_path(self) -> Path:
@@ -144,7 +194,7 @@ class ShadowModeService:
         return _capture_shadow().ConsentLedger(self.dir / "consent.json")
 
     def _write_json(self, path: Path, data: Any) -> None:
-        ensure_private_dir(path.parent, root=self.data_dir)
+        ensure_private_dir(path.parent, root=self.dir)
         _write_private(path, json.dumps(data, indent=2, sort_keys=True))
 
     def _read_json(self, path: Path, default: Any) -> Any:
@@ -176,6 +226,8 @@ class ShadowModeService:
             return {
                 "available": self.available(),
                 "active": active,
+                "paused": bool(active and self._observer.paused),
+                "location": str(self.dir),
                 "acknowledged_at": ack,
                 "buffer_hours": BUFFER_HOURS,
                 "work_domains": self.work_domains(),
@@ -201,38 +253,65 @@ class ShadowModeService:
         if acknowledged is not True:
             raise PermissionError("shadow mode turns on only after the notice is acknowledged")
         with self._lock:
-            ensure_private_dir(self.dir, root=self.data_dir)
+            self._check_location()
+            ensure_private_dir(self.dir)
             ack = self._ledger().acknowledge(str(notice_sha256), now=self._clock())
             self._start(shadow, ack)
-            self._write_json(self._state_path, {"active": True})
+            self._write_json(self._state_path, {"active": True, "paused": False})
         self._emit_state()
         return self.status()
 
     def resume(self) -> bool:
         """Turn shadow mode back on at engine start if the person left it on.
 
-        Needs a standing acknowledgement of the current notice; a changed
-        notice must be acknowledged again.
+        Whatever an earlier run left (after a crash, or from an older build)
+        is erased first, so each run starts with an empty buffer and a new
+        key. It needs a standing acknowledgement of the current notice; a
+        changed notice must be acknowledged again. A pause carries over.
         """
 
-        if not self._read_json(self._state_path, {}).get("active"):
+        self._discard_leftovers()
+        state = self._read_json(self._state_path, {})
+        if not state.get("active"):
             return False
         try:
             shadow = _capture_shadow()
             ack = self._ledger().current()
+            self._check_location()
         except ShadowModeUnavailable:
             ack = None
+        except ValueError as exc:  # ShadowStorageRefused
+            logger.warning("shadow mode can't resume here: {}", type(exc).__name__)
+            ack = None
         if ack is None:
-            # It was left on, but can't come back on: the notice changed, or
-            # this Capture has no shadow mode. Don't leave its buffer and key
-            # behind waiting for a resume that will never happen.
+            # It was left on, but can't come back on: the notice changed, this
+            # Capture has no shadow mode, or the folder is synced. Don't leave
+            # anything behind waiting for a resume that will never happen.
             logger.info("shadow mode can't resume; deleting what it kept")
             self.purge_and_disable()
             return False
         with self._lock:
             self._start(shadow, ack)
+            if state.get("paused"):
+                self._observer.pause()
         self._emit_state()
         return True
+
+    def _discard_leftovers(self) -> None:
+        """Erase a buffer and key that no running observer owns."""
+
+        with self._lock:
+            if self._observer is not None:
+                return
+            for folder in {self.dir, self._legacy_dir}:
+                for name in _BUFFER_FILES:
+                    try:
+                        (folder / name).unlink()
+                    except FileNotFoundError:
+                        pass
+            if self._legacy_dir != self.dir and self._legacy_dir.is_dir():
+                shutil.rmtree(self._legacy_dir, ignore_errors=True)
+            self._purge_without_observer()
 
     def _start(self, shadow: Any, ack: Any) -> None:
         if self._observer is not None and self._observer.enabled:
@@ -252,6 +331,55 @@ class ShadowModeService:
         )
         if self._autostart:
             self._start_scanner()
+        if not self._atexit_registered:
+            self._atexit_registered = True
+            atexit.register(_close_at_exit, weakref.ref(self))
+
+    def turn_off(self) -> dict[str, Any]:
+        """Turn shadow mode off: erase the buffer, its key, and any drafts.
+
+        The acknowledgement and the ignore list stay. Turning it back on
+        still goes through the notice.
+        """
+
+        self._stop_scanner()
+        with self._lock:
+            observer, self._observer = self._observer, None
+            key_deleted = True
+            if observer is not None:
+                key_deleted = observer.shutdown() is not False
+            self._pending.clear()
+            shutil.rmtree(self._drafts_dir, ignore_errors=True)
+            for name in _BUFFER_FILES:
+                try:
+                    (self.dir / name).unlink()
+                except FileNotFoundError:
+                    pass
+            if not key_deleted or observer is None:
+                key_deleted = self._purge_without_observer()
+            self._write_json(self._state_path, {"active": False})
+        self._emit_state()
+        return {**self.status(), "key_deleted": key_deleted}
+
+    def pause(self) -> dict[str, Any]:
+        """Stop recording until :meth:`unpause`. Typing in progress is dropped."""
+
+        with self._lock:
+            if self._observer is None or not self._observer.enabled:
+                raise RuntimeError("shadow mode is off")
+            self._observer.pause()
+            self._write_json(self._state_path, {"active": True, "paused": True})
+        self._emit_state()
+        return self.status()
+
+    def unpause(self) -> dict[str, Any]:
+        with self._lock:
+            if self._observer is None or not self._observer.enabled:
+                raise RuntimeError("shadow mode is off")
+            self._observer.unpause()
+            self._write_json(self._state_path, {"active": True, "paused": False})
+        self._emit_state()
+        return self.status()
 
     def purge_and_disable(self) -> dict[str, Any]:
         """Delete everything shadow mode kept, record the revocation, turn off."""
@@ -265,7 +393,7 @@ class ShadowModeService:
                 key_deleted = self._purge_without_observer()
             self._pending.clear()
             shutil.rmtree(self._drafts_dir, ignore_errors=True)
-            for name in ("buffer.db", "buffer.db-journal", "ignored.json"):
+            for name in (*_BUFFER_FILES, "ignored.json"):
                 try:
                     (self.dir / name).unlink()
                 except FileNotFoundError:
@@ -302,9 +430,13 @@ class ShadowModeService:
             self._write_json(self._domains_path, cleaned)
             if self._observer is not None and self._observer.enabled:
                 ack = self._observer.acknowledgement
-                self._observer.close()
+                paused = self._observer.paused
+                # The new allowlist starts a new buffer; the old one is erased.
+                self._observer.shutdown()
                 self._observer = None
                 self._start(shadow, ack)
+                if paused:
+                    self._observer.pause()
         self._emit_state()
         return self.status()
 
@@ -332,7 +464,7 @@ class ShadowModeService:
             self._pending.pop(str(motif_id), None)
             result: dict[str, Any] = {"motif_id": motif_id, "action": action}
             if export is not None:
-                ensure_private_dir(self._drafts_dir, root=self.data_dir)
+                ensure_private_dir(self._drafts_dir, root=self.dir)
                 path = self._drafts_dir / f"{export['motif_id']}.episodes.json"
                 _write_private(path, json.dumps(export, indent=1, sort_keys=True))
                 result.update(
@@ -391,7 +523,22 @@ class ShadowModeService:
             logger.warning("shadow state event failed: {}", type(exc).__name__)
 
     def close(self) -> None:
+        """Clean exit: erase the buffer and its key. Safe to call twice.
+
+        Shadow mode stays on in ``state.json``, so the next start begins a
+        new, empty buffer. Drafts and the ignore list stay.
+        """
+
         self._stop_scanner()
         with self._lock:
-            if self._observer is not None:
-                self._observer.close()
+            observer, self._observer = self._observer, None
+            if observer is not None:
+                try:
+                    observer.shutdown()
+                except Exception as exc:
+                    logger.warning("shadow shutdown failed: {}", type(exc).__name__)
+                for name in _BUFFER_FILES:
+                    try:
+                        (self.dir / name).unlink()
+                    except OSError:
+                        pass

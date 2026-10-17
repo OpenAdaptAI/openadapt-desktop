@@ -379,6 +379,9 @@ class EngineDispatcher:
             "shadow_status": self.shadow_status,
             "shadow_notice": self.shadow_notice,
             "shadow_enable": self.shadow_enable,
+            "shadow_turn_off": self.shadow_turn_off,
+            "shadow_pause": self.shadow_pause,
+            "shadow_unpause": self.shadow_unpause,
             "shadow_purge_and_disable": self.shadow_purge_and_disable,
             "shadow_set_work_domains": self.shadow_set_work_domains,
             "shadow_decide": self.shadow_decide,
@@ -418,6 +421,23 @@ class EngineDispatcher:
         return self.shadow.enable(
             str(params.get("notice_sha256") or ""), params.get("acknowledged") is True
         )
+
+    def shadow_turn_off(self, **params: Any) -> dict:
+        """Turn shadow mode off, erasing its buffer, key, and drafts."""
+        return self.shadow.turn_off()
+
+    def shadow_pause(self, **params: Any) -> dict:
+        """Stop shadow mode recording until it's resumed."""
+        return self.shadow.pause()
+
+    def shadow_unpause(self, **params: Any) -> dict:
+        """Resume shadow mode recording after a pause."""
+        return self.shadow.unpause()
+
+    def close_shadow(self) -> None:
+        """Clean exit: erase the shadow buffer and its key, if one is open."""
+        if self._shadow is not None:
+            self._shadow.close()
 
     def shadow_purge_and_disable(self, **params: Any) -> dict:
         """Delete everything shadow mode kept and turn it off."""

@@ -2853,6 +2853,9 @@ class TestMisc:
             "shadow_set_work_domains",
             "shadow_decide",
             "shadow_scan",
+            "shadow_turn_off",
+            "shadow_pause",
+            "shadow_unpause",
         }
         assert expected.issubset(set(disp.commands))
 
