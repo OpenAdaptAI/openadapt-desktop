@@ -17,11 +17,11 @@ from pathlib import Path
 
 import pytest
 
-from engine.config import EngineConfig
-from engine.db import IndexDB
-from engine.dispatch import EngineDispatcher, EngineServices
-from engine.outcomes import halt_kind, plain_result, plain_result_for_transaction
-from engine.work_items import WorkItemError, summarize, validate_inputs
+from openadapt_desktop.config import EngineConfig
+from openadapt_desktop.db import IndexDB
+from openadapt_desktop.dispatch import EngineDispatcher, EngineServices
+from openadapt_desktop.outcomes import halt_kind, plain_result, plain_result_for_transaction
+from openadapt_desktop.work_items import WorkItemError, summarize, validate_inputs
 
 REPO = Path(__file__).resolve().parents[2]
 CASES = json.loads((REPO / "src" / "lib" / "outcome-cases.json").read_text())["cases"]
@@ -37,6 +37,38 @@ def test_plain_result_matches_the_shared_cases(case: dict) -> None:
     assert result["key"] == case["key"]
     assert result["nothing_written"] is case["nothing_written"]
     assert result["safe_to_retry"] is case["safe_to_retry"]
+
+
+SWITCH_CASES = json.loads((REPO / "src" / "lib" / "outcome-cases.json").read_text())[
+    "switch_cases"
+]
+
+
+@pytest.mark.parametrize("case", SWITCH_CASES, ids=lambda c: c["name"])
+def test_the_switch_never_changes_an_outcome_word(case: dict) -> None:
+    """Shared with src/lib/approvalMode.test.ts: same cases, same answers."""
+
+    from openadapt_desktop.outcomes import consistent_transaction_outcome
+    from openadapt_desktop.work_items import public_item, status_after_run
+
+    key = plain_result(case["execution"], case["transaction"])["key"]
+    assert key == case["key"]
+    consistent = consistent_transaction_outcome(case["execution"], case["transaction"])
+    assert status_after_run(key, case["approval"], consistent) == case["status"]
+    item = public_item(
+        {
+            "item_id": "item-1",
+            "batch_id": "b",
+            "workflow_id": "wf",
+            "position": 0,
+            "status": case["status"],
+            "execution_outcome": case["execution"],
+            "transaction_outcome": case["transaction"],
+            "approval_json": json.dumps(case["approval"]),
+        }
+    )
+    assert item["result"] == case["key"]
+    assert item["saved_without_person"] is case["saved_without_person"]
 
 
 def test_coarse_halt_never_claims_nothing_was_written() -> None:
@@ -97,6 +129,25 @@ def test_inputs_must_name_every_declared_input_and_no_secret() -> None:
         validate_inputs({"member_id": "  ", "note": "x"}, DECLARED)
 
 
+def test_an_omitted_optional_input_never_takes_the_recorded_value() -> None:
+    """Attack attempt: leave out an optional input and Flow fills it from the
+    recording, so every item types the demonstration's value and the record
+    check confirms it. Desktop requires every declared input instead."""
+
+    declared = [
+        DECLARED[0],
+        {"name": "note", "type": "string", "secret": False, "required": False,
+         "example": "Reviewed"},
+    ]
+    with pytest.raises(WorkItemError, match="missing: note"):
+        validate_inputs({"member_id": "M-2"}, declared)
+    # An empty value is an explicit empty value, not the recorded one.
+    assert validate_inputs({"member_id": "M-2", "note": ""}, declared) == {
+        "member_id": "M-2",
+        "note": "",
+    }
+
+
 # --------------------------------------------------------------- dispatcher
 
 
@@ -155,8 +206,11 @@ class _Bridge:
     def ensure_browser_runtime(self, _progress) -> None:
         pass
 
+    def supports_approval_gate(self) -> bool:
+        return True
+
     def run(self, bundle, config, out_dir=None, params_file=None, env_overrides=None, **_k):
-        from engine.flow_bridge import FlowResult
+        from openadapt_desktop.flow_bridge import FlowResult
 
         staged = None
         if params_file is not None:
@@ -165,7 +219,15 @@ class _Bridge:
                 "mode": oct(Path(params_file).stat().st_mode & 0o777),
                 "values": json.loads(Path(params_file).read_text()),
             }
-        self.calls.append({"bundle": bundle, "config": config, "params_file": staged})
+        self.calls.append(
+            {
+                "bundle": bundle,
+                "config": config,
+                "params_file": staged,
+                "approval_mode": _k.get("approval_mode"),
+                "approval_wait_s": _k.get("approval_wait_s"),
+            }
+        )
         report = self.reports.pop(0)
         (out_dir / "report.json").write_text(json.dumps(report))
         return FlowResult(

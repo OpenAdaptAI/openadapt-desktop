@@ -132,7 +132,24 @@ function targetSummary(target: ExecutionTarget | null): string {
   if (!target) return "Not set";
   const label = TARGETS[target.backend]?.label ?? target.backend;
   const where = target.url || target.macos_app || target.linux_app || target.rdp_host || target.rdp_window || "";
-  return where ? `${label}: ${where}` : label;
+  const summary = where ? `${label}: ${where}` : label;
+  return attachedBrowser(target) ? `${summary}, in your signed-in browser` : summary;
+}
+
+/** Runs attach to the person's signed-in browser instead of opening a new one. */
+function attachedBrowser(target: ExecutionTarget | null): boolean {
+  return Boolean(target?.backend === "web" && target.browser_cdp_endpoint?.trim());
+}
+
+/** Where a case run stopped and Flow's reason, for the technical details. */
+function stopReason(run: RunReport | undefined, flowWords?: unknown): string {
+  if (typeof flowWords === "string" && flowWords) return flowWords;
+  if (!run) return "";
+  const halt = run.halt;
+  if (halt?.reason) {
+    return halt.step_intent ? `${halt.step_intent}: ${halt.reason}` : halt.reason;
+  }
+  return run.error ?? "";
 }
 
 function caseResult(response: { case_run?: RunReport } & Record<string, unknown>) {
@@ -307,6 +324,7 @@ export function CheckIt({
   const [inputs, setInputs] = useState<QualificationParameter[]>([]);
   const [values, setValues] = useState<Record<string, string>>({});
   const [target, setTarget] = useState<ExecutionTarget | null>(null);
+  const [deploymentConfig, setDeploymentConfig] = useState("");
   const [attested, setAttested] = useState(false);
   const [practiceNote, setPracticeNote] = useState("");
   const [drillNote, setDrillNote] = useState("");
@@ -414,8 +432,15 @@ export function CheckIt({
       for (const step of plan.writes.filter((item) => !item.confirmed)) {
         const control = latest.controls.actions[step.id];
         const current = control?.classification?.classification;
+        // Never confirm a save as weaker than Flow's executable floor: an
+        // irreversible step confirmed as "consequential" is a conflict Flow
+        // refuses to approve.
         const risk =
-          current && current !== "unknown" && current !== "read_only" ? current : "consequential";
+          step.executableRisk === "irreversible"
+            ? "irreversible"
+            : current && current !== "unknown" && current !== "read_only"
+              ? current
+              : "consequential";
         const response = await call(CMD.SET_QUALIFICATION_RISK, {
           step_id: step.id,
           risk,
@@ -533,6 +558,12 @@ export function CheckIt({
     return JSON.stringify(clean);
   }
 
+  /** The deployment settings file IT gave for the record check, if any. */
+  function runSettings(): { deployment_config?: string } {
+    const path = deploymentConfig.trim();
+    return path ? { deployment_config: path } : {};
+  }
+
   async function runPractice() {
     if (!plan || !target) return;
     setBusy("practice");
@@ -559,7 +590,13 @@ export function CheckIt({
         case_id: caseId,
         parameters_json: parameters,
         target,
+        ...runSettings(),
       });
+      if (response.not_approved) {
+        // Nothing was saved and nothing was recorded: say why in plain words.
+        setPracticeNote(String(response.error || "The save wasn't approved, so nothing was saved."));
+        return;
+      }
       const copy = caseResult(response);
       if (copy) setPracticeNote(`${copy.label}. ${copy.sentence}`);
       if (!response.ok) {
@@ -567,6 +604,11 @@ export function CheckIt({
         return;
       }
       setProject(response as QualificationProject);
+      const ran = checkPlan(response as QualificationProject).practice;
+      if (ran && ran.status !== "passed") {
+        // Say where and why it stopped: the result word alone doesn't.
+        fail("The practice run didn't pass.", stopReason(response.case_run as RunReport | undefined, response.stop_reason));
+      }
     } catch (error) {
       fail("The practice run didn't finish.", String(error));
     } finally {
@@ -582,11 +624,16 @@ export function CheckIt({
     let latest: QualificationProject | null = null;
     try {
       const parameters = caseParameters();
-      for (const drill of plan.drills.filter((item) => item.status !== "passed")) {
+      const pending = plan.drills.filter((item) => item.status !== "passed");
+      // In the signed-in browser every run starts where the last one ended,
+      // so run one drill and let the person reopen the first screen.
+      const batch = attachedBrowser(target) ? pending.slice(0, 1) : pending;
+      for (const drill of batch) {
         const response = await call(CMD.RUN_QUALIFICATION_CASE, {
           case_id: drill.id,
           parameters_json: parameters,
           target,
+          ...runSettings(),
           ...(drill.faultStepId
             ? { fault_target: { step_id: drill.faultStepId, actuation_path: "gui" } }
             : {}),
@@ -596,10 +643,19 @@ export function CheckIt({
           break;
         }
         latest = response as QualificationProject;
+        const result = checkPlan(latest).drills.find((item) => item.id === drill.id);
+        if (result && result.status !== "passed") {
+          fail(`The "${drill.label}" drill didn't pass.`, stopReason(response.case_run as RunReport | undefined, response.stop_reason));
+          break;
+        }
       }
       if (latest) {
         setProject(latest);
-        setDrillNote("Every drill ended the way its description says.");
+        setDrillNote(
+          batch.length < pending.length
+            ? "That drill ended the way its description says. Open the screen where the task starts, then run the next drill."
+            : "Every drill ended the way its description says.",
+        );
       }
     } catch (error) {
       fail("The drills didn't finish.", String(error));
@@ -687,7 +743,16 @@ export function CheckIt({
           ))}
         </div>
       )}
-      <p className="simple-sub">Runs in: {targetSummary(target)}</p>
+      <p className="simple-sub">
+        Runs in: {targetSummary(target)}
+        {deploymentConfig.trim() ? ", with your deployment settings file" : ""}
+      </p>
+      {attachedBrowser(target) && (
+        <p className="simple-sub">
+          It starts from the screen your signed-in browser shows. Open the
+          screen where the task starts before you run it.
+        </p>
+      )}
       <details className="technical">
         <summary>Change where it runs</summary>
         <div className="technical-body">
@@ -699,6 +764,21 @@ export function CheckIt({
               disabled={busy !== null}
             />
           )}
+          <Field
+            label="Deployment settings file (for IT)"
+            hint="Optional. A local YAML or JSON file with record-check and policy settings. The practice item and the drills use it."
+            htmlFor={`${idPrefix}-config`}
+          >
+            <input
+              id={`${idPrefix}-config`}
+              className="input mono"
+              value={deploymentConfig}
+              disabled={busy !== null}
+              spellCheck={false}
+              placeholder="/path/to/deployment.yaml"
+              onChange={(event) => setDeploymentConfig(event.target.value)}
+            />
+          </Field>
         </div>
       </details>
       <label className="record-check">
@@ -770,10 +850,15 @@ export function CheckIt({
       {plan && (
         <div className="check-list">
           <CheckSection index={1} title="What it changes" state={foundState(plan.changes)}>
-            {plan.writes.length === 0 ? (
+            {plan.writes.length === 0 && plan.unproven.length === 0 ? (
               <p>
                 This task only reads. None of its steps saves anything, so there's
                 no record to check.
+              </p>
+            ) : plan.writes.length === 0 ? (
+              <p>
+                OpenAdapt can't tell yet whether this task saves anything, so it
+                won't treat it as a task that only reads.
               </p>
             ) : (
               <>
@@ -789,11 +874,32 @@ export function CheckIt({
                 </ul>
                 {plan.readCount > 0 && (
                   <p className="simple-sub">
-                    The other {plan.readCount} step{plan.readCount === 1 ? "" : "s"} only read
-                    or move around in the app.
+                    {plan.readCount} other step{plan.readCount === 1 ? " only reads or moves" : "s only read or move"}{" "}
+                    around in the app.
                   </p>
                 )}
               </>
+            )}
+            {plan.unproven.length > 0 && (
+              <div className="unproven-steps">
+                <p className="simple-sub">
+                  {plan.writes.length === 0
+                    ? `${plan.unproven.length} step${plan.unproven.length === 1 ? "" : "s"} might change something.`
+                    : `OpenAdapt can't tell yet whether ${plan.unproven.length} other step${plan.unproven.length === 1 ? "" : "s"} change${plan.unproven.length === 1 ? "s" : ""} anything.`}{" "}
+                  Before you approve the task, say what each one does in Advanced:
+                  exact checks.
+                </p>
+                <details className="technical">
+                  <summary>
+                    Show {plan.unproven.length === 1 ? "it" : `the ${plan.unproven.length} steps`}
+                  </summary>
+                  <ul className="technical-body">
+                    {plan.unproven.map((step) => (
+                      <li key={step.id}>{step.caption}</li>
+                    ))}
+                  </ul>
+                </details>
+              </div>
             )}
           </CheckSection>
 
@@ -802,6 +908,12 @@ export function CheckIt({
             title="How it makes sure it's the right record"
             state={foundState(plan.rightRecord)}
           >
+            {plan.writes.length === 0 && plan.unproven.length > 0 && (
+              <p>
+                This depends on part 1. Once OpenAdapt knows which step saves,
+                it asks how to recognize the right record.
+              </p>
+            )}
             {plan.writes.map((step) => (
               <div className="check-detail" key={step.id}>
                 <p>{step.identityText}</p>
@@ -827,6 +939,12 @@ export function CheckIt({
             title="How it confirms the save"
             state={foundState(plan.recordCheck)}
           >
+            {plan.writes.length === 0 && plan.unproven.length > 0 && (
+              <p>
+                This depends on part 1. Once OpenAdapt knows which step saves,
+                it asks how to confirm the save.
+              </p>
+            )}
             {plan.writes.map((step) => (
               <div className="check-detail" key={step.id}>
                 <p>{step.checkText}</p>
@@ -838,7 +956,14 @@ export function CheckIt({
                     onSave={(answer) => void bindEffect(step, answer)}
                   />
                 )}
-                {!step.checked && !plan.hasProject && (
+                {!step.checked && !plan.hasProject && step.hasRecordChecks && (
+                  <p className="question">
+                    OpenAdapt will read the saved record back to check the
+                    entries listed in part 1. Confirm the parts above to set
+                    up how it reads the record.
+                  </p>
+                )}
+                {!step.checked && !plan.hasProject && !step.hasRecordChecks && (
                   <p className="question">
                     OpenAdapt didn't see where this save lands in your system,
                     so it will ask you a few questions about it. Start the check
@@ -847,7 +972,10 @@ export function CheckIt({
                 )}
               </div>
             ))}
-            {(!plan.hasProject || plan.changes === "todo") && (
+            {/* Nobody can vouch for "what it changes" while OpenAdapt can't
+                say which step saves; that answer goes in the exact checks. */}
+            {(!plan.hasProject || plan.changes === "todo") &&
+              !(plan.writes.length === 0 && plan.unproven.length > 0) && (
               <div className="check-actions">
                 <Button
                   variant="primary"
@@ -921,8 +1049,10 @@ export function CheckIt({
           >
             <p>
               OpenAdapt does the task once, start to finish, on a test record you
-              choose, with every check on. It saves for real in the app, so use
-              a test record. Keep the app where you can see it.
+              choose, with every check on. Before it saves, it shows you the
+              filled form and waits for you to approve. Then it saves for real
+              in the app, so use a test record. Keep the app where you can see
+              it.
             </p>
             {plan.practiceState === "done" && practiceNote === "" ? (
               <details className="technical">
@@ -937,14 +1067,17 @@ export function CheckIt({
           <CheckSection index={5} title="Safety drills" doneWord="Passed" state={plan.drillsState}>
             {plan.drills.length === 0 ? (
               <p>
-                No drills are set up for this task. OpenAdapt adds them when it
-                knows which step saves.
+                {plan.drillsState === "not_needed"
+                  ? "No drills are needed, because no step saves anything."
+                  : "OpenAdapt sets up five drills from your practice item when you run it. Each one makes the task go wrong on purpose right before the save, and must stop before saving."}
               </p>
             ) : (
               <>
                 <p>
-                  OpenAdapt makes the task go wrong on purpose, then checks that
-                  it reacts the way each drill below says.
+                  Each drill runs the task with your test values and changes one
+                  thing on purpose right before the save. A drill passes only
+                  when OpenAdapt's own check catches the change and stops before
+                  saving. Nothing is saved, and no drill asks you to approve.
                 </p>
                 <ul className="drill-list">
                   {plan.drills.map((drill: CaseView) => (
@@ -966,7 +1099,11 @@ export function CheckIt({
                     disabled={busy !== null || plan.practiceState !== "done"}
                     onClick={() => void runDrills()}
                   >
-                    {busy === "drills" ? "Running the drills…" : "Run the drills"}
+                    {busy === "drills"
+                      ? "Running the drills…"
+                      : attachedBrowser(target)
+                        ? "Run the next drill"
+                        : "Run the drills"}
                   </Button>
                   {plan.practiceState !== "done" && (
                     <span className="simple-sub">Run the practice item first.</span>

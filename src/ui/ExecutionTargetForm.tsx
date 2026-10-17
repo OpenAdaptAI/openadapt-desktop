@@ -43,7 +43,7 @@ type PillTone = "neutral" | "ok" | "run" | "warn" | "crit";
 
 /**
  * Pill copy per detected capability state. "Available" is shown ONLY when the
- * engine's detection (engine/capabilities.py) reports it; before the report
+ * engine's detection (openadapt_desktop/capabilities.py) reports it; before the report
  * arrives, or without an engine, the pill says the state is being checked.
  */
 export const CAPABILITY_PILLS: Record<
@@ -96,11 +96,17 @@ export function ExecutionTargetForm({
   idPrefix,
   disabled = false,
   capabilities,
+  urlRequired = false,
 }: {
   target: ExecutionTarget;
   onChange: (target: ExecutionTarget) => void;
   idPrefix: string;
   disabled?: boolean;
+  /**
+   * The caller refuses a blank page URL (the first-workflow recording does),
+   * so the hint must ask for one instead of offering the bundled demo.
+   */
+  urlRequired?: boolean;
   /**
    * Optional pre-fetched capability report. When omitted, the form queries
    * the engine itself (get_capabilities) and degrades to "Checking
@@ -185,6 +191,7 @@ export function ExecutionTargetForm({
         switchRdpMode={(mode) => onChange(switchRdpTransport(target, mode))}
         idPrefix={idPrefix}
         disabled={disabled}
+        urlRequired={urlRequired}
       />
     </>
   );
@@ -197,6 +204,7 @@ function TargetFields({
   switchRdpMode,
   idPrefix,
   disabled,
+  urlRequired,
 }: {
   target: ExecutionTarget;
   rdpMode: RdpMode;
@@ -207,28 +215,55 @@ function TargetFields({
   switchRdpMode: (mode: RdpMode) => void;
   idPrefix: string;
   disabled: boolean;
+  urlRequired: boolean;
 }) {
   switch (target.backend) {
     case "web":
       return (
-        <Field
-          label="Page URL"
-          hint="Leave blank to use Flow's bundled local demonstration."
-          htmlFor={`${idPrefix}-web-url`}
-          hintId={`${idPrefix}-web-url-hint`}
-        >
-          <input
-            id={`${idPrefix}-web-url`}
-            className="input"
-            type="url"
-            value={target.url ?? ""}
-            disabled={disabled}
-            aria-describedby={`${idPrefix}-web-url-hint`}
-            onChange={(event) => setField("url", event.target.value)}
-            placeholder="https://your-app.example"
-            spellCheck={false}
-          />
-        </Field>
+        <>
+          <Field
+            label="Page URL"
+            hint={
+              urlRequired
+                ? "Enter the full address of the page you'll work in, starting with http:// or https://."
+                : "Leave blank to use Flow's bundled local demonstration."
+            }
+            htmlFor={`${idPrefix}-web-url`}
+            hintId={`${idPrefix}-web-url-hint`}
+          >
+            <input
+              id={`${idPrefix}-web-url`}
+              className="input"
+              type="url"
+              value={target.url ?? ""}
+              disabled={disabled}
+              aria-describedby={`${idPrefix}-web-url-hint`}
+              onChange={(event) => setField("url", event.target.value)}
+              placeholder="https://your-app.example"
+              spellCheck={false}
+            />
+          </Field>
+          <Field
+            label="Signed-in browser (optional)"
+            hint="The local debugging address of the browser you're signed in to. Runs then start there, already signed in, instead of in a new browser at the sign-in page."
+            htmlFor={`${idPrefix}-web-cdp`}
+            hintId={`${idPrefix}-web-cdp-hint`}
+          >
+            <input
+              id={`${idPrefix}-web-cdp`}
+              className="input"
+              type="url"
+              value={target.browser_cdp_endpoint ?? ""}
+              disabled={disabled}
+              aria-describedby={`${idPrefix}-web-cdp-hint`}
+              onChange={(event) =>
+                setField("browser_cdp_endpoint", event.target.value)
+              }
+              placeholder="http://127.0.0.1:9222"
+              spellCheck={false}
+            />
+          </Field>
+        </>
       );
     case "windows":
       return (

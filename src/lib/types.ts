@@ -20,6 +20,14 @@ export type TargetBackend =
 export interface ExecutionTarget {
   backend: TargetBackend;
   url?: string;
+  /**
+   * Web only: loopback DevTools address of the person's running, signed-in
+   * Chromium. Runs attach to it and start from the screen it shows, so a task
+   * recorded after sign-in starts signed in. No credential is stored.
+   */
+  browser_cdp_endpoint?: string;
+  /** Web only: exact URL of the tab to use when several share the origin. */
+  browser_page_url?: string;
   agent_url?: string;
   macos_app?: string;
   macos_window_title?: string;
@@ -33,7 +41,7 @@ export interface ExecutionTarget {
 }
 
 /**
- * Capability-aware surface availability (engine/capabilities.py), schema
+ * Capability-aware surface availability (openadapt_desktop/capabilities.py), schema
  * "openadapt-desktop.capability-report/v1". The engine's detection is the
  * single source of truth; the UI never claims "Available" without it.
  */
@@ -152,6 +160,148 @@ export interface WorkItem {
   resolved_at?: string | null;
   retry_of?: string | null;
   actions: AttentionAction[];
+  /** Flow's approval-mode block for this item, as closed codes. */
+  approval?: ItemApproval | null;
+  /**
+   * Flow saved this item with every check passed and no person, and both
+   * post-run checks passed. Never true for an item a person approved or closed.
+   */
+  saved_without_person?: boolean;
+}
+
+/** Flow's per-item approval block, projected by openadapt_desktop/approval_mode.py. */
+export interface ItemApproval {
+  /**
+   * False when Flow's own model rejected the block, or when Desktop's own
+   * records didn't confirm a "no_person" decision. The item then needs a
+   * person and never counts as saved without one.
+   */
+  validated: boolean;
+  /** Why Desktop didn't accept "no_person" here (a closed code), if it didn't. */
+  unconfirmed?:
+    | "engine_without_switch"
+    | "flow_rejected"
+    | "checks_incomplete"
+    | "not_verified"
+    | "retry_or_repeat"
+    | "caller_configuration"
+    | "switch_not_on_here"
+    | "switch_mismatch"
+    | null;
+  /** The switch the block was decided under (an opaque id), if any. */
+  switch_id?: string | null;
+  switch_record_sha256?: string | null;
+  mode: "each_item" | "problems_only" | "not_gated" | null;
+  decision:
+    | "no_person"
+    | "approval_required"
+    | "stop_before_saving"
+    | "problem"
+    | "not_gated"
+    | "approved"
+    | "declined"
+    | "unverified"
+    | null;
+  reason: string | null;
+  needs_person: boolean;
+  counts_toward_problems: boolean;
+  switch_off_reason: OffReason | null;
+  failed_check: { code: string; passed: boolean; detail: string } | null;
+  post_checks: { verified: boolean; whole_run_clean: boolean };
+  saves_without_person: number;
+}
+
+/** Why "Only ask a person about problems" turned off (design 7.6). */
+export type OffReason =
+  | "uncertain_result"
+  | "wrong_item_found"
+  | "too_many_problems"
+  | "screen_changed"
+  | "record_check_lost"
+  | "spot_checks_overdue"
+  | "version_changed"
+  | "environment_changed"
+  | "admission_lost"
+  | "setup_lapsed"
+  | "turned_off";
+
+/**
+ * The switch for one task version, as this computer sees it.
+ *
+ * none: never turned on here. on: on, and this computer checks every item
+ * before and after each save. waiting_for_cloud: on, but the last Cloud status
+ * is stale, so items wait for a person. not_used_here: on in Cloud, but a piece
+ * this computer needs is missing (see blockers). off: closed for good.
+ */
+export type SwitchState = "none" | "on" | "waiting_for_cloud" | "not_used_here" | "off";
+
+export interface SwitchPerson {
+  name: string;
+  at: string;
+  role?: "owner" | "admin";
+}
+
+export interface RequirementResult {
+  code: "E1" | "E2" | "E3" | "E4" | "E5" | "E6" | "E7" | "E8";
+  met: boolean;
+  reason: string;
+  checked_by: "software" | "person" | "software_and_person";
+  step_ids?: string[];
+}
+
+export interface ApprovalModeState {
+  ok: boolean;
+  workflow_id: string;
+  state: SwitchState;
+  recorded_state?: SwitchState;
+  /**
+   * Whether the task card shows the switch at all. False until this computer
+   * has a switch for the task (the design shows it only on runners with a
+   * runner setup, which isn't built yet).
+   */
+  visible?: boolean;
+  switch_id?: string | null;
+  off_reason?: OffReason | null;
+  off_at?: string | null;
+  off_by_this_computer?: boolean;
+  /** The step a screen-changed switch-off happened at, such as "click 'Save'". */
+  off_step?: string;
+  turned_on?: SwitchPerson | null;
+  confirmed?: SwitchPerson | null;
+  blockers: string[];
+  can_turn_off?: boolean;
+  cloud_url?: string | null;
+  evidence?: {
+    switch_id: string;
+    record_sha256: string;
+    bundle_digest: string;
+    runner_id: string;
+    verifiers: number;
+    profile: string;
+    log_intact: boolean;
+    log_events: number;
+    items_finished: number;
+    items_without_person: number;
+  } | null;
+  requirements?: {
+    available: boolean;
+    reason?: string;
+    source?: "this_computer";
+    items: RequirementResult[];
+  };
+  error?: string;
+}
+
+/** One task's switch, as the inbox and Results list it. */
+export interface SwitchSummary {
+  workflow_id: string;
+  task_name: string;
+  state: SwitchState;
+  off_reason: OffReason | null;
+  off_at: string | null;
+  off_by_this_computer: boolean;
+  turned_on: SwitchPerson | null;
+  off_step: string;
 }
 
 export type AttentionAction =
@@ -183,6 +333,8 @@ export interface AttentionScreenshot {
 
 export interface ResultCounts {
   done_checked: number;
+  /** Of done_checked: saved with every check passed and no person. */
+  saved_without_person?: number;
   needed_person: number;
   waiting: number;
   wrong_record_prevented: number;
@@ -200,6 +352,7 @@ export interface ResultsSummary {
   tasks: Record<string, ResultCounts>;
   names: Record<string, string>;
   recent: (WorkItem & { task_name: string })[];
+  switches?: SwitchSummary[];
 }
 
 export interface TaskInputs {
@@ -364,6 +517,8 @@ export interface QualificationEditableEffect {
 
 export interface QualificationActionControls {
   step_id: string;
+  /** Role and accessible name the recorder saved for the clicked control. */
+  target?: { role?: string | null; name?: string | null } | null;
   execution_paths: ("gui" | "api")[];
   classification?: {
     step_id: string;
@@ -824,7 +979,8 @@ export interface ReplayProgress {
 }
 
 export interface SyncState {
-  state: "synced" | "pushing" | "offline" | "paused";
+  /** ``local``: not signed in to Cloud, so nothing is backed up there. */
+  state: "synced" | "pushing" | "offline" | "paused" | "local";
   queued: number;
 }
 
@@ -922,7 +1078,7 @@ export interface GroundingModelConfig {
 }
 
 // A minimal view of GET /api/policy/effective (resolved by the cloud control
-// plane, fetched + cached fail-closed by the engine — see engine/policy.py /
+// plane, fetched + cached fail-closed by the engine — see openadapt_desktop/policy.py /
 // docs/POLICY_SYNC.md). Only the fields the grounding-model section needs are
 // typed here.
 export interface EffectivePolicy {
@@ -930,4 +1086,39 @@ export interface EffectivePolicy {
   grounding_model: GroundingModelConfig;
   resolved_at?: string;
   offline?: boolean;
+  /**
+   * Where the engine got it: "network", "cache", or "fail-closed-default"
+   * when neither Cloud nor a saved copy answered (no organization policy).
+   */
+  source?: string;
+}
+
+/** A run waiting for a person to approve a save (``get_item_approval``). */
+export interface ItemApprovalState {
+  ok: boolean;
+  running: boolean;
+  waiting: boolean;
+  workflow_id?: string;
+  /** "practice" for Check it's practice item, "item" for Run it. */
+  kind?: "practice" | "item";
+  error?: string;
+  request?: {
+    request_id: string;
+    request_sha256: string;
+    step_id: string;
+    step_intent: string;
+    /** When the run stops waiting and stops without saving. */
+    answer_by: string | null;
+    /** The filled form as a data URL, or null when it can't be shown. */
+    screenshot: string | null;
+    /** The item's own values, as given. Local only. */
+    values: { name: string; value: string }[];
+  };
+}
+
+export interface ItemApprovalAnswer {
+  ok: boolean;
+  decision?: "approved" | "declined";
+  error?: string;
+  code?: string;
 }

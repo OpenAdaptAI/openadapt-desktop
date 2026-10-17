@@ -126,12 +126,115 @@ it("says what the task changes and how it checks, in plain words", async () => {
   expect(await screen.findByText("Click “Save”")).toBeTruthy();
   expect(
     screen.getByText(
-      "Sets status note on the record for the member ID you give it to the note you give it.",
+      "Sets the status note to the note you give it.",
     ),
   ).toBeTruthy();
   expect(screen.getByText(/matches the member ID you give it/)).toBeTruthy();
   expect(screen.getByText(/reads the record back from your system's records/)).toBeTruthy();
-  expect(screen.getByText(/The other 1 step only read/)).toBeTruthy();
+  // The search step has no reviewed classification, so it isn't counted among
+  // the steps that only read.
+  expect(screen.queryByText(/only reads? or move/)).toBeNull();
+  expect(screen.getByText(/can't tell yet whether 1 other step changes anything/)).toBeTruthy();
+});
+
+it("counts a step as read-only only when it is classified read-only", async () => {
+  const reviewed = project();
+  (reviewed.controls.actions as Record<string, unknown>).search = {
+    step_id: "search",
+    execution_paths: ["gui"],
+    classification: { step_id: "search", classification: "read_only", explanation: "", operator_confirmed: true },
+    identity: { can_arm: false, armed: false, sources: [], policy: null },
+    effects: [],
+  };
+  engine(reviewed);
+  render(<CheckIt workflowId="wf-1" onExactChecks={() => {}} onRun={() => {}} />);
+
+  expect(await screen.findByText(/1 other step only reads or moves around in the app/)).toBeTruthy();
+  expect(screen.queryByText(/can't tell yet/)).toBeNull();
+});
+
+/** The claims program as the old engine compiled it: every step reversible,
+ * no step with an effect, Save included, and no reviewed classification. */
+function unprovenProgram() {
+  const base = project({ confirmed: false });
+  base.graph.nodes = [
+    { id: "step_000", index: 0, kind: "action", title: "type <insurance_no>", effects: [], postconditions: [], halts: [], badges: [], risk: "reversible" },
+    { id: "step_008", index: 1, kind: "action", title: "scroll by (0, 400)", effects: [], postconditions: [], halts: [], badges: [], risk: "reversible" },
+    { id: "step_012", index: 2, kind: "action", title: "click '日'", effects: [], postconditions: [], halts: [], badges: [], risk: "reversible" },
+  ];
+  const unknown = (id: string) => ({
+    step_id: id,
+    execution_paths: ["gui"],
+    classification: { step_id: id, classification: "unknown", explanation: "", operator_confirmed: false },
+    identity: { can_arm: false, armed: false, sources: [], policy: null },
+    effects: [],
+  });
+  base.controls.actions = {
+    step_000: unknown("step_000"),
+    step_008: {
+      ...unknown("step_008"),
+      classification: { step_id: "step_008", classification: "read_only", explanation: "", operator_confirmed: true },
+    },
+    step_012: unknown("step_012"),
+  } as unknown as typeof base.controls.actions;
+  return base;
+}
+
+it("never calls a task read-only while a step's effect is unknown", async () => {
+  engine(unprovenProgram());
+  render(<CheckIt workflowId="wf-1" onExactChecks={() => {}} onRun={() => {}} />);
+
+  expect(await screen.findByText(/can't tell yet whether this task saves anything/)).toBeTruthy();
+  expect(screen.queryByText(/This task only reads/)).toBeNull();
+  expect(screen.getByText(/2 steps might change something/)).toBeTruthy();
+  expect(screen.getByText("Type the insurance no")).toBeTruthy();
+  expect(screen.getByText("Click “日”")).toBeTruthy();
+  // Parts 1-3 ask for an answer instead of saying "Not needed", and nobody is
+  // offered a button to vouch for an answer OpenAdapt doesn't have.
+  expect(screen.getAllByText("Needs an answer").length).toBeGreaterThanOrEqual(3);
+  expect(screen.queryByText("Not needed")).toBeNull();
+  expect(screen.queryByRole("button", { name: "These look right" })).toBeNull();
+  const run = screen.getByRole("button", { name: "Run the practice item" });
+  expect((run as HTMLButtonElement).disabled).toBe(true);
+});
+
+it("says a task only reads when every step is proven read-only", async () => {
+  const readOnly = unprovenProgram();
+  readOnly.graph.nodes = [readOnly.graph.nodes[1]];
+  engine(readOnly);
+  render(<CheckIt workflowId="wf-1" onExactChecks={() => {}} onRun={() => {}} />);
+
+  expect(await screen.findByText(/This task only reads/)).toBeTruthy();
+});
+
+it("lists a save the program declares without an effect and asks how to check it", async () => {
+  // The fixed engine: the icon-only Save is irreversible with no effect yet.
+  const fixed = unprovenProgram();
+  fixed.graph.nodes[2] = { ...fixed.graph.nodes[2], title: "click recorded visual target", risk: "irreversible" };
+  engine(fixed);
+  vi.mocked(engineInvoke).mockImplementation(async (command, params) => {
+    if (command === CMD.GET_QUALIFICATION) return fixed;
+    if (command === CMD.SET_QUALIFICATION_RISK) {
+      // Confirming must not record the save as weaker than Flow's floor.
+      expect(params).toEqual(expect.objectContaining({ step_id: "step_012", risk: "irreversible" }));
+      return fixed;
+    }
+    throw new Error(`unexpected ${command}`);
+  });
+  render(<CheckIt workflowId="wf-1" onExactChecks={() => {}} onRun={() => {}} />);
+
+  expect(await screen.findByText("Click the spot you clicked when you showed it")).toBeTruthy();
+  expect(screen.getByText("OpenAdapt doesn't know yet what this step saves.")).toBeTruthy();
+  expect(screen.getByText("OpenAdapt doesn't know yet how to confirm this save.")).toBeTruthy();
+  expect(screen.queryByText(/This task only reads/)).toBeNull();
+  expect(screen.getByText(/can't tell yet whether 1 other step changes anything/)).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "These look right" }));
+  await waitFor(() =>
+    expect(vi.mocked(engineInvoke)).toHaveBeenCalledWith(
+      CMD.SET_QUALIFICATION_RISK,
+      expect.objectContaining({ risk: "irreversible" }),
+    ),
+  );
 });
 
 it("accepts the recording's proposal when nothing is confirmed yet", async () => {
@@ -259,5 +362,166 @@ it("asks plain questions when the recording can't show how to confirm the save",
 
   expect(
     await screen.findByText(/opens the record again in a separate session and reads it/),
+  ).toBeTruthy();
+});
+
+it("runs one drill at a time in the signed-in browser", async () => {
+  const ready = project({
+    cases: [
+      { id: "practice-1", kind: "representative", status: "passed" },
+      { id: "fault-identity-swap", kind: "wrong_identity", status: null },
+      { id: "fault-missing-effect", kind: "missing_effect", status: null },
+    ],
+  });
+  engine(ready);
+  vi.mocked(engineTry).mockImplementation(async (command, _params, fallback) => {
+    if (command === CMD.GET_WORKFLOWS) return [{ id: "wf-1", name: "Add a claim note", steps: 2 }];
+    if (command === CMD.GET_TASK_INPUTS) {
+      return {
+        ok: true,
+        workflow_id: "wf-1",
+        inputs: [{ name: "member_id", type: "string", secret: false, required: true, example: "M-1", choices: [] }],
+        target: { backend: "web", url: "http://127.0.0.1:9401/front/", browser_cdp_endpoint: "http://127.0.0.1:9334" },
+      };
+    }
+    return fallback;
+  });
+  const ran: string[] = [];
+  vi.mocked(engineInvoke).mockImplementation(async (command, params) => {
+    if (command === CMD.GET_QUALIFICATION) return ready;
+    if (command === CMD.RUN_QUALIFICATION_CASE) {
+      const call = params as { case_id: string; target: { browser_cdp_endpoint?: string } };
+      expect(call.target.browser_cdp_endpoint).toBe("http://127.0.0.1:9334");
+      ran.push(call.case_id);
+      return ready;
+    }
+    throw new Error(`unexpected ${command}`);
+  });
+  render(<CheckIt workflowId="wf-1" onExactChecks={() => {}} onRun={() => {}} />);
+
+  expect(await screen.findByText(/in your signed-in browser/)).toBeTruthy();
+  expect(screen.getByText(/Open the screen where the task starts before you run it/)).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Run the next drill" }));
+
+  expect(await screen.findByText(/then run the next drill/)).toBeTruthy();
+  expect(ran).toEqual(["fault-identity-swap"]);
+});
+
+it("counts nothing when the practice save wasn't approved, and passes IT's settings file", async () => {
+  engine(project());
+  const calls: Record<string, unknown>[] = [];
+  vi.mocked(engineInvoke).mockImplementation(async (command, params) => {
+    if (command === CMD.GET_QUALIFICATION) return project();
+    if (command === CMD.ADD_QUALIFICATION_CASE) {
+      return project({ cases: [{ id: "practice-1", kind: "representative", status: null }] });
+    }
+    if (command === CMD.RUN_QUALIFICATION_CASE) {
+      calls.push(params as Record<string, unknown>);
+      return {
+        ok: false,
+        workflow_id: "wf-1",
+        not_approved: true,
+        error:
+          "Nobody approved the save in time, so nothing was saved and the practice run didn't count. Run the practice item again and approve the save when OpenAdapt asks.",
+        case_run: { outcome: "HALTED", transaction_outcome: "HALTED_BEFORE_EFFECT" },
+      };
+    }
+    throw new Error(`unexpected ${command}`);
+  });
+  render(<CheckIt workflowId="wf-1" onExactChecks={() => {}} onRun={() => {}} />);
+
+  const run = await screen.findByRole("button", { name: "Run the practice item" });
+  expect(screen.getByText(/Before it saves, it shows you the filled form and waits for you to approve/)).toBeTruthy();
+  fireEvent.change(screen.getByLabelText("Deployment settings file (for IT)"), {
+    target: { value: "/tmp/deployment.claims.yaml" },
+  });
+  expect(screen.getByText(/with your deployment settings file/)).toBeTruthy();
+  fireEvent.click(
+    screen.getByRole("checkbox", {
+      name: "These are test values, and I'll keep the app in view while it runs.",
+    }),
+  );
+  fireEvent.click(run);
+
+  expect(await screen.findByText(/Nobody approved the save in time/)).toBeTruthy();
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(calls[0]).toEqual(expect.objectContaining({ deployment_config: "/tmp/deployment.claims.yaml" }));
+});
+
+it("describes each drill as the change Flow makes before the save", async () => {
+  const ready = project({
+    cases: [
+      { id: "practice-1", kind: "representative", status: "passed" },
+      { id: "drill-wrong-record-save", kind: "wrong_identity", status: null },
+      { id: "drill-two-matches-save", kind: "ambiguity", status: null },
+      { id: "drill-record-changed-save", kind: "stale_identity", status: null },
+      { id: "drill-save-not-confirmed-save", kind: "missing_effect", status: null },
+      { id: "drill-weak-record-check-save", kind: "weak_effect", status: null },
+    ],
+  });
+  engine(ready);
+  render(<CheckIt workflowId="wf-1" onExactChecks={() => {}} onRun={() => {}} />);
+
+  expect(await screen.findByText(/no drill asks you to approve/)).toBeTruthy();
+  for (const label of [
+    "Wrong record",
+    "Two possible matches",
+    "Record changed mid-task",
+    "No record check",
+    "Weak record check",
+  ]) {
+    expect(screen.getByText(label)).toBeTruthy();
+  }
+  expect(screen.getByText(/A second copy of the save button appears/)).toBeTruthy();
+  expect(screen.getByText(/The record check is taken away/)).toBeTruthy();
+});
+
+it("before the check starts, says drills come with the practice item and the record check is known", async () => {
+  // The recorded program declares its record checks; no project exists yet.
+  const fresh = project({ tier: null });
+  (fresh as { project: unknown }).project = null;
+  engine(fresh);
+  render(<CheckIt workflowId="wf-1" onExactChecks={() => {}} onRun={() => {}} />);
+
+  expect(await screen.findByText(/sets up five drills from your practice item/)).toBeTruthy();
+  expect(screen.queryByText("Not needed")).toBeNull();
+  expect(screen.getByText(/will read the saved record back to check the\s+entries listed in part 1/)).toBeTruthy();
+  expect(screen.queryByText(/didn't see where this save lands/)).toBeNull();
+});
+
+it("says where and why a practice run that ran didn't pass", async () => {
+  engine(project());
+  const failed = project({ cases: [{ id: "practice-1", kind: "representative", status: "failed" as never }] });
+  vi.mocked(engineInvoke).mockImplementation(async (command) => {
+    if (command === CMD.GET_QUALIFICATION) return project();
+    if (command === CMD.ADD_QUALIFICATION_CASE) {
+      return project({ cases: [{ id: "practice-1", kind: "representative", status: null }] });
+    }
+    if (command === CMD.RUN_QUALIFICATION_CASE) {
+      return {
+        ...failed,
+        stop_reason: "observe exact qualification environment: qualification environment observer does not match the project",
+        case_run: {
+          outcome: "HALTED",
+          transaction_outcome: "HALTED_BEFORE_EFFECT",
+          halt: { step_index: 0, step_intent: "type <member_id>", reason: "qualification environment observer does not match the project" },
+        },
+      };
+    }
+    throw new Error(`unexpected ${command}`);
+  });
+  render(<CheckIt workflowId="wf-1" onExactChecks={() => {}} onRun={() => {}} />);
+
+  const run = await screen.findByRole("button", { name: "Run the practice item" });
+  fireEvent.click(
+    screen.getByRole("checkbox", {
+      name: "These are test values, and I'll keep the app in view while it runs.",
+    }),
+  );
+  fireEvent.click(run);
+
+  expect(await screen.findByText("The practice run didn't pass.")).toBeTruthy();
+  expect(
+    screen.getByText(/observe exact qualification environment: qualification environment observer does not match the project/),
   ).toBeTruthy();
 });

@@ -2,17 +2,18 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
 import pytest
 import yaml
 
-from engine.config import EngineConfig
-from engine.controller import RecordingState
-from engine.db import IndexDB
-from engine.dispatch import EngineDispatcher, EngineServices
-from engine.flow_bridge import FlowBridge
+from openadapt_desktop.config import EngineConfig
+from openadapt_desktop.controller import RecordingState
+from openadapt_desktop.db import IndexDB
+from openadapt_desktop.dispatch import EngineDispatcher, EngineServices
+from openadapt_desktop.flow_bridge import FlowBridge
 
 
 def _precise_report(
@@ -55,7 +56,7 @@ def _precise_report(
 def _first_supervised_bundle(path: Path, *, state_changing: bool) -> dict:
     flow_ir = pytest.importorskip("openadapt_flow.ir")
 
-    from engine.qualification import initialize_qualification
+    from openadapt_desktop.qualification import initialize_qualification
 
     action = flow_ir.ActionKind.CLICK if state_changing else flow_ir.ActionKind.WAIT
     flow_ir.Workflow(
@@ -80,7 +81,7 @@ def _first_supervised_bundle(path: Path, *, state_changing: bool) -> dict:
 
 
 def _target_digest(target: dict) -> str:
-    from engine.targets import ExecutionTarget
+    from openadapt_desktop.targets import ExecutionTarget
 
     return EngineDispatcher._canonical_target_digest(
         ExecutionTarget.model_validate(target)
@@ -170,7 +171,7 @@ def deps(tmp_path: Path):
 class TestRecordingCommands:
     def test_start_and_stop(self, deps, monkeypatch) -> None:
         disp, _db, events = deps
-        monkeypatch.setattr("engine.dispatch.sys.platform", "linux")
+        monkeypatch.setattr("openadapt_desktop.dispatch.sys.platform", "linux")
         r = disp.dispatch("start_recording", {})
         assert r["capture_id"] == "cap1"
         assert ("recording_started", {"capture_id": "cap1"}) in events
@@ -189,9 +190,9 @@ class TestRecordingCommands:
         self, deps, monkeypatch
     ) -> None:
         disp, db, _events = deps
-        monkeypatch.setattr("engine.dispatch.sys.platform", "linux")
+        monkeypatch.setattr("openadapt_desktop.dispatch.sys.platform", "linux")
         monkeypatch.setattr(
-            "engine.capabilities.ensure_backend_capability",
+            "openadapt_desktop.capabilities.ensure_backend_capability",
             lambda *_args, **_kwargs: None,
         )
 
@@ -200,7 +201,7 @@ class TestRecordingCommands:
                 self.out_dir = out_dir
 
             def stop(self):
-                from engine.flow_bridge import FlowResult
+                from openadapt_desktop.flow_bridge import FlowResult
 
                 self.out_dir.mkdir(parents=True, exist_ok=True)
                 (self.out_dir / "meta.json").write_text(
@@ -275,7 +276,7 @@ class TestRecordingCommands:
     ) -> None:
         disp, _db, events = deps
         monkeypatch.setattr(
-            "engine.capabilities.ensure_backend_capability",
+            "openadapt_desktop.capabilities.ensure_backend_capability",
             lambda *_args, **_kwargs: None,
         )
 
@@ -328,7 +329,7 @@ class TestRecordingCommands:
 
     def test_compile_failure_retains_recording_and_retry_succeeds(self, deps, monkeypatch) -> None:
         disp, _db, events = deps
-        monkeypatch.setattr("engine.dispatch.sys.platform", "linux")
+        monkeypatch.setattr("openadapt_desktop.dispatch.sys.platform", "linux")
         disp.services.controller.compiled = None
 
         disp.dispatch("start_recording", {})
@@ -377,11 +378,13 @@ class TestRecordingCommands:
 
     def test_mac_start_requests_input_monitoring_only_when_needed(self, deps, monkeypatch) -> None:
         disp, _db, _events = deps
-        monkeypatch.setattr("engine.dispatch.sys.platform", "darwin")
-        monkeypatch.setattr("engine.dispatch._mac_preflight_input_monitoring", lambda: False)
+        monkeypatch.setattr("openadapt_desktop.dispatch.sys.platform", "darwin")
+        monkeypatch.setattr(
+            "openadapt_desktop.dispatch._mac_preflight_input_monitoring", lambda: False
+        )
         requests: list[bool] = []
         monkeypatch.setattr(
-            "engine.dispatch._mac_request_input_monitoring",
+            "openadapt_desktop.dispatch._mac_request_input_monitoring",
             lambda: requests.append(True) or True,
         )
 
@@ -394,9 +397,13 @@ class TestRecordingCommands:
         self, deps, monkeypatch
     ) -> None:
         disp, _db, events = deps
-        monkeypatch.setattr("engine.dispatch.sys.platform", "darwin")
-        monkeypatch.setattr("engine.dispatch._mac_preflight_input_monitoring", lambda: False)
-        monkeypatch.setattr("engine.dispatch._mac_request_input_monitoring", lambda: False)
+        monkeypatch.setattr("openadapt_desktop.dispatch.sys.platform", "darwin")
+        monkeypatch.setattr(
+            "openadapt_desktop.dispatch._mac_preflight_input_monitoring", lambda: False
+        )
+        monkeypatch.setattr(
+            "openadapt_desktop.dispatch._mac_request_input_monitoring", lambda: False
+        )
 
         with pytest.raises(PermissionError, match="Input Monitoring permission"):
             disp.dispatch("start_recording", {})
@@ -416,10 +423,12 @@ class TestRecordingCommands:
         self, deps, monkeypatch
     ) -> None:
         disp, _db, _events = deps
-        monkeypatch.setattr("engine.dispatch.sys.platform", "darwin")
-        monkeypatch.setattr("engine.dispatch._mac_preflight_input_monitoring", lambda: True)
+        monkeypatch.setattr("openadapt_desktop.dispatch.sys.platform", "darwin")
         monkeypatch.setattr(
-            "engine.dispatch._mac_request_input_monitoring",
+            "openadapt_desktop.dispatch._mac_preflight_input_monitoring", lambda: True
+        )
+        monkeypatch.setattr(
+            "openadapt_desktop.dispatch._mac_request_input_monitoring",
             lambda: pytest.fail("permission request must not run"),
         )
 
@@ -429,13 +438,13 @@ class TestRecordingCommands:
         self, deps, monkeypatch
     ) -> None:
         disp, _db, events = deps
-        monkeypatch.setattr("engine.dispatch.sys.platform", "darwin")
+        monkeypatch.setattr("openadapt_desktop.dispatch.sys.platform", "darwin")
         monkeypatch.setattr(
-            "engine.dispatch._mac_preflight_input_monitoring",
+            "openadapt_desktop.dispatch._mac_preflight_input_monitoring",
             lambda: pytest.fail("web authoring must not inspect Input Monitoring"),
         )
         monkeypatch.setattr(
-            "engine.dispatch._mac_request_input_monitoring",
+            "openadapt_desktop.dispatch._mac_request_input_monitoring",
             lambda: pytest.fail("web authoring must not request Input Monitoring"),
         )
         calls: list[str] = []
@@ -471,7 +480,7 @@ class TestRecordingCommands:
 
     def test_blank_web_target_generates_and_registers_bundled_demo(self, deps, monkeypatch) -> None:
         disp, db, events = deps
-        monkeypatch.setattr("engine.dispatch.sys.platform", "linux")
+        monkeypatch.setattr("openadapt_desktop.dispatch.sys.platform", "linux")
         calls: list[str] = []
 
         class Bridge:
@@ -480,7 +489,7 @@ class TestRecordingCommands:
                 progress("ready", "Ready")
 
             def demo_record(self, out_dir):
-                from engine.flow_bridge import FlowResult
+                from openadapt_desktop.flow_bridge import FlowResult
 
                 calls.append("demo")
                 out_dir.mkdir(parents=True)
@@ -523,7 +532,7 @@ class TestRecordingCommands:
 
     def test_browser_setup_failure_refuses_before_record_process(self, deps, monkeypatch) -> None:
         disp, _db, events = deps
-        monkeypatch.setattr("engine.dispatch.sys.platform", "linux")
+        monkeypatch.setattr("openadapt_desktop.dispatch.sys.platform", "linux")
 
         class Bridge:
             start_called = False
@@ -585,7 +594,7 @@ class TestRecordingCommands:
         self, deps, monkeypatch, target: dict
     ) -> None:
         disp, db, events = deps
-        monkeypatch.setattr("engine.dispatch.sys.platform", "linux")
+        monkeypatch.setattr("openadapt_desktop.dispatch.sys.platform", "linux")
         private_requests: list[dict] = []
         process_calls: list[tuple] = []
 
@@ -594,7 +603,7 @@ class TestRecordingCommands:
                 self.out_dir = out_dir
 
             def stop(self):
-                from engine.flow_bridge import FlowResult
+                from openadapt_desktop.flow_bridge import FlowResult
 
                 self.out_dir.mkdir(parents=True, exist_ok=True)
                 (self.out_dir / "meta.json").write_text(
@@ -660,7 +669,7 @@ class TestLibraryCommands:
         db.insert_capture("cap-present", str(capture), "2026-07-25T00:00:00Z")
         inspected: list[Path] = []
         monkeypatch.setattr(
-            "engine.presentation_export.presentation_export_status",
+            "openadapt_desktop.presentation_export.presentation_export_status",
             lambda path: inspected.append(path) or {"ready": True},
         )
 
@@ -821,7 +830,7 @@ class TestLibraryCommands:
             config.write_text("backend:\n  kind: web\n")
             extra_params = {**extra_params, "deployment_config": str(config)}
         monkeypatch.setattr(
-            "engine.capabilities.ensure_backend_capability",
+            "openadapt_desktop.capabilities.ensure_backend_capability",
             lambda *_args, **_kwargs: (_ for _ in ()).throw(
                 AssertionError("changed target must refuse before capability setup")
             ),
@@ -869,7 +878,7 @@ class TestLibraryCommands:
             task="Inspect the test page",
         )
         monkeypatch.setattr(
-            "engine.capabilities.ensure_backend_capability",
+            "openadapt_desktop.capabilities.ensure_backend_capability",
             lambda *_args, **_kwargs: None,
         )
 
@@ -927,7 +936,7 @@ class TestLibraryCommands:
             task="Inspect the test page",
         )
         monkeypatch.setattr(
-            "engine.capabilities.ensure_backend_capability",
+            "openadapt_desktop.capabilities.ensure_backend_capability",
             lambda *_args, **_kwargs: None,
         )
 
@@ -938,7 +947,7 @@ class TestLibraryCommands:
                 return None
 
             def replay(self, _bundle, out_dir, *, config):
-                from engine.flow_bridge import FlowResult
+                from openadapt_desktop.flow_bridge import FlowResult
 
                 self.replay_called = True
                 (out_dir / "report.json").write_text('{"success": true}')
@@ -1010,7 +1019,7 @@ class TestLibraryCommands:
             compile_fresh,
         )
         monkeypatch.setattr(
-            "engine.capabilities.ensure_backend_capability",
+            "openadapt_desktop.capabilities.ensure_backend_capability",
             lambda *_args, **_kwargs: None,
         )
 
@@ -1060,7 +1069,7 @@ class TestLibraryCommands:
                 return None
 
             def replay(self, _bundle, out_dir, *, config):
-                from engine.flow_bridge import FlowResult
+                from openadapt_desktop.flow_bridge import FlowResult
 
                 self.replay_called = True
                 (out_dir / "report.json").write_text('{"success": true}')
@@ -1103,6 +1112,147 @@ class TestLibraryCommands:
         assert qualification["ok"] is True
         assert qualification["draft_environment"] is False
         assert qualification["project"]["environment"]["application"] == "Reference app"
+
+    @pytest.mark.parametrize("command", ["replay_workflow", "run_workflow"])
+    def test_signed_in_browser_run_refuses_on_a_flow_that_would_ignore_it(
+        self, deps, command: str, monkeypatch
+    ) -> None:
+        """An older Flow drops the signed-in browser address and opens a new,
+        signed-out browser; Desktop must refuse instead of running there."""
+
+        disp, db, _events = deps
+        bundle = disp.config.data_dir / "bundles" / "bnd1"
+        bundle.mkdir(parents=True)
+        db.insert_bundle("bnd1", str(bundle), capture_id="cap1")
+        monkeypatch.setattr(
+            "openadapt_desktop.capabilities.ensure_backend_capability",
+            lambda *_args, **_kwargs: None,
+        )
+
+        class Bridge:
+            called = False
+
+            def supports_attached_browser_runs(self) -> bool:
+                return False
+
+            def supports_approval_gate(self) -> bool:
+                return True
+
+            def replay(self, *_args, **_kwargs):
+                self.called = True
+                raise AssertionError("must not reach Flow")
+
+            run = replay
+
+        bridge = Bridge()
+        disp.services._flow_bridge = bridge
+        result = disp.dispatch(
+            command,
+            {
+                "workflow_id": "bnd1",
+                "target": {
+                    "backend": "web",
+                    "url": "http://127.0.0.1:9401/front/",
+                    "browser_cdp_endpoint": "http://127.0.0.1:9334",
+                },
+            },
+        )
+
+        assert result["pre_action_refusal"] is True
+        assert "signed-in browser" in result["error"]
+        assert bridge.called is False
+
+    @pytest.mark.parametrize(
+        ("command", "source"),
+        [
+            ("replay_workflow", "selected"),
+            ("run_workflow", "selected"),
+            ("run_workflow", "default"),
+        ],
+    )
+    def test_signed_in_browser_from_a_config_file_refuses_on_a_flow_that_would_ignore_it(
+        self, deps, command: str, source: str, monkeypatch
+    ) -> None:
+        """The address can also reach Flow through the operator's config file
+        or Desktop's default deployment.json while the target names none. An
+        older Flow silently drops it there too and runs in a new, signed-out
+        browser, so the refusal must follow the staged config, not the target."""
+
+        disp, db, _events = deps
+        bundle = disp.config.data_dir / "bundles" / "bnd1"
+        bundle.mkdir(parents=True)
+        db.insert_bundle("bnd1", str(bundle), capture_id="cap1")
+        monkeypatch.setattr(
+            "openadapt_desktop.capabilities.ensure_backend_capability",
+            lambda *_args, **_kwargs: None,
+        )
+        config = {
+            "backend": {
+                "kind": "web",
+                "url": "http://127.0.0.1:9401/front/",
+                "browser_cdp_endpoint": "http://127.0.0.1:9334",
+            }
+        }
+        if source == "default":
+            config_path = disp.config.data_dir / "deployment.json"
+        else:
+            config_path = disp.config.data_dir / "operator-deployment.json"
+        config_path.write_text(json.dumps(config))
+
+        class Bridge:
+            called = False
+
+            def supports_attached_browser_runs(self) -> bool:
+                return False
+
+            def supports_approval_gate(self) -> bool:
+                return True
+
+            def replay(self, *_args, **_kwargs):
+                self.called = True
+                raise AssertionError("must not reach Flow")
+
+            run = replay
+
+        bridge = Bridge()
+        disp.services._flow_bridge = bridge
+        payload: dict = {
+            "workflow_id": "bnd1",
+            # The target names the app but no signed-in browser.
+            "target": {"backend": "web", "url": "http://127.0.0.1:9401/front/"},
+        }
+        if source == "selected":
+            payload["deployment_config"] = str(config_path)
+        result = disp.dispatch(command, payload)
+
+        assert result["pre_action_refusal"] is True
+        assert "signed-in browser" in result["error"]
+        assert bridge.called is False
+
+    def test_signed_in_browser_address_does_not_change_the_reviewed_target(
+        self,
+    ) -> None:
+        from openadapt_desktop.targets import ExecutionTarget
+
+        plain = ExecutionTarget(backend="web", url="http://127.0.0.1:9301/")
+        attached = ExecutionTarget(
+            backend="web",
+            url="http://127.0.0.1:9301/",
+            browser_cdp_endpoint="http://127.0.0.1:9334",
+        )
+        digest = EngineDispatcher._canonical_target_digest
+        assert digest(plain) == digest(attached)
+        # Digests made before the field existed stay valid.
+        legacy = json.dumps(
+            {
+                key: value
+                for key, value in plain.model_dump(mode="json").items()
+                if key not in {"browser_cdp_endpoint", "browser_page_url"}
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        assert digest(plain) == hashlib.sha256(legacy.encode("utf-8")).hexdigest()
 
     @pytest.mark.parametrize("command", ["replay_workflow", "run_workflow"])
     def test_normal_execution_cannot_bypass_the_active_first_review(
@@ -1244,7 +1394,7 @@ class TestLibraryCommands:
                 progress("ready", "Ready")
 
             def replay(self, _bundle, out_dir, *, config):
-                from engine.flow_bridge import FlowResult
+                from openadapt_desktop.flow_bridge import FlowResult
 
                 assert config is None
                 order.append("replay")
@@ -1308,7 +1458,7 @@ class TestLibraryCommands:
                 raise AssertionError("RDP must not provision Chromium")
 
             def replay(self, target_bundle, out_dir, *, config):
-                from engine.flow_bridge import FlowResult
+                from openadapt_desktop.flow_bridge import FlowResult
 
                 assert config is not None
                 calls.append((target_bundle, out_dir, config))
@@ -1365,9 +1515,14 @@ class TestLibraryCommands:
         staged_configs: list[dict] = []
 
         class Bridge:
-            def run(self, target_bundle, config, out_dir):
-                from engine.flow_bridge import FlowResult
+            def supports_approval_gate(self) -> bool:
+                return True
 
+            def run(self, target_bundle, config, out_dir, approval_mode, approval_wait_s):
+                from openadapt_desktop.flow_bridge import FlowResult
+
+                # Every Desktop run asks Flow to stop before each save.
+                assert (approval_mode, approval_wait_s) == ("each_item", 600)
                 calls.append((target_bundle, config, out_dir))
                 staged_configs.append(yaml.safe_load(config.read_text()))
                 (out_dir / "report.json").write_text('{"success": true}')
@@ -1422,7 +1577,7 @@ class TestLibraryCommands:
                 raise AssertionError("config-only RDP must not provision Chromium")
 
             def replay(self, target_bundle, out_dir, *, config):
-                from engine.flow_bridge import FlowResult
+                from openadapt_desktop.flow_bridge import FlowResult
 
                 calls.append((target_bundle, out_dir, config))
                 staged_configs.append(yaml.safe_load(config.read_text()))
@@ -1525,7 +1680,7 @@ class TestLibraryCommands:
 
         class Bridge:
             def replay(self, _bundle, out_dir, *, config):
-                from engine.flow_bridge import FlowResult
+                from openadapt_desktop.flow_bridge import FlowResult
 
                 return FlowResult(
                     ok=False,
@@ -1578,7 +1733,7 @@ class TestLibraryCommands:
 
         class Bridge:
             def replay(self, _bundle, out_dir, *, config):
-                from engine.flow_bridge import FlowResult
+                from openadapt_desktop.flow_bridge import FlowResult
 
                 (out_dir / "report.json").write_text(json.dumps(report))
                 return FlowResult(
@@ -1636,7 +1791,7 @@ class TestLibraryCommands:
 
         class Bridge:
             def replay(self, _bundle, out_dir, *, config):
-                from engine.flow_bridge import FlowResult
+                from openadapt_desktop.flow_bridge import FlowResult
 
                 (out_dir / "report.json").write_text(
                     json.dumps(
@@ -1703,7 +1858,7 @@ class TestLibraryCommands:
 
         class Bridge:
             def replay(self, _bundle, out_dir, *, config):
-                from engine.flow_bridge import FlowResult
+                from openadapt_desktop.flow_bridge import FlowResult
 
                 (out_dir / "report.json").write_text(
                     json.dumps(
@@ -1795,7 +1950,7 @@ class TestLibraryCommands:
                 raise OSError("disk busy")
             return original_write_text(path, *args, **kwargs)
 
-        monkeypatch.setattr("engine.dispatch.Path.write_text", fail_recovery_marker)
+        monkeypatch.setattr("openadapt_desktop.dispatch.Path.write_text", fail_recovery_marker)
         persistence = disp._persist_local_run(
             run_id="run-1",
             run_dir=run_dir,
@@ -1806,7 +1961,7 @@ class TestLibraryCommands:
 
         assert persistence["state"] == "failed"
         assert persistence["retryable"] is True
-        monkeypatch.setattr("engine.dispatch.Path.write_text", original_write_text)
+        monkeypatch.setattr("openadapt_desktop.dispatch.Path.write_text", original_write_text)
         retry = disp.dispatch(
             "retry_run_persistence",
             {"workflow_id": "bnd1", "run_id": "run-1"},
@@ -1907,7 +2062,7 @@ class TestLibraryCommands:
 
         class Bridge:
             def replay(self, _bundle, out_dir, *, config):
-                from engine.flow_bridge import FlowResult
+                from openadapt_desktop.flow_bridge import FlowResult
 
                 (out_dir / "report.json").write_text(
                     json.dumps(
@@ -1949,7 +2104,7 @@ class TestLibraryCommands:
         assert db.list_runs(limit=10)[0]["bundle_id"] == "bnd1"
 
     def test_teach_uses_only_the_latest_halted_run(self, deps, tmp_path: Path) -> None:
-        from engine.flow_bridge import FlowResult
+        from openadapt_desktop.flow_bridge import FlowResult
 
         disp, db, _events = deps
         bundle = tmp_path / "bundle"
@@ -2027,8 +2182,8 @@ class TestLibraryCommands:
     ) -> None:
         """Protect the Desktop recording -> Flow ``teach --fix`` contract."""
 
-        from engine.controller import RecordingController
-        from engine.storage_manager import StorageManager
+        from openadapt_desktop.controller import RecordingController
+        from openadapt_desktop.storage_manager import StorageManager
 
         config = EngineConfig(data_dir=tmp_path / ".openadapt", log_level="WARNING")
         storage = StorageManager(config)
@@ -2051,10 +2206,10 @@ class TestLibraryCommands:
             )()
 
         monkeypatch.setattr(
-            "engine.flow_bridge.shutil.which",
-            lambda _name: "/usr/bin/openadapt-flow",
+            "openadapt_desktop.flow_bridge._pinned_flow_command",
+            lambda: ["/usr/bin/openadapt-flow"],
         )
-        monkeypatch.setattr("engine.dispatch.sys.platform", "linux")
+        monkeypatch.setattr("openadapt_desktop.dispatch.sys.platform", "linux")
         bridge = FlowBridge(runner=runner)
         controller = RecordingController(
             captures_dir=config.data_dir / "captures",
@@ -2123,14 +2278,52 @@ class TestLibraryCommands:
         assert len(calls) == 1
 
 
+def _sign_in(disp) -> None:
+    from openadapt_desktop.auth.store import store_credential
+
+    store_credential(
+        {
+            "kind": "ingest_token",
+            "token": "oai_ingest_sync",
+            "refresh_token": None,
+            "org_id": "org_1",
+            "host": disp.config.hosted_host,
+            "expires_at": None,
+        }
+    )
+
+
 class TestSyncCommands:
     def test_pause_resume_sync(self, deps) -> None:
         disp, _db, events = deps
+        _sign_in(disp)
         disp.dispatch("pause_sync", {})
         assert disp.dispatch("get_sync_state", {})["state"] == "paused"
         disp.dispatch("resume_sync", {})
         assert disp.dispatch("get_sync_state", {})["state"] == "synced"
         assert any(e == "sync_state" for e, _ in events)
+
+    def test_local_only_is_never_called_synced(self, deps) -> None:
+        """Without a Cloud sign-in nothing is backed up, so the state says local."""
+
+        disp, _db, events = deps
+        assert disp.dispatch("get_auth_status", {})["authenticated"] is False
+
+        assert disp.dispatch("get_sync_state", {})["state"] == "local"
+        assert disp.dispatch("pause_sync", {})["state"] == "local"
+        assert disp.dispatch("resume_sync", {})["state"] == "local"
+        assert disp.dispatch("get_sync_state", {})["state"] == "local"
+        assert not [d for e, d in events if e == "sync_state" and d["state"] == "synced"]
+
+    def test_sign_in_and_out_update_the_sync_state(self, deps) -> None:
+        disp, _db, events = deps
+        _sign_in(disp)
+        assert disp.dispatch("get_sync_state", {})["state"] == "synced"
+
+        disp.dispatch("logout", {})
+
+        assert disp.dispatch("get_sync_state", {})["state"] == "local"
+        assert ("sync_state", {"state": "local", "queued": 0}) in events
 
     def test_needs_attention(self, deps) -> None:
         disp, db, events = deps
@@ -2145,7 +2338,7 @@ class TestSyncCommands:
         disp, db, events = deps
         db.insert_bundle("bnd1", str(disp.config.data_dir), capture_id="cap1")
         monkeypatch.setattr(
-            "engine.hosted.push",
+            "openadapt_desktop.hosted.push",
             lambda *a, **k: {
                 "success": True,
                 "workflow_id": "wf_1",
@@ -2154,7 +2347,7 @@ class TestSyncCommands:
             },
         )
         monkeypatch.setattr(
-            "engine.qualification_lifecycle.persist_deployment_handoff",
+            "openadapt_desktop.qualification_lifecycle.persist_deployment_handoff",
             lambda *a, **k: disp.config.data_dir / "handoff.json",
         )
         r = disp.dispatch("push_workflow", {"workflow_id": "bnd1"})
@@ -2166,7 +2359,7 @@ class TestSyncCommands:
         disp, db, events = deps
         db.insert_bundle("bnd1", str(disp.config.data_dir), capture_id="cap1")
         monkeypatch.setattr(
-            "engine.hosted.push",
+            "openadapt_desktop.hosted.push",
             lambda *a, **k: {
                 "success": False,
                 "pending_review": True,
@@ -2177,7 +2370,7 @@ class TestSyncCommands:
             },
         )
         monkeypatch.setattr(
-            "engine.qualification_lifecycle.persist_deployment_handoff",
+            "openadapt_desktop.qualification_lifecycle.persist_deployment_handoff",
             lambda *a, **k: disp.config.data_dir / "handoff.json",
         )
 
@@ -2202,7 +2395,7 @@ class TestAuthCommands:
             "expires_at": None,
         }
         monkeypatch.setattr(
-            "engine.auth.paste.PasteTokenProvider.login", lambda self, token=None: cred
+            "openadapt_desktop.auth.paste.PasteTokenProvider.login", lambda self, token=None: cred
         )
         r = disp.dispatch("login_paste", {"token": "t"})
         assert r["authenticated"] is True
@@ -2224,7 +2417,7 @@ class TestAuthCommands:
             "expires_at": None,
         }
         monkeypatch.setattr(
-            "engine.auth.paste.PasteTokenProvider.login", lambda self, token=None: cred
+            "openadapt_desktop.auth.paste.PasteTokenProvider.login", lambda self, token=None: cred
         )
 
         result = disp.dispatch("login_paste", {"host": f"{host}/path", "token": "t"})
@@ -2242,7 +2435,7 @@ class TestAuthCommands:
             called = True
             raise AssertionError("provider must not receive credentials")
 
-        monkeypatch.setattr("engine.auth.paste.PasteTokenProvider.login", _login)
+        monkeypatch.setattr("openadapt_desktop.auth.paste.PasteTokenProvider.login", _login)
         result = disp.dispatch(
             "login_paste", {"host": "http://customer.example", "token": "secret"}
         )
@@ -2257,8 +2450,8 @@ class TestAuthCommands:
     def test_get_auth_status_refuses_credential_for_other_configured_host(
         self, deps, fake_keyring
     ) -> None:
-        from engine.auth.provider import Credential
-        from engine.auth.store import store_credential
+        from openadapt_desktop.auth.provider import Credential
+        from openadapt_desktop.auth.store import store_credential
 
         disp, _db, _e = deps
         credential: Credential = {
@@ -2295,7 +2488,7 @@ class TestAuthCommands:
                 "paired": True,
             }
 
-        monkeypatch.setattr("engine.auth.pairing.connect_uri", _connect)
+        monkeypatch.setattr("openadapt_desktop.auth.pairing.connect_uri", _connect)
         result = disp.dispatch("connect_uri", {"uri": uri})
         assert result["paired"] is True
         assert received == [uri]
@@ -2313,7 +2506,7 @@ class TestAuthCommands:
         disp, _db, _events = deps
         monkeypatch.setenv("OPENADAPT_CONFIG_TOML", str(tmp_path / "config.toml"))
         monkeypatch.setattr(
-            "engine.auth.pairing.connect_uri",
+            "openadapt_desktop.auth.pairing.connect_uri",
             lambda _uri: {
                 "authenticated": True,
                 "host": "HTTPS://Customer.Example:443/pairing",
@@ -2477,7 +2670,7 @@ class TestRunReportMapping:
 class TestMisc:
     def test_non_mac_check_permissions_shape(self, deps, monkeypatch) -> None:
         disp, _db, _e = deps
-        monkeypatch.setattr("engine.dispatch.sys.platform", "linux")
+        monkeypatch.setattr("openadapt_desktop.dispatch.sys.platform", "linux")
         p = disp.dispatch("check_permissions", {})
         assert p == {
             "screen_recording": True,
@@ -2487,12 +2680,16 @@ class TestMisc:
 
     def test_mac_permission_check_is_prompt_free(self, deps, monkeypatch) -> None:
         disp, _db, _e = deps
-        monkeypatch.setattr("engine.dispatch.sys.platform", "darwin")
-        monkeypatch.setattr("engine.dispatch._mac_preflight_screen", lambda: True)
-        monkeypatch.setattr("engine.dispatch._mac_preflight_accessibility", lambda: False)
-        monkeypatch.setattr("engine.dispatch._mac_preflight_input_monitoring", lambda: False)
+        monkeypatch.setattr("openadapt_desktop.dispatch.sys.platform", "darwin")
+        monkeypatch.setattr("openadapt_desktop.dispatch._mac_preflight_screen", lambda: True)
         monkeypatch.setattr(
-            "engine.dispatch._mac_request_input_monitoring",
+            "openadapt_desktop.dispatch._mac_preflight_accessibility", lambda: False
+        )
+        monkeypatch.setattr(
+            "openadapt_desktop.dispatch._mac_preflight_input_monitoring", lambda: False
+        )
+        monkeypatch.setattr(
+            "openadapt_desktop.dispatch._mac_request_input_monitoring",
             lambda: pytest.fail("passive check must never request permission"),
         )
 
@@ -2506,9 +2703,9 @@ class TestMisc:
         self, deps, monkeypatch
     ) -> None:
         disp, _db, _e = deps
-        monkeypatch.setattr("engine.dispatch.sys.platform", "linux")
+        monkeypatch.setattr("openadapt_desktop.dispatch.sys.platform", "linux")
         monkeypatch.setattr(
-            "engine.dispatch._mac_request_input_monitoring",
+            "openadapt_desktop.dispatch._mac_request_input_monitoring",
             lambda: pytest.fail("non-mac platforms must not request macOS access"),
         )
 
@@ -2522,17 +2719,17 @@ class TestMisc:
         self, deps, monkeypatch
     ) -> None:
         disp, _db, _e = deps
-        monkeypatch.setattr("engine.dispatch.sys.platform", "darwin")
-        monkeypatch.setattr("engine.dispatch._mac_preflight_screen", lambda: True)
-        monkeypatch.setattr("engine.dispatch._mac_preflight_accessibility", lambda: True)
+        monkeypatch.setattr("openadapt_desktop.dispatch.sys.platform", "darwin")
+        monkeypatch.setattr("openadapt_desktop.dispatch._mac_preflight_screen", lambda: True)
+        monkeypatch.setattr("openadapt_desktop.dispatch._mac_preflight_accessibility", lambda: True)
         checks = iter((False, True))
         monkeypatch.setattr(
-            "engine.dispatch._mac_preflight_input_monitoring",
+            "openadapt_desktop.dispatch._mac_preflight_input_monitoring",
             lambda: next(checks),
         )
         requests: list[bool] = []
         monkeypatch.setattr(
-            "engine.dispatch._mac_request_input_monitoring",
+            "openadapt_desktop.dispatch._mac_request_input_monitoring",
             lambda: requests.append(True) or True,
         )
 
@@ -2545,11 +2742,15 @@ class TestMisc:
 
     def test_mac_input_monitoring_request_does_not_assume_success(self, deps, monkeypatch) -> None:
         disp, _db, _e = deps
-        monkeypatch.setattr("engine.dispatch.sys.platform", "darwin")
-        monkeypatch.setattr("engine.dispatch._mac_preflight_screen", lambda: True)
-        monkeypatch.setattr("engine.dispatch._mac_preflight_accessibility", lambda: True)
-        monkeypatch.setattr("engine.dispatch._mac_preflight_input_monitoring", lambda: False)
-        monkeypatch.setattr("engine.dispatch._mac_request_input_monitoring", lambda: True)
+        monkeypatch.setattr("openadapt_desktop.dispatch.sys.platform", "darwin")
+        monkeypatch.setattr("openadapt_desktop.dispatch._mac_preflight_screen", lambda: True)
+        monkeypatch.setattr("openadapt_desktop.dispatch._mac_preflight_accessibility", lambda: True)
+        monkeypatch.setattr(
+            "openadapt_desktop.dispatch._mac_preflight_input_monitoring", lambda: False
+        )
+        monkeypatch.setattr(
+            "openadapt_desktop.dispatch._mac_request_input_monitoring", lambda: True
+        )
 
         assert disp.dispatch("request_input_monitoring", {}) == {
             "screen_recording": True,
@@ -2561,12 +2762,14 @@ class TestMisc:
         self, deps, monkeypatch
     ) -> None:
         disp, _db, _e = deps
-        monkeypatch.setattr("engine.dispatch.sys.platform", "darwin")
-        monkeypatch.setattr("engine.dispatch._mac_preflight_screen", lambda: True)
-        monkeypatch.setattr("engine.dispatch._mac_preflight_accessibility", lambda: True)
-        monkeypatch.setattr("engine.dispatch._mac_preflight_input_monitoring", lambda: True)
+        monkeypatch.setattr("openadapt_desktop.dispatch.sys.platform", "darwin")
+        monkeypatch.setattr("openadapt_desktop.dispatch._mac_preflight_screen", lambda: True)
+        monkeypatch.setattr("openadapt_desktop.dispatch._mac_preflight_accessibility", lambda: True)
         monkeypatch.setattr(
-            "engine.dispatch._mac_request_input_monitoring",
+            "openadapt_desktop.dispatch._mac_preflight_input_monitoring", lambda: True
+        )
+        monkeypatch.setattr(
+            "openadapt_desktop.dispatch._mac_request_input_monitoring",
             lambda: pytest.fail("granted access must not prompt again"),
         )
 
