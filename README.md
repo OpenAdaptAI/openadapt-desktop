@@ -173,8 +173,12 @@ covers pairing, what the phone can see, and how a decision is applied.
 Shadow mode is off unless you turn it on in **Settings**, after reading a
 notice. While it's on, the header and the tray say so. It notices a task you
 repeat in your recordings and offers to make a draft from it ("You did this 6
-times today."). Everything it keeps stays encrypted on your computer for at
-most 24 hours, and **Delete everything and turn off** removes it in one click.
+times today."). Its record is an encrypted buffer in the app-data folder,
+which isn't synced, cleared with its key at least every 24 hours and whenever
+you turn shadow mode off or quit. **Pause** stops it recording, and **Delete
+everything and turn off** erases everything it kept in one click. OpenAdapt
+never sends shadow mode data off your computer, though backup, sync, and
+security software on the computer can still copy local files.
 A draft never runs; a person still records the task and admits the automation.
 [docs/SHADOW_MODE.md](https://github.com/OpenAdaptAI/openadapt-desktop/blob/main/docs/SHADOW_MODE.md)
 has the details.
