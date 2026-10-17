@@ -1,10 +1,16 @@
 // Shadow mode: the engine's local, off-by-default watcher that notices a task
 // done many times and offers to turn it into a draft. These types mirror
-// openadapt_desktop/shadow_mode.py. Nothing here leaves the computer.
+// openadapt_desktop/shadow_mode.py. OpenAdapt never sends shadow mode data off
+// this computer.
 
 export interface ShadowStatus {
+  /** False until the engine has answered, so the UI never guesses "off". */
+  known: boolean;
   available: boolean;
   active: boolean;
+  paused: boolean;
+  /** The app-data folder that holds the buffer. */
+  location: string | null;
   acknowledged_at: number | null;
   buffer_hours: number;
   work_domains: string[];
@@ -49,8 +55,11 @@ export interface ShadowDecision {
 }
 
 export const SHADOW_OFF: ShadowStatus = {
+  known: true,
   available: false,
   active: false,
+  paused: false,
+  location: null,
   acknowledged_at: null,
   buffer_hours: 24,
   work_domains: [],
@@ -60,13 +69,20 @@ export const SHADOW_OFF: ShadowStatus = {
   pending: [],
 };
 
-/** Read a status payload defensively: anything unclear reads as off. */
+/** Before the engine answers. Shown as "checking", never as off. */
+export const SHADOW_UNKNOWN: ShadowStatus = { ...SHADOW_OFF, known: false };
+
+/** Read a status payload defensively. No payload means not known yet. */
 export function readShadowStatus(raw: unknown): ShadowStatus {
-  if (!raw || typeof raw !== "object") return SHADOW_OFF;
+  if (!raw || typeof raw !== "object") return SHADOW_UNKNOWN;
   const r = raw as Partial<ShadowStatus>;
+  const active = r.available === true && r.active === true;
   return {
+    known: true,
     available: r.available === true,
-    active: r.available === true && r.active === true,
+    active,
+    paused: active && r.paused === true,
+    location: typeof r.location === "string" ? r.location : null,
     acknowledged_at: typeof r.acknowledged_at === "number" ? r.acknowledged_at : null,
     buffer_hours: typeof r.buffer_hours === "number" ? r.buffer_hours : 24,
     work_domains: Array.isArray(r.work_domains) ? r.work_domains.map(String) : [],

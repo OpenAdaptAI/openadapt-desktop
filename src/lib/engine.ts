@@ -133,6 +133,9 @@ export const CMD = {
   SHADOW_STATUS: "shadow_status",
   SHADOW_NOTICE: "shadow_notice",
   SHADOW_ENABLE: "shadow_enable",
+  SHADOW_TURN_OFF: "shadow_turn_off",
+  SHADOW_PAUSE: "shadow_pause",
+  SHADOW_UNPAUSE: "shadow_unpause",
   SHADOW_PURGE_AND_DISABLE: "shadow_purge_and_disable",
   SHADOW_SET_WORK_DOMAINS: "shadow_set_work_domains",
   SHADOW_DECIDE: "shadow_decide",
@@ -304,10 +307,14 @@ export async function openExternal(url: string): Promise<void> {
  * Show whether shadow mode is on in the menu-bar tray. A no-op outside Tauri
  * or in a shell without the command.
  */
-export async function setShadowTrayStatus(active: boolean): Promise<void> {
+/** Update the tray's shadow line. `active` is null until the engine answers. */
+export async function setShadowTrayStatus(
+  active: boolean | null,
+  paused = false,
+): Promise<void> {
   if (!inTauri()) return;
   try {
-    await invoke("set_shadow_tray_status", { active });
+    await invoke("set_shadow_tray_status", { active, paused });
   } catch {
     // An older shell has no shadow tray line. The window still shows it.
   }
@@ -317,6 +324,12 @@ export async function setShadowTrayStatus(active: boolean): Promise<void> {
 export function onShadowSettingsRequested(handler: () => void): Promise<UnlistenFn> {
   if (!inTauri()) return Promise.resolve(() => {});
   return listen("tray://open-shadow-settings", () => handler());
+}
+
+/** The tray's "Pause shadow mode" / "Resume shadow mode" item. */
+export function onShadowPauseToggleRequested(handler: () => void): Promise<UnlistenFn> {
+  if (!inTauri()) return Promise.resolve(() => {});
+  return listen("tray://toggle-shadow-pause", () => handler());
 }
 
 /** Subscribe to an engine event. Returns an unlisten fn. */

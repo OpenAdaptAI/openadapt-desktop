@@ -10,6 +10,7 @@ import {
   EVT,
   engineTry,
   onEngineEvent,
+  onShadowPauseToggleRequested,
   onShadowSettingsRequested,
   sidecarRunning,
 } from "./lib/engine";
@@ -228,7 +229,11 @@ export default function App() {
   const [route, setRoute] = useState<Route>({ name: "tasks" });
   // Shadow mode is off unless the person turned it on from Settings. While on,
   // the header and the tray both say so.
-  const { status: shadow } = useShadowMode({ syncTray: true });
+  const { status: shadow, togglePause: toggleShadowPause } = useShadowMode({ syncTray: true });
+  useEffect(() => {
+    const unlisten = onShadowPauseToggleRequested(() => void toggleShadowPause());
+    return () => void unlisten.then((fn) => fn()).catch(() => {});
+  }, [toggleShadowPause]);
   useEffect(() => {
     const unlisten = onShadowSettingsRequested(() => setRoute({ name: "settings" }));
     return () => void unlisten.then((fn) => fn()).catch(() => {});
@@ -863,7 +868,10 @@ export default function App() {
                   <strong>Recording</strong>
                 </span>
               ) : null}
-              <ShadowModeIndicator status={shadow} />
+              <ShadowModeIndicator
+                status={shadow}
+                onTogglePause={() => void toggleShadowPause()}
+              />
               {cloudConnected && sync && sync.state !== "synced" && (
                 <span title={`Cloud: ${syncLabel}`}>
                   <StatusDot tone={syncTone} />
