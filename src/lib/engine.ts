@@ -128,6 +128,15 @@ export const CMD = {
   SET_COACH: "set_coach",
   GET_COACH: "get_coach",
   CLEAR_COACH: "clear_coach",
+  // Shadow mode: off by default, local only. Turning it on needs the notice
+  // hash and acknowledged=true. Turning it off deletes everything it kept.
+  SHADOW_STATUS: "shadow_status",
+  SHADOW_NOTICE: "shadow_notice",
+  SHADOW_ENABLE: "shadow_enable",
+  SHADOW_PURGE_AND_DISABLE: "shadow_purge_and_disable",
+  SHADOW_SET_WORK_DOMAINS: "shadow_set_work_domains",
+  SHADOW_DECIDE: "shadow_decide",
+  SHADOW_SCAN: "shadow_scan",
 } as const;
 
 /** Events the engine emits (delivered as Tauri events `engine://<name>`). */
@@ -156,6 +165,10 @@ export const EVT = {
   // {workflow_id, state: "watching" | "closed"}: a run that may stop before a
   // save for a person's approval started or ended. Never carries a value.
   ITEM_APPROVAL: "item_approval",
+  // Shadow mode status (see src/lib/shadowMode.ts). Never carries an event.
+  SHADOW_STATE: "shadow_state",
+  // {motif_id, count, title, body, actions}: generic text only.
+  SHADOW_PROMPT: "shadow_prompt",
 } as const;
 
 export type EngineEvent = (typeof EVT)[keyof typeof EVT];
@@ -285,6 +298,25 @@ export async function openExternal(url: string): Promise<void> {
     return;
   }
   await invoke("open_external", { url });
+}
+
+/**
+ * Show whether shadow mode is on in the menu-bar tray. A no-op outside Tauri
+ * or in a shell without the command.
+ */
+export async function setShadowTrayStatus(active: boolean): Promise<void> {
+  if (!inTauri()) return;
+  try {
+    await invoke("set_shadow_tray_status", { active });
+  } catch {
+    // An older shell has no shadow tray line. The window still shows it.
+  }
+}
+
+/** The tray's "Shadow mode settings…" item. Returns an unlisten fn. */
+export function onShadowSettingsRequested(handler: () => void): Promise<UnlistenFn> {
+  if (!inTauri()) return Promise.resolve(() => {});
+  return listen("tray://open-shadow-settings", () => handler());
 }
 
 /** Subscribe to an engine event. Returns an unlisten fn. */

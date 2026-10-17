@@ -24,6 +24,7 @@ import {
   SegControl,
 } from "../ui/primitives";
 import { OsWarning } from "../ui/OsWarning";
+import { ShadowModeCard } from "../ui/ShadowMode";
 import {
   overlayPresentationEnabled,
   saveOverlayPresentation,
@@ -244,6 +245,8 @@ export function Settings({
         signedIn={auth.authenticated}
         onConnectCloud={onConnectCloud}
       />
+
+      <ShadowModeCard />
 
       <Card>
         <CardHead

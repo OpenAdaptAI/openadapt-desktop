@@ -10,6 +10,7 @@ import {
   EVT,
   engineTry,
   onEngineEvent,
+  onShadowSettingsRequested,
   sidecarRunning,
 } from "./lib/engine";
 import type {
@@ -44,6 +45,11 @@ import { deliverAttentionNotification } from "./lib/attentionNotification";
 import { Qualification } from "./screens/Qualification";
 import { clearLocalSession, rememberLocalSession } from "./localSession";
 import { ItemApprovalDialog } from "./ui/ItemApproval";
+import {
+  ShadowModeIndicator,
+  ShadowPromptBanner,
+  useShadowMode,
+} from "./ui/ShadowMode";
 
 type Route =
   | { name: "tasks" }
@@ -220,6 +226,13 @@ export default function App() {
   const [entryRetrying, setEntryRetrying] = useState(false);
   const [showLogin, setShowLogin] = useState(false);
   const [route, setRoute] = useState<Route>({ name: "tasks" });
+  // Shadow mode is off unless the person turned it on from Settings. While on,
+  // the header and the tray both say so.
+  const { status: shadow } = useShadowMode({ syncTray: true });
+  useEffect(() => {
+    const unlisten = onShadowSettingsRequested(() => setRoute({ name: "settings" }));
+    return () => void unlisten.then((fn) => fn()).catch(() => {});
+  }, []);
   const [screenBusy, setScreenBusy] = useState(false);
 
   const [engineUp, setEngineUp] = useState(false);
@@ -850,6 +863,7 @@ export default function App() {
                   <strong>Recording</strong>
                 </span>
               ) : null}
+              <ShadowModeIndicator status={shadow} />
               {cloudConnected && sync && sync.state !== "synced" && (
                 <span title={`Cloud: ${syncLabel}`}>
                   <StatusDot tone={syncTone} />
@@ -879,6 +893,7 @@ export default function App() {
         </header>
 
         <main>
+        <ShadowPromptBanner status={shadow} />
         {route.name === "tasks" && (
           <Tasks
             attention={breaks}
