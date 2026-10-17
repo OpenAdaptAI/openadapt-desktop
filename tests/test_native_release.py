@@ -109,8 +109,8 @@ def test_node_dependencies_are_locked_for_cross_platform_tauri_builds() -> None:
 
     assert lock["lockfileVersion"] == 3
     assert lock["packages"][""]["version"] == package["version"]
-    assert lock["packages"]["node_modules/@tauri-apps/cli"]["version"] == "2.11.4"
-    assert lock["packages"]["node_modules/@tauri-apps/api"]["version"] == "2.11.1"
+    assert lock["packages"]["node_modules/@tauri-apps/cli"]["version"] == "2.12.2"
+    assert lock["packages"]["node_modules/@tauri-apps/api"]["version"] == "2.12.3"
 
 
 def test_native_workflows_are_pinned_and_preserve_candidate_boundary() -> None:
@@ -904,7 +904,7 @@ def test_native_release_workflow_points_latest_at_the_published_installers() -> 
     }
     assert job["permissions"] == {"contents": "write"}
     steps = _job_steps(job)
-    assert steps["actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"]["with"] == {
+    assert steps["actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333"]["with"] == {
         "name": "${{ needs.verify-published-release.outputs.verified_artifact }}",
         "path": "mirror",
     }
@@ -932,7 +932,7 @@ def test_native_release_workflow_mirrors_installers_onto_the_engine_release() ->
         "id-token": "write",
     }
     steps = _job_steps(job)
-    assert steps["actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"]["with"] == {
+    assert steps["actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333"]["with"] == {
         "name": "${{ needs.verify-published-release.outputs.verified_artifact }}",
         "path": "mirror",
     }
