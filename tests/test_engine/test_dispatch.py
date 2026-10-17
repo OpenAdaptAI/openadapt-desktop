@@ -2846,6 +2846,13 @@ class TestMisc:
             "approve_review",
             "dismiss_review",
             "get_pending_reviews",
+            "shadow_status",
+            "shadow_notice",
+            "shadow_enable",
+            "shadow_purge_and_disable",
+            "shadow_set_work_domains",
+            "shadow_decide",
+            "shadow_scan",
         }
         assert expected.issubset(set(disp.commands))
 
