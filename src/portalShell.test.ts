@@ -152,10 +152,10 @@ function stubTransport() {
         ? {
             status: 200,
             ok: true,
-            headers: { get: () => "image/png" },
+            headers: { get: (): string => "image/png" },
             blob: async () => new Blob(["png"], { type: "image/png" }),
           }
-        : { status: 404, ok: false, headers: { get: () => "application/json" }, json: async () => ({}) };
+        : { status: 404, ok: false, headers: { get: (): string => "application/json" }, json: async () => ({}) };
     } else if (url.startsWith(`/api/portal/save-approvals/${SAVE_ID}/actions/`)) {
       reply = saveReply;
     } else if (url === `/api/portal/save-approvals/${SAVE_ID}`) {
