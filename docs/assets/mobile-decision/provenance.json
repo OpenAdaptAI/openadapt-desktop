@@ -2,7 +2,7 @@
   "schema_version": "openadapt.desktop-phone-capture-provenance/v1",
   "desktop": {
     "repository": "https://github.com/OpenAdaptAI/openadapt-desktop",
-    "commit": "aef6aa7c21c27ff94e15855e031adf9312464f2a",
+    "commit": "55c77e324f9a5056f8113b8f34ec51962c2e669e",
     "generator": "scripts/capture_portal_scenarios.py",
     "command": "uv run --extra build python scripts/capture_portal_scenarios.py --out /tmp/openadapt-desktop-phone-current --frame <public-openemr-poster> --docs",
     "viewport": {
@@ -204,7 +204,7 @@
     {
       "file": "business-decision.png",
       "source_output": "light/preview-business-request.png",
-      "state": "Card preview: a business-decision choice (served by Cloud today)",
+      "state": "Card preview: a business-decision choice (served by Cloud)",
       "color_scheme": "light",
       "kind": "preview",
       "width": 780,
@@ -214,7 +214,7 @@
     {
       "file": "business-decision-dark.png",
       "source_output": "dark/preview-business-request.png",
-      "state": "Card preview: a business-decision choice (served by Cloud today)",
+      "state": "Card preview: a business-decision choice (served by Cloud)",
       "color_scheme": "dark",
       "kind": "preview",
       "width": 780,
@@ -223,24 +223,44 @@
     },
     {
       "file": "save-approval.png",
-      "source_output": "light/preview-save-request.png",
-      "state": "Card preview: a save approval (served by Cloud today)",
+      "source_output": "light/save-request.png",
+      "state": "Save approval: one tap approves exactly the form shown",
       "color_scheme": "light",
-      "kind": "preview",
+      "kind": "shell",
       "width": 780,
       "height": 1688,
-      "sha256": "f33cc0cb8353afd0d856a970a7981a8d7b29ad68aa4295965739d4b7ffb901c9"
+      "sha256": "16a76dff555665ee6ec3e1db50f719b0caf2f4c9078e34caf97efdf29f5aa120"
     },
     {
       "file": "save-approval-dark.png",
-      "source_output": "dark/preview-save-request.png",
-      "state": "Card preview: a save approval (served by Cloud today)",
+      "source_output": "dark/save-request.png",
+      "state": "Save approval: one tap approves exactly the form shown",
       "color_scheme": "dark",
-      "kind": "preview",
+      "kind": "shell",
       "width": 780,
       "height": 1688,
-      "sha256": "be567e5dffb11229d47e35e05bcf449ee0e267759bf782531ef8ef469d90fa85"
+      "sha256": "36d5713572d37f9be2ad9df1390bb37733a33e67d23750ef8a3d627c53a1efdd"
+    },
+    {
+      "file": "save-approved.png",
+      "source_output": "light/save-result-approved.png",
+      "state": "Save approved: the run re-reads the form before it saves",
+      "color_scheme": "light",
+      "kind": "shell",
+      "width": 780,
+      "height": 1688,
+      "sha256": "a4ac524fc2085d84564576f610b1f027dbf684a458620cf90c46ab401b30f2be"
+    },
+    {
+      "file": "save-approved-dark.png",
+      "source_output": "dark/save-result-approved.png",
+      "state": "Save approved: the run re-reads the form before it saves",
+      "color_scheme": "dark",
+      "kind": "shell",
+      "width": 780,
+      "height": 1688,
+      "sha256": "df93e2a39318f65f61c4dc165aa7daed70f3ad84d2e4fd21f6c8c1ed02b8fbc2"
     }
   ],
-  "semantic_scope": "Deterministic presentation fixtures for the Desktop phone shell. They are not a customer run or a complete workflow effect-verification result. Captures marked kind=preview draw a decision kind the Desktop portal does not serve yet with the shell's own card markup."
+  "semantic_scope": "Deterministic presentation fixtures for the Desktop phone shell. They are not a customer run or a complete workflow effect-verification result. Captures marked kind=preview draw a decision kind the Desktop portal does not serve with the shell's own card markup."
 }
