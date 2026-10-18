@@ -1,31 +1,56 @@
-/* Mobile-first task shell. One decision, thumb-reachable actions, safe areas. */
+/* The phone decision card. One decision per screen, set in type, with the
+   answers at the end of the reading path.
 
-/* The phone shell is served by the engine as plain files with no bundler, so it
-   cannot import the vendored token stylesheet. Each value below is copied from
-   the canonical design tokens in src/styles/vendor/openadapt-web/tokens.json,
-   and tests/test_portal/test_shell_palette.py fails if one stops matching. */
+   The shell is served by the engine as plain files with no bundler, so it
+   cannot import the vendored token stylesheet. Each light value below is copied
+   from the canonical design tokens in src/styles/vendor/openadapt-web/tokens.json,
+   and tests/test_portal/test_shell_palette.py fails if one stops matching. The
+   dark values are Desktop's own dark paper set (src/styles/tokens.css, section
+   2b), because canonical has no dark set yet. */
 :root {
-  color-scheme: light;
+  color-scheme: light dark;
   --bg: #F5F7FA;      /* --surface        */
   --panel: #FFFFFF;   /* --surface-raised */
   --panel-2: #EDF1F6; /* --surface-sunken */
   --line: #DEE4EC;    /* --hairline       */
+  --line-strong: #C6D0DC; /* --hairline-strong */
   --text: #0B1220;    /* --ink            */
   --muted: #414E63;   /* --text-secondary */
   --accent: #0B7A5A;  /* --accent-verified */
-  /* Used only to mark stakes. Never on a button: nothing in the action bar is
-     allowed to be more salient than anything else in it. */
+  /* Stakes and pauses only. Never decoration. */
   --warn: #9A5B0A;    /* --accent-halt    */
   --success: #0B7A5A; /* --accent-verified */
   --danger: #B3261E;  /* --accent-danger  */
-  /* A correction is neither a halt nor a refusal, so it needs a hue of its own.
-     --link-visited is the one cool non-brand hue in the canonical set that is
-     not the focus ring, which must never read as a state. */
+  /* A correction is neither a halt nor a refusal, so it has its own hue. */
   --teach: #574FB0;   /* --link-visited   */
-  /* Measured from the real action bar by app.js. A constant was wrong once the
-     bar carried three two-line buttons, and the outcome line -- the last thing
-     in the card -- ended up underneath it. */
-  --action-bar-height: 0px;
+  --focus: #2563EB;   /* --focus-ring     */
+  /* The one filled answer is ink, as in Desktop: ink is for actions, green is
+     only for a record read back and matched. */
+  --action: #0B1220;
+  --on-action: #FFFFFF;
+  --font-display: "Avenir Next", "Segoe UI", -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0E1319;
+    --panel: #151B23;
+    --panel-2: #1C2430;
+    --line: #262F3B;
+    --line-strong: #354152;
+    --text: #E8EDF3;
+    --muted: #B4BECB;
+    --accent: #3AA97F;
+    --warn: #D29A48;
+    --success: #3AA97F;
+    --danger: #F2877E;
+    --teach: #A9A3F0;
+    --focus: #7CA8FF;
+    --action: #E8EDF3;
+    --on-action: #0B1220;
+  }
 }
 
 * { box-sizing: border-box; }
@@ -34,326 +59,282 @@ html, body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
-  font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font: 17px/1.5 var(--font-body);
   -webkit-text-size-adjust: 100%;
+  text-rendering: optimizeLegibility;
 }
+
+:focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
+[tabindex="-1"]:focus { outline: none; }
+
+.visually-hidden {
+  position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap;
+}
+.skip { position: absolute; left: 12px; top: -60px; padding: 10px 14px; border-radius: 10px; background: var(--action); color: var(--on-action); z-index: 5; }
+.skip:focus { top: 10px; }
+
+/* ------------------------------------------------------------------ header */
 
 .bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: calc(env(safe-area-inset-top) + 12px) 16px 12px;
-  border-bottom: 1px solid var(--line);
-  position: sticky;
-  top: 0;
-  /* The task card follows the header in document order. Without a stacking
-     context it can paint over the sticky label while the page moves. */
-  z-index: 2;
-  background: color-mix(in srgb, var(--bg) 92%, transparent);
-  backdrop-filter: blur(14px);
+  padding: calc(env(safe-area-inset-top) + 14px) 24px 14px;
+  max-width: 560px;
+  margin: 0 auto;
 }
+.brand { display: flex; align-items: center; gap: 10px; font: 600 15px/1 var(--font-display); letter-spacing: 0.01em; }
+.brand-mark { width: 10px; height: 10px; border-radius: 3px; background: var(--text); }
+.bar-right { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 14px; }
+.link:empty { display: none; }
+.link { display: inline-flex; align-items: center; gap: 6px; }
+.link::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--warn); }
 
-.brand { display: flex; align-items: center; gap: 9px; font-weight: 700; letter-spacing: 0.01em; }
-.brand > span { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 10px; background: var(--text); color: var(--panel); font-size: 10px; font-weight: 850; }
-.device { color: var(--muted); font-size: 13px; }
+/* -------------------------------------------------------------------- page */
 
 .main {
-  padding: 16px;
-  /* Leave room for the fixed action bar plus the home indicator. The bar's own
-     height is measured at render time, so a taller or shorter action set can
-     never cover the outcome text. */
-  padding-bottom: calc(env(safe-area-inset-bottom) + var(--action-bar-height) + 32px);
-  max-width: 640px;
+  padding: 8px 24px 24px;
+  max-width: 560px;
   margin: 0 auto;
 }
+.main:focus { outline: none; }
 
-.page-title { font-size: 20px; margin: 4px 0 16px; }
+h1, h2 { font-family: var(--font-display); }
 
-.card {
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 18px;
-  padding: 17px;
-  box-shadow: 0 14px 34px rgba(11, 18, 32, .07);
-}
-
-.card h1 { font-size: 21px; line-height: 1.35; margin: 6px 0 12px; }
-
-.muted { color: var(--muted); font-size: 14px; }
-
-.chip {
-  display: inline-block;
-  padding: 3px 10px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  font-size: 13px;
-  color: var(--accent);
-  margin: 0;
-}
-
-.code {
-  font: 600 34px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
-  letter-spacing: 0.12em;
-  margin: 18px 0;
-}
-
-.match { text-align: center; }
-
-.pairs { margin: 16px 0; padding: 0; }
-.pair {
+.eyebrow {
   display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 0;
-  border-top: 1px solid var(--line);
-}
-.pair dt { color: var(--muted); font-size: 14px; margin: 0; }
-.pair dd { margin: 0; font-variant-numeric: tabular-nums; }
-
-.rows { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
-
-.row, .back {
-  width: 100%;
-  text-align: left;
-  background: var(--panel);
-  color: var(--text);
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 14px 16px;
-  font: inherit;
-  min-height: 56px;
-  cursor: pointer;
-}
-
-.back {
-  width: auto;
-  min-height: 44px;
-  padding: 8px 14px;
-  margin-bottom: 12px;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin: 12px 0 14px;
   color: var(--muted);
+  font-size: 14px;
+  font-weight: 500;
 }
+.eyebrow span + span::before { content: "·"; margin-right: 14px; color: var(--line-strong); }
 
-.row-title { display: block; font-weight: 550; }
-.row-meta { display: block; color: var(--muted); font-size: 13px; margin-top: 4px; }
-
-/* Stakes, above the question. Marked out by a rule rather than a fill so it
-   reads as part of the decision and never competes with the answers. */
-.stakes {
-  margin: 4px 0 14px;
-  padding: 2px 0 2px 14px;
-  border-left: 3px solid var(--warn);
+.question {
+  margin: 0 0 14px;
+  font-size: 27px;
+  line-height: 1.22;
+  font-weight: 600;
+  letter-spacing: -0.012em;
+  text-wrap: balance;
 }
-.stakes h2 { font-size: 15px; margin: 0 0 4px; color: var(--warn); }
-.stakes p { margin: 0; font-size: 14px; }
+.why { margin: 0 0 24px; color: var(--muted); font-size: 17px; line-height: 1.5; text-wrap: pretty; }
 
-/* What the engine cannot check. This is full-size body text, not `.muted`:
-   it is the last thing read before answering and it has to be readable. */
-.limit {
-  margin: 16px 0 0;
-  padding-top: 14px;
-  border-top: 1px solid var(--line);
-  font-size: 15px;
-}
+.page-title { font-size: 27px; line-height: 1.2; font-weight: 600; letter-spacing: -0.012em; margin: 14px 0 8px; }
+.lede { margin: 0 0 24px; color: var(--muted); }
 
-.shot { overflow: hidden; margin: 16px 0; border: 1px solid var(--line); border-radius: 14px; background: var(--panel-2); }
-.shot-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 11px; }
-.shot-head strong { font-size: 12px; }
-.shot-head span { color: var(--muted); font-size: 10px; }
-.shot img {
+/* Stakes sit above the question: a rule, not a fill, so they read as part of
+   the decision and never compete with the answers. */
+.stakes { margin: 6px 0 18px; padding: 2px 0 2px 14px; border-left: 3px solid var(--warn); }
+.stakes strong { display: block; color: var(--warn); font-size: 15px; }
+.stakes span { display: block; font-size: 15px; color: var(--text); }
+
+/* ---------------------------------------------------------------- evidence */
+
+.evidence { margin: 0 0 24px; }
+.evidence-open {
   display: block;
   width: 100%;
-  height: 170px;
-  object-fit: cover;
-  object-position: top center;
-  border-block: 1px solid var(--line);
-  background: var(--panel);
-}
-.shot figcaption { padding: 8px 11px 10px; color: var(--muted); font-size: 11px; line-height: 1.4; }
-
-.outcome { display: grid; gap: 4px; margin: 16px 0 0; padding: 18px; border: 1px solid var(--line); border-radius: 16px; background: var(--panel-2); }
-.outcome[hidden] { display: none; }
-.outcome strong { font-size: 12px; letter-spacing: .08em; }
-.outcome span { font-size: 15px; line-height: 1.45; }
-.outcome.pending { border-color: color-mix(in srgb, var(--accent) 38%, var(--line)); background: color-mix(in srgb, var(--panel) 92%, var(--accent)); }
-.outcome.success { border-color: color-mix(in srgb, var(--success) 44%, var(--line)); background: color-mix(in srgb, var(--panel) 92%, var(--success)); }
-.outcome.halted { border-color: color-mix(in srgb, var(--warn) 44%, var(--line)); background: color-mix(in srgb, var(--panel) 92%, var(--warn)); }
-.outcome.uncertain { border-color: color-mix(in srgb, var(--danger) 46%, var(--line)); background: color-mix(in srgb, var(--panel) 92%, var(--danger)); }
-.outcome.teach { border-color: color-mix(in srgb, var(--teach) 42%, var(--line)); background: color-mix(in srgb, var(--panel) 92%, var(--teach)); }
-.outcome.neutral { background: var(--panel-2); }
-.outcome.terminal {
-  min-height: min(520px, calc(100vh - 160px));
-  margin: 0;
-  align-content: center;
-  justify-items: center;
-  padding: 38px 24px;
-  text-align: center;
-}
-.outcome.terminal::before {
-  content: "✓";
-  display: grid;
-  place-items: center;
-  width: 68px;
-  height: 68px;
-  margin-bottom: 12px;
-  border-radius: 22px;
-  background: var(--success);
-  color: var(--panel);
-  font-size: 34px;
-  font-weight: 800;
-}
-.outcome.terminal.halted::before { content: "■"; background: var(--warn); font-size: 25px; }
-.outcome.terminal.uncertain::before { content: "!"; background: var(--danger); }
-.outcome.terminal.teach::before { content: "↗"; background: var(--teach); }
-.outcome.terminal.neutral::before { content: "—"; background: var(--muted); }
-.outcome.terminal strong { font-size: 13px; }
-.outcome.terminal span { max-width: 32ch; font-size: 17px; line-height: 1.55; }
-.result-card { padding: 10px; }
-
-.task-kicker { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
-.task-hero { display: grid; grid-template-columns: 42px minmax(0, 1fr); gap: 12px; align-items: start; padding: 14px; border: 1px solid color-mix(in srgb, var(--accent) 36%, var(--line)); border-radius: 16px; background: color-mix(in srgb, var(--panel) 92%, var(--accent)); }
-.task-hero > span { display: grid; place-items: center; width: 42px; height: 42px; border-radius: 14px; background: var(--accent); color: var(--panel); font-size: 21px; font-weight: 900; }
-.task-hero p { margin: 1px 0 3px; color: var(--accent); font-size: 10px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
-.task-hero h1 { margin: 0; font-size: 21px; line-height: 1.28; }
-.task-reason { margin: 14px 0 0; font-size: 14px; line-height: 1.5; }
-.task-signals { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 14px; }
-.task-signals > span { display: grid; gap: 2px; padding: 10px 11px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel-2); }
-.task-signals small { color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
-.task-signals strong { font-size: 12px; line-height: 1.35; }
-.task-next { display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 9px; align-items: start; margin: 14px 0 0; padding: 11px; border-radius: 12px; background: color-mix(in srgb, var(--panel) 92%, var(--accent)); }
-.task-next > span { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 9px; background: var(--panel); color: var(--accent); }
-.task-next p { display: grid; gap: 1px; margin: 0; color: var(--muted); font-size: 11px; line-height: 1.4; }
-.task-next strong { color: var(--text); font-size: 12px; }
-.task-details { margin-top: 15px; border-top: 1px solid var(--line); padding-top: 12px; }
-.task-details > summary { color: var(--accent); cursor: pointer; font-size: 13px; font-weight: 700; }
-
-.actions {
-  position: fixed;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  display: grid;
-  gap: 10px;
-  padding: 12px 16px calc(env(safe-area-inset-bottom) + 16px);
-  background: linear-gradient(to top, var(--bg) 82%, transparent);
-  max-width: 640px;
-  margin: 0 auto;
-}
-
-/* `hidden` is an attribute the user-agent stylesheet honours with
-   `display: none`, but ANY author `display` beats it. Without this rule the
-   bar above stays on screen after `actionBar.hidden = true`, which is exactly
-   what was observed after a terminal receipt. */
-.actions[hidden] { display: none; }
-
-/* With no filled action, the bar has to read as a set of controls on its own
-   contrast rather than on one accent, so the surface is lifted and the border
-   strengthened -- equally, for all of them. */
-.actions button {
-  min-height: 52px;
-  border-radius: 12px;
-  border: 1px solid color-mix(in srgb, var(--text) 22%, var(--line));
-  background: var(--panel);
-  color: var(--text);
-  font: 600 16px/1.2 inherit;
-  cursor: pointer;
-  display: grid;
-  gap: 3px;
-  padding: 9px 14px;
-  text-align: left;
-}
-
-.actions button .label { font-weight: 600; }
-.actions button .brief { color: var(--muted); font-weight: 400; font-size: 13px; }
-
-/* A fixed bar that eats half the phone is a legibility problem in its own
-   right, and adding `reject` made a four-button bar the ordinary case.
-   Measured on a 360x640 device before this rule: three buttons 207px (32% of
-   the viewport), four 270px (42%), five 333px (52%) -- so at five the operator
-   could see 307px of the decision at a time.
-
-   Every button shrinks by the same amount. The alternative -- letting the bar
-   scroll -- would put whichever answers fall below its fold out of sight, and
-   that is a prominence difference decided by list position, which is the exact
-   defect the flat styling above exists to prevent.
-
-   44px is the floor and is not crossed: it is the smallest reliable touch
-   target, and a mis-tap here is a wrong answer to a governed decision.
-
-   A browser without `:has()` keeps the taller buttons. That degrades to
-   today's layout, which is safe -- nothing is occluded, because the page
-   reserves the bar's MEASURED height -- rather than to a broken one. */
-.actions:has(button:nth-child(4)) button {
-  min-height: 46px;
-  padding: 7px 14px;
-}
-.actions:has(button:nth-child(4)) { gap: 8px; }
-
-.actions:has(button:nth-child(5)) button {
-  min-height: 44px;
-  padding: 6px 14px;
-}
-.actions:has(button:nth-child(5)) { gap: 7px; }
-.actions:has(button:nth-child(5)) button .brief { font-size: 12.5px; }
-
-/* Every answer is styled identically. There is deliberately no `.primary` rule:
-   the accent used to be painted on `allowed_actions[0]`, which the engine sets
-   from a predicate about what it can re-verify, not about what the operator
-   should do. See the comment above `renderActions` in app.js. Do not
-   reintroduce a filled action here without a field that actually means
-   "recommended". */
-.actions button[disabled] { opacity: 0.55; }
-
-/* Shown in the bar until the operator reaches the end of the decision. It is
-   not an answer and it is not tappable -- there is no shortcut past the
-   content, because the content being on the path is the entire point. */
-.gate {
-  margin: 0;
-  padding: 12px 14px;
-  text-align: center;
-  font-size: 14px;
-  color: var(--muted);
-  border: 1px dashed var(--line);
-  border-radius: 12px;
-  background: var(--panel);
-}
-
-/* A zero-height mark at the very end of the document. Reaching it is what
-   opens the gate, so it must not be `display: none`. */
-.gate-mark { height: 1px; }
-
-.lede { font-size: 17px; margin: 0 0 10px; }
-
-.tried { margin: 14px 0; }
-.tried summary { cursor: pointer; padding: 8px 0; color: var(--accent); }
-.ladder { list-style: none; margin: 4px 0 0; padding: 0; }
-.ladder li {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 8px 0;
-  border-top: 1px solid var(--line);
-  font-size: 14px;
-}
-.ladder .verdict { color: var(--muted); text-align: right; }
-
-.recheck { margin: 16px 0 0; padding-top: 14px; border-top: 1px solid var(--line); }
-.recheck h2, .consequences h2 { font-size: 15px; margin: 0 0 8px; }
-.recheck ul { margin: 8px 0; padding-left: 20px; font-size: 14px; }
-.recheck li { margin: 4px 0; }
-
-.consequences {
-  margin: 14px 0 0;
-  background: var(--panel);
+  padding: 0;
   border: 1px solid var(--line);
   border-radius: 14px;
-  padding: 16px 18px;
+  overflow: hidden;
+  background: var(--panel);
+  cursor: zoom-in;
+  position: relative;
 }
-.consequences ul { list-style: none; margin: 0; padding: 0; }
-.consequences li { padding: 10px 0; border-top: 1px solid var(--line); }
-.consequences li:first-child { border-top: 0; padding-top: 0; }
-.consequences strong { display: block; font-size: 15px; margin-bottom: 3px; }
+.evidence img { display: block; width: 100%; height: auto; aspect-ratio: 16 / 10; object-fit: contain; background: var(--panel); }
+.evidence-hint {
+  position: absolute; right: 10px; bottom: 10px;
+  padding: 5px 10px; border-radius: 999px;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  color: var(--text); font-size: 13px; font-weight: 500;
+}
+.evidence figcaption { margin-top: 10px; color: var(--muted); font-size: 15px; line-height: 1.45; }
+
+/* The enlarged view: the same image element, at its own pixel width, in a
+   scroller the operator can pan and pinch. No second copy of the crop. */
+.evidence.zoomed {
+  position: fixed; inset: 0; z-index: 10; margin: 0;
+  display: grid; grid-template-rows: auto 1fr auto;
+  background: var(--bg);
+  padding: calc(env(safe-area-inset-top) + 12px) 0 calc(env(safe-area-inset-bottom) + 12px);
+}
+.evidence-close { display: none; }
+.evidence.zoomed .evidence-close {
+  display: block; justify-self: end; margin: 0 16px 10px;
+  min-height: 44px; padding: 10px 18px; border-radius: 12px;
+  border: 1px solid var(--line-strong); background: var(--panel); color: var(--text); font: 600 16px/1 var(--font-body);
+}
+.evidence.zoomed .evidence-open { border-radius: 0; border-inline: 0; overflow: auto; cursor: zoom-out; touch-action: pan-x pan-y pinch-zoom; }
+.evidence.zoomed img { width: auto; max-width: none; height: auto; aspect-ratio: auto; min-width: 100%; }
+.evidence.zoomed .evidence-hint { display: none; }
+.evidence.zoomed figcaption { padding: 0 20px; }
+
+/* --------------------------------------------------------- what happens next */
+
+.next { margin: 0 0 20px; padding: 18px 18px 16px; border-radius: 14px; background: var(--panel-2); }
+.next h2 { margin: 0 0 6px; font-size: 15px; font-weight: 600; letter-spacing: 0.01em; }
+.next p { margin: 0; font-size: 16px; }
+.next ul { margin: 10px 0 10px; padding: 0; list-style: none; }
+.next li { position: relative; padding-left: 22px; margin: 6px 0; font-size: 16px; }
+.next li::before { content: ""; position: absolute; left: 4px; top: 0.6em; width: 7px; height: 7px; border-radius: 50%; border: 1.5px solid var(--muted); }
+.next .after { color: var(--muted); font-size: 15px; }
+
+
+/* ----------------------------------------------------------------- details */
+
+.more { margin: 16px 0 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.more[open] { padding-bottom: 16px; }
+.more > summary {
+  list-style: none; cursor: pointer;
+  display: flex; align-items: center; justify-content: space-between;
+  min-height: 52px; color: var(--text); font-size: 16px; font-weight: 500;
+}
+.more > summary::-webkit-details-marker { display: none; }
+.more > summary::after { content: "+"; color: var(--muted); font-size: 22px; font-weight: 300; }
+.more[open] > summary::after { content: "–"; }
+.more h3 { margin: 18px 0 6px; font-size: 15px; font-weight: 600; }
+.more p, .more li { font-size: 15px; color: var(--muted); }
+.more ul { margin: 0; padding: 0; list-style: none; }
+.more li { padding: 8px 0; border-top: 1px solid var(--line); display: flex; justify-content: space-between; gap: 12px; }
+.more li strong { color: var(--text); font-weight: 500; }
+.more .effects li { display: block; }
+.more .effects li strong { display: block; }
+.more .limit { color: var(--text); }
+
+/* ----------------------------------------------------------------- answers */
+
+.answers {
+  display: grid;
+  gap: 12px;
+  padding: 8px 24px calc(env(safe-area-inset-bottom) + 32px);
+  max-width: 560px;
+  margin: 0 auto;
+}
+.answers[hidden] { display: none; }
+.answers-label { margin: 0 0 2px; color: var(--muted); font-size: 14px; font-weight: 500; }
+
+.answer {
+  display: grid;
+  gap: 3px;
+  width: 100%;
+  min-height: 60px;
+  padding: 14px 18px;
+  border-radius: 14px;
+  border: 1.5px solid var(--line-strong);
+  background: var(--panel);
+  color: var(--text);
+  font: 600 17px/1.25 var(--font-body);
+  text-align: left;
+  cursor: pointer;
+}
+.answer .brief { color: var(--muted); font-weight: 400; font-size: 15px; line-height: 1.35; }
+/* The single emphasised answer. See EMPHASIS in app.js for when there is one
+   and why there is sometimes none. */
+.answer.primary { background: var(--action); border-color: var(--action); color: var(--on-action); }
+.answer.primary .brief { color: color-mix(in srgb, var(--on-action) 78%, var(--action)); }
+.answer[disabled] { cursor: default; opacity: 0.5; }
+.answer.chosen[disabled] { opacity: 1; }
+.answer .working { display: inline-flex; align-items: center; gap: 8px; }
+.answer .working::before {
+  content: ""; width: 14px; height: 14px; border-radius: 50%;
+  border: 2px solid currentColor; border-right-color: transparent;
+}
+
+.quiet {
+  min-height: 52px; padding: 12px 18px; border-radius: 14px;
+  border: 1.5px solid var(--line-strong); background: transparent; color: var(--text);
+  font: 600 16px/1.2 var(--font-body); cursor: pointer;
+}
+.quiet.wide { width: 100%; }
+.back {
+  min-height: 44px; margin: 4px 0 0 -10px; padding: 8px 10px;
+  border: 0; background: transparent; color: var(--muted);
+  font: 500 15px/1 var(--font-body); cursor: pointer;
+}
+
+/* ------------------------------------------------- notices and the result */
+
+/* A non-terminal reply sits directly above the answers, where the eye is. */
+.notice { margin: 0 0 16px; padding: 16px 18px; border-radius: 14px; border-left: 4px solid var(--muted); background: var(--panel-2); }
+.notice[hidden] { display: none; }
+.notice strong { display: block; font-size: 16px; margin-bottom: 2px; }
+.notice span { display: block; font-size: 16px; }
+.notice small { display: block; margin-top: 8px; color: var(--muted); font-size: 14px; }
+.notice.halted { border-left-color: var(--warn); }
+.notice.uncertain { border-left-color: var(--danger); }
+.notice.pending { border-left-color: var(--muted); }
+.notice.success { border-left-color: var(--success); }
+.notice.teach { border-left-color: var(--teach); }
+
+.result { padding: 28px 0 8px; }
+.result[hidden] { display: none; }
+.mark { display: grid; place-items: center; width: 56px; height: 56px; border-radius: 50%; margin-bottom: 22px; color: var(--muted); border: 2px solid currentColor; }
+.mark svg { width: 26px; height: 26px; }
+.result.success .mark { color: var(--success); }
+.result.halted .mark { color: var(--warn); }
+.result.uncertain .mark { color: var(--danger); }
+.result.teach .mark { color: var(--teach); }
+.result-kicker { margin: 0 0 6px; font-size: 15px; font-weight: 600; color: var(--muted); }
+.result.success .result-kicker { color: var(--success); }
+.result.halted .result-kicker { color: var(--warn); }
+.result.uncertain .result-kicker { color: var(--danger); }
+.result.teach .result-kicker { color: var(--teach); }
+.result h1 { margin: 0 0 12px; font-size: 27px; line-height: 1.22; font-weight: 600; letter-spacing: -0.012em; }
+.result > p { margin: 0 0 26px; font-size: 17px; text-wrap: pretty; }
+.receipt { margin: 0 0 28px; padding: 0; border-top: 1px solid var(--line); }
+.receipt div { display: flex; justify-content: space-between; gap: 16px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.receipt dt { color: var(--muted); font-size: 15px; }
+.receipt dd { margin: 0; font-size: 15px; font-weight: 500; text-align: right; }
+.receipt code { font-family: var(--font-mono); font-size: 14px; }
+
+/* ------------------------------------------------------------ list, pairing */
+
+.rows { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line); }
+.row {
+  display: grid; gap: 4px; width: 100%; min-height: 72px; padding: 16px 0;
+  border: 0; border-bottom: 1px solid var(--line); background: transparent; color: var(--text);
+  font: inherit; text-align: left; cursor: pointer;
+}
+.row-title { font-weight: 600; font-size: 17px; line-height: 1.35; }
+.row-meta { color: var(--muted); font-size: 15px; }
+
+.center { padding-top: 12vh; }
+.code {
+  margin: 28px 0 24px;
+  font: 600 44px/1 var(--font-mono);
+  letter-spacing: 0.14em;
+  font-variant-numeric: tabular-nums;
+}
+.steps { margin: 0 0 24px; padding: 0; list-style: none; counter-reset: step; }
+.steps li { counter-increment: step; position: relative; padding: 0 0 14px 40px; font-size: 17px; }
+.steps li::before {
+  content: counter(step); position: absolute; left: 0; top: -1px;
+  display: grid; place-items: center; width: 26px; height: 26px; border-radius: 50%;
+  border: 1.5px solid var(--line-strong); color: var(--muted); font-size: 14px; font-weight: 600;
+}
+.waiting { color: var(--muted); font-size: 16px; display: flex; align-items: center; gap: 10px; }
+.waiting::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+
+/* ------------------------------------------------------------------ motion */
 
 @media (prefers-reduced-motion: no-preference) {
-  .row:active, .actions button:active { transform: scale(0.995); }
+  .main > * { animation: rise 220ms ease-out both; }
+  .answer, .quiet, .row { transition: transform 120ms ease-out, background-color 150ms; }
+  .answer:active, .quiet:active { transform: scale(0.99); }
+  .answer .working::before { animation: spin 0.9s linear infinite; }
+  .waiting::before { animation: pulse 1.6s ease-in-out infinite; }
+}
+@keyframes rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes pulse { 50% { opacity: 0.25; } }
+
+@media (forced-colors: active) {
+  .answer.primary { border: 3px solid ButtonText; }
+  .brand-mark, .link::before { forced-color-adjust: none; }
 }

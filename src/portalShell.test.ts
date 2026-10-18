@@ -10,7 +10,7 @@
  * ordinary wording, layout, or visual styling.
  */
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // The shipped shell sources, exactly as the portal serves them.
 // (The stylesheet's own rules are asserted in tests/test_portal/test_shell.py;
@@ -131,23 +131,30 @@ async function flush(times = 12) {
 }
 
 async function boot() {
+  // The shipped index.html body, minus the script tag.
   document.body.innerHTML = `
-    <header class="bar"><span class="brand">OpenAdapt</span><span id="device" class="device"></span></header>
-    <main id="main" class="main">Loading…</main>
-    <footer id="actions" class="actions" hidden></footer>`;
+    <header class="bar"><span class="brand">OpenAdapt</span>
+      <span class="bar-right"><span id="device" class="device"></span><span id="link" class="link" role="status"></span></span></header>
+    <main id="main" class="main" tabindex="-1">Loading…</main>
+    <footer id="actions" class="answers" hidden></footer>
+    <p id="announce" aria-live="assertive"></p>`;
   window.sessionStorage.setItem("portal_token", "token");
   window.sessionStorage.setItem("portal_csrf", "csrf");
-  // jsdom lays nothing out, so give the fixed bar a real height to measure.
-  const bar = document.getElementById("actions") as HTMLElement;
-  bar.getBoundingClientRect = () => ({ height: 204 }) as DOMRect;
   new Function(APP)();
   await flush();
 }
 
+/** One open decision opens by itself; a list needs a tap. */
 async function openTask() {
-  const row = document.querySelector("[data-run]") as HTMLButtonElement;
-  row.click();
+  const row = document.querySelector("[data-run]") as HTMLButtonElement | null;
+  if (row) row.click();
   await flush();
+}
+
+function posts() {
+  return (fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls.filter(
+    (call) => (call[1] as { method?: string } | undefined)?.method === "POST",
+  );
 }
 
 async function answer(action = "verify_and_resume") {
@@ -160,7 +167,18 @@ function outcomeText() {
   return document.getElementById("outcome")?.textContent ?? "";
 }
 
+// The fixtures expire at 22:00 on their own day, so the page is read as if it
+// were shortly after they were issued. Only Date is faked; timers stay real.
+const NOW = new Date("2026-07-27T21:14:00Z");
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
 beforeEach(() => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(NOW);
+  Object.defineProperty(window.navigator, "onLine", { configurable: true, get: () => true });
   // The gate tests replace `IntersectionObserver`; drop every stub so one test
   // cannot decide whether the next one is gated.
   vi.unstubAllGlobals();
@@ -462,97 +480,267 @@ describe("the retained frame is named as history, not as the live screen", () =>
       ...RESOLUTION_HALT,
       task: {
         ...RESOLUTION_HALT.task,
-        created_at: new Date(Date.now() - 14 * 60 * 1000).toISOString(),
+        created_at: new Date(NOW.getTime() - 14 * 60 * 1000).toISOString(),
       },
     };
     await boot();
     await openTask();
-    const shot = document.querySelector("figure.shot")!;
-    expect(shot.querySelector("img[data-artifact]")).not.toBeNull();
-    // The runner has no on-demand re-observation route. A retained artifact is
-    // therefore a view-only image, not a refreshable live control.
-    expect(shot.querySelector("button")).toBeNull();
+    const figure = document.querySelector("figure.evidence")!;
+    expect(figure.querySelector("img[data-artifact]")).not.toBeNull();
+    const caption = figure.querySelector("figcaption")!.textContent ?? "";
+    expect(caption).toContain("about 14 minutes ago");
+    expect(caption).toContain("not");
+    expect(caption).toContain("live");
+  });
+
+  it("zooms the same picture without asking the runner for it again", async () => {
+    await boot();
+    await openTask();
+    const evidenceCalls = () =>
+      (fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls.filter((call) =>
+        String(call[0]).includes("/evidence?"),
+      ).length;
+    const before = evidenceCalls();
+    const open = document.getElementById("evidence-open") as HTMLButtonElement;
+    expect(open.getAttribute("aria-expanded")).toBe("false");
+    open.click();
+    expect(document.getElementById("evidence")!.classList).toContain("zoomed");
+    expect(open.getAttribute("aria-expanded")).toBe("true");
+    (document.getElementById("evidence-close") as HTMLButtonElement).click();
+    expect(document.getElementById("evidence")!.classList).not.toContain("zoomed");
+    // There is no refresh: the runner does not re-observe on demand, and
+    // re-requesting the stored crop would pretend it had.
+    expect(evidenceCalls()).toBe(before);
   });
 });
 
-describe("known action stakes stay visible without making an action primary", () => {
-  it("shows the risk signal and keeps the full explanation available", async () => {
+describe("stakes are stated above the question", () => {
+  it("shows an irreversible step above the question", async () => {
     detail = {
       ...RESOLUTION_HALT,
       task: { ...RESOLUTION_HALT.task, risk_class: "irreversible" },
     };
     await boot();
     await openTask();
-    expect(document.querySelector(".task-details .stakes")).not.toBeNull();
+    const stakes = document.querySelector("#decision .stakes")!;
+    expect(stakes.textContent).toContain("cannot be undone");
+    const question = document.querySelector("#decision h1")!;
+    expect(stakes.compareDocumentPosition(question) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
-  it("does not invent a detailed risk claim when the engine does not know", async () => {
+  it("does not invent a risk claim when the engine does not know", async () => {
     await boot();
     await openTask();
     expect(document.querySelector(".stakes")).toBeNull();
-    expect(document.querySelector(".task-details .stakes")).toBeNull();
   });
 });
 
-describe("the answers are gated on reaching the end of the decision", () => {
-  let observed: Element[] = [];
-  let fire: ((entries: unknown[]) => void) | null = null;
-
-  function stubObserver() {
-    observed = [];
-    fire = null;
-    vi.stubGlobal(
-      "IntersectionObserver",
-      class {
-        constructor(callback: (entries: unknown[]) => void) {
-          fire = callback;
-        }
-        observe(node: Element) {
-          observed.push(node);
-        }
-        disconnect() {
-          fire = null;
-        }
-      },
+describe("one answer is emphasised only when it continues under a live re-check", () => {
+  function primaries() {
+    return Array.from(document.querySelectorAll("#actions .answer.primary")).map(
+      (node) => (node as HTMLElement).dataset.action,
     );
   }
 
-  it("shows a prompt instead of the answers until the gate is reached", async () => {
-    stubObserver();
+  it("emphasises check-and-continue for an ordinary halt", async () => {
     await boot();
     await openTask();
-    const bar = document.getElementById("actions")!;
-    expect(bar.querySelectorAll("[data-action]")).toHaveLength(0);
-    // Nothing in the prompt is tappable: there is no shortcut past the content.
-    expect(bar.querySelectorAll("button")).toHaveLength(0);
-    // The gate is the last element in the document, after the consequence card.
-    expect(observed).toHaveLength(1);
-    expect(observed[0].id).toBe("gate");
-    expect(document.getElementById("main")!.lastElementChild!.id).toBe("gate");
-
-    fire!([{ isIntersecting: true }]);
-    await flush();
-    expect(bar.querySelectorAll("[data-action]")).toHaveLength(4);
+    expect(primaries()).toEqual(["verify_and_resume"]);
   });
 
-  it("answers normally once the gate has opened", async () => {
-    stubObserver();
+  it("emphasises nothing before a step that cannot be undone", async () => {
+    detail = { ...RESOLUTION_HALT, task: { ...RESOLUTION_HALT.task, risk_class: "irreversible" } };
+    await boot();
+    await openTask();
+    expect(primaries()).toEqual([]);
+  });
+
+  it("emphasises the reconciliation check, which never resends", async () => {
+    detail = RECONCILIATION_HALT;
+    await boot();
+    await openTask();
+    expect(primaries()).toEqual(["reconcile"]);
+  });
+
+  it("emphasises nothing when two answers would continue", async () => {
+    detail = {
+      ...RESOLUTION_HALT,
+      task: { ...RESOLUTION_HALT.task, allowed_actions: ["verify_and_resume", "skip", "escalate"] },
+    };
+    await boot();
+    await openTask();
+    expect(primaries()).toEqual([]);
+  });
+
+  it("never emphasises stop, teach or hand-on", async () => {
+    detail = {
+      ...RESOLUTION_HALT,
+      task: { ...RESOLUTION_HALT.task, allowed_actions: ["reject", "teach", "escalate"] },
+    };
+    await boot();
+    await openTask();
+    expect(primaries()).toEqual([]);
+  });
+});
+
+describe("the answers are at the end of the reading path", () => {
+  it("puts the answers after the question, the picture and what happens next", async () => {
+    await boot();
+    await openTask();
+    const answers = document.getElementById("actions")!;
+    for (const selector of ["#decision h1", "figure.evidence", ".next"]) {
+      const node = document.querySelector(selector)!;
+      expect(node.compareDocumentPosition(answers) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    }
+    expect(answers.querySelectorAll("[data-action]")).toHaveLength(4);
+    expect(answers.getAttribute("aria-labelledby")).toBe("answers-h");
+  });
+
+  it("states what the continuing answer re-checks", async () => {
+    await boot();
+    await openTask();
+    const next = document.querySelector(".next")!.textContent ?? "";
+    expect(next).toContain("I fixed it. Check and continue");
+    expect(next).toContain("find the target again on the live screen");
+    expect(next).toContain("stops again and changes nothing");
+  });
+});
+
+describe("expiry is shown before a tap, not discovered after it", () => {
+  it("opens an expired request as expired, with no answers", async () => {
+    detail = {
+      ...RESOLUTION_HALT,
+      task: { ...RESOLUTION_HALT.task, expires_at: "2026-07-27T21:00:00+00:00" },
+    };
+    await boot();
+    await openTask();
+    expect(document.querySelectorAll("[data-action]")).toHaveLength(0);
+    expect(document.getElementById("main")!.textContent).toContain("This request expired");
+  });
+
+  it("closes the answers when the request expires while it is open", async () => {
+    detail = {
+      ...RESOLUTION_HALT,
+      task: { ...RESOLUTION_HALT.task, expires_at: new Date(NOW.getTime() + 30).toISOString() },
+    };
+    await boot();
+    await openTask();
+    expect(document.querySelectorAll("[data-action]")).toHaveLength(4);
+    vi.setSystemTime(new Date(NOW.getTime() + 60_000));
+    await new Promise((r) => setTimeout(r, 60));
+    expect(document.querySelectorAll("[data-action]")).toHaveLength(0);
+  });
+
+  it("says how long is left next to the answers", async () => {
+    await boot();
+    await openTask();
+    expect(document.getElementById("answers-h")!.textContent).toContain("closes in 46 minutes");
+  });
+});
+
+describe("a decision answered elsewhere is reported as gone, not as refused", () => {
+  it("reports the decision closed when the runner no longer has it", async () => {
+    decisionReply = { status: 409, body: { detail: "the attention item is no longer current" } };
+    await boot();
+    await openTask();
+    // After the refusal, the open decision is gone.
+    const stub = fetch as unknown as { mockImplementation: (f: unknown) => void };
+    stub.mockImplementation(async (url: string) => {
+      if (url.includes("/actions/")) return { status: 409, ok: false, json: async () => decisionReply.body };
+      if (url === "/api/portal/tasks/run1") return { status: 404, ok: false, json: async () => ({}) };
+      return { status: 200, ok: true, json: async () => [] };
+    });
+    await answer();
+    expect(document.querySelectorAll("[data-action]")).toHaveLength(0);
+    expect(document.getElementById("main")!.textContent).toContain("Nothing was sent from this phone");
+  });
+
+  it("reports a newer request when the task digest changed", async () => {
+    decisionReply = { status: 409, body: { detail: "the human decision task changed" } };
+    await boot();
+    await openTask();
+    const stub = fetch as unknown as { mockImplementation: (f: unknown) => void };
+    stub.mockImplementation(async (url: string) => {
+      if (url.includes("/actions/")) return { status: 409, ok: false, json: async () => decisionReply.body };
+      if (url === "/api/portal/tasks/run1") {
+        return {
+          status: 200,
+          ok: true,
+          json: async () => ({ ...RESOLUTION_HALT, task_digest: "sha256:" + "e".repeat(64) }),
+        };
+      }
+      return { status: 200, ok: true, json: async () => [] };
+    });
+    await answer();
+    expect(document.getElementById("main")!.textContent).toContain("There is a newer request");
+  });
+});
+
+describe("offline closes the answers and queues nothing", () => {
+  it("disables every answer while offline and sends nothing", async () => {
+    await boot();
+    await openTask();
+    Object.defineProperty(window.navigator, "onLine", { configurable: true, get: () => false });
+    window.dispatchEvent(new Event("offline"));
+    const buttons = Array.from(document.querySelectorAll("[data-action]")) as HTMLButtonElement[];
+    expect(buttons.every((button) => button.disabled)).toBe(true);
+    expect((document.getElementById("offline-note") as HTMLElement).hidden).toBe(false);
+    expect(document.getElementById("link")!.textContent).toBe("Offline");
+    buttons[0].click();
+    await flush();
+    expect(posts()).toHaveLength(0);
+    Object.defineProperty(window.navigator, "onLine", { configurable: true, get: () => true });
+    window.dispatchEvent(new Event("online"));
+    expect(buttons.every((button) => !button.disabled)).toBe(true);
+  });
+
+  it("keeps the pairing when the computer cannot be reached", async () => {
+    vi.stubGlobal("fetch", async () => {
+      throw new TypeError("Failed to fetch");
+    });
+    await boot();
+    expect(window.sessionStorage.getItem("portal_token")).toBe("token");
+    expect(document.getElementById("main")!.textContent).toContain("Cannot reach OpenAdapt");
+    expect(document.getElementById("main")!.textContent).not.toContain("Pair this phone");
+  });
+});
+
+describe("the result is a receipt", () => {
+  it("names the answer that was sent and where it was answered", async () => {
     decisionReply = {
       status: 200,
       body: { state: "completed", reason_code: "verified_and_resumed", action: "verify_and_resume" },
     };
     await boot();
     await openTask();
-    fire!([{ isIntersecting: true }]);
-    await flush();
     await answer();
-    expect(document.getElementById("outcome")!.classList).toContain("success");
+    const receipt = document.querySelector("#outcome .receipt")!.textContent ?? "";
+    expect(receipt).toContain("I fixed it. Check and continue");
+    expect(receipt).toContain("On this phone");
+    expect(document.activeElement).toBe(document.querySelector("#outcome h1"));
   });
 
-  it("fails open where the browser cannot observe the gate", async () => {
-    vi.stubGlobal("IntersectionObserver", undefined);
+  it("keeps the answers locked while the runner is still checking", async () => {
+    decisionReply = {
+      status: 200,
+      body: { state: "accepted_pending_runner", reason_code: "pending_runner", action: "verify_and_resume" },
+    };
     await boot();
     await openTask();
-    expect(document.querySelectorAll("#actions [data-action]")).toHaveLength(4);
+    await answer();
+    const buttons = Array.from(document.querySelectorAll("[data-action]")) as HTMLButtonElement[];
+    expect(buttons.length).toBeGreaterThan(0);
+    expect(buttons.every((button) => button.disabled)).toBe(true);
+    expect(document.getElementById("outcome")!.classList).toContain("pending");
+  });
+});
+
+describe("navigation", () => {
+  it("opens a single open decision directly and lists several", async () => {
+    await boot();
+    expect(document.querySelector("#decision h1")).not.toBeNull();
+    (document.getElementById("back") as HTMLButtonElement).click();
+    await flush();
+    expect(document.querySelectorAll("[data-run]")).toHaveLength(1);
   });
 });

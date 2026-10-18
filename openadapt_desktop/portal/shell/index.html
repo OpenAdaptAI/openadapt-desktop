@@ -5,18 +5,25 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="referrer" content="no-referrer">
 <meta name="robots" content="noindex, nofollow, noarchive">
-<meta name="theme-color" content="#F5F7FA">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#F5F7FA" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0E1319" media="(prefers-color-scheme: dark)">
 <title>OpenAdapt decisions</title>
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
+<a class="skip" href="#main">Skip to the decision</a>
 <header class="bar">
-  <span class="brand"><span aria-hidden="true">OA</span> OpenAdapt</span>
-  <span id="device" class="device"></span>
+  <span class="brand"><span class="brand-mark" aria-hidden="true"></span>OpenAdapt</span>
+  <span class="bar-right">
+    <span id="device" class="device"></span>
+    <span id="link" class="link" role="status" aria-live="polite"></span>
+  </span>
 </header>
-<main id="main" class="main">Loading…</main>
-<footer id="actions" class="actions" hidden></footer>
+<main id="main" class="main" tabindex="-1">Loading…</main>
+<footer id="actions" class="answers" hidden></footer>
+<p id="announce" class="visually-hidden" aria-live="assertive"></p>
 <script src="/app.js" defer></script>
 </body>
 </html>

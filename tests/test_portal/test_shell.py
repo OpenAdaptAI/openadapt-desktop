@@ -111,3 +111,57 @@ def test_the_shell_renders_the_engines_action_set_without_adding_to_it() -> None
         "escalate",
         "reconcile",
     }
+
+
+CSS = (SHELL / "styles.css").read_text(encoding="utf-8")
+HTML = (SHELL / "index.html").read_text(encoding="utf-8")
+
+
+def test_the_shell_follows_the_systems_dark_mode() -> None:
+    assert "@media (prefers-color-scheme: dark)" in CSS
+    assert 'name="color-scheme" content="light dark"' in HTML
+    assert re.search(r'name="theme-color"[^>]*media="\(prefers-color-scheme: dark\)"', HTML)
+
+
+def test_motion_only_runs_when_the_reader_has_not_asked_for_less() -> None:
+    """Every animation is declared inside the no-preference block."""
+    guarded = CSS[CSS.index("@media (prefers-reduced-motion: no-preference)") :]
+    guarded = guarded[: guarded.index("@keyframes")]
+    outside = CSS.replace(guarded, "")
+    assert re.search(r"animation\s*:", guarded)
+    assert not re.search(r"animation\s*:", outside), "an animation runs regardless of reduced motion"
+
+
+def test_focus_is_always_visible() -> None:
+    assert ":focus-visible" in CSS
+    assert "outline: none" not in CSS.replace("[tabindex=\"-1\"]:focus { outline: none; }", "").replace(
+        ".main:focus { outline: none; }", ""
+    )
+
+
+def test_answers_are_in_the_document_flow_not_a_fixed_bar() -> None:
+    """A fixed bar covered half the phone and the outcome line under it."""
+    block = CSS[CSS.index(".answers {") : CSS.index("}", CSS.index(".answers {"))]
+    assert "position: fixed" not in block
+    assert "<main" in HTML and HTML.index("<main") < HTML.index('id="actions"')
+
+
+def test_touch_targets_are_at_least_44px() -> None:
+    for selector in (".answer {", ".quiet {", ".back {", ".row {"):
+        block = CSS[CSS.index(selector) : CSS.index("}", CSS.index(selector))]
+        height = re.search(r"min-height:\s*(\d+)px", block)
+        assert height and int(height.group(1)) >= 44, selector
+
+
+def test_emphasis_is_one_named_rule() -> None:
+    """Which answer looks like the default is set by one function, not list order."""
+    assert "function primaryAction(task, actions)" in APP
+    assert 'task.risk_class === "irreversible"' in APP
+    assert 'const CONTINUING = new Set(["verify_and_resume", "skip", "reconcile"]);' in APP
+    assert "allowed_actions[0]" not in APP
+
+
+def test_offline_never_unpairs_the_phone() -> None:
+    route = APP[APP.index("async function route()") :]
+    route = route[: route.index("\n}\n")]
+    assert route.index("status === 0") < route.index("return startPairing();\n  deviceLabel")
