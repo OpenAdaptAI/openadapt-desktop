@@ -35,20 +35,42 @@ its reviewed operator copy.
 
 ## Current interface
 
-The request and result are visually different. A request shows the typed reason
-for the pause, a retained application frame when the local evidence policy
-permits it, what the runner will recheck, and only the actions permitted by the
-signed task. The result replaces the request after the runner returns its typed
-receipt. It does not repeat the same screenshot as though it were new evidence.
+Every decision is one card, one per screen, read top to bottom:
+
+1. **What is at stake**, only when it matters: a left-ruled line for an
+   irreversible step or a write to the system of record.
+2. **The question** in plain words, large.
+3. **Why OpenAdapt stopped**, in one sentence built from the typed halt.
+4. **The evidence**: the retained frame from when it stopped, labelled
+   "Kept 14 minutes ago · not live". Tap to zoom; pinch and pan in the zoomed
+   view; Escape or **Close** returns.
+5. **What happens next**: what the continuing answer re-checks, and that a
+   failed check stops again and changes nothing.
+6. **The answers**: full-width buttons in the page flow (not a fixed bar), each
+   with a one-line consequence, under "Your answer · closes in 46 minutes".
+7. **Details**: ladder, evidence counts, full consequences, exact expiry.
+
+The answers come after the evidence, so reading the card is the gate: there is
+no separate "I have read this" step. A result replaces the request after the
+runner returns its typed receipt. It shows an icon, a short label, a sentence,
+and a receipt (your answer, where and when, step, receipt digest prefix). It
+does not repeat the screenshot as though it were new evidence.
+
+The page follows the phone's light or dark setting, keeps visible focus on every
+control, moves focus to the new heading and announces it on each screen, uses
+44px or larger targets, and animates only when the reader has not asked for
+reduced motion.
 
 <table>
   <tr>
-    <th>Request before an operator action</th>
-    <th>Result after the runner rechecks the live application</th>
+    <th>Request</th>
+    <th>Result after the live recheck</th>
+    <th>Request, dark</th>
   </tr>
   <tr>
-    <td><img src="assets/mobile-decision/request.png" width="320" alt="Phone decision request with a retained synthetic OpenEMR frame"></td>
-    <td><img src="assets/mobile-decision/result-checks-passed.png" width="320" alt="Phone decision result after live checks passed"></td>
+    <td><img src="assets/mobile-decision/request.png" width="260" alt="Phone decision card with synthetic data: the question, why OpenAdapt stopped, the retained frame, what happens next, and the answers"></td>
+    <td><img src="assets/mobile-decision/result-checks-passed.png" width="260" alt="Phone result: checks passed, with the receipt"></td>
+    <td><img src="assets/mobile-decision/request-dark.png" width="260" alt="The same decision card in dark mode"></td>
   </tr>
 </table>
 
@@ -57,6 +79,24 @@ commit recorded in
 [`assets/mobile-decision/provenance.json`](assets/mobile-decision/provenance.json).
 They use synthetic data and a public OpenEMR reference frame. They are not a
 customer run and do not claim that the complete workflow reached `VERIFIED`.
+The `business-decision` and `save-approval` images are labelled previews of the
+same card components: this portal does not serve those decisions (Cloud does),
+and provenance marks them `kind: preview`.
+
+### When the answer cannot be given
+
+- **Expired.** A request that has already closed opens as a result screen
+  ("This request expired"), not as a card with dead buttons. A request that
+  closes while open disables its answers in place.
+- **Superseded.** When the runner refuses an answer, the shell re-reads the
+  task. Gone means "Someone else has this"; a changed `task_digest` means
+  "There is a newer request". Neither is shown as a failure of the operator.
+- **Offline.** Answers disable and say "Answers are off until this phone
+  reconnects. Nothing is queued." The header shows **Offline**. An unreachable
+  runner shows "Cannot reach OpenAdapt" with **Try again** and keeps the
+  pairing; it used to clear the pairing.
+- **Sending.** Buttons lock and the chosen answer shows "Sending to the
+  computer…" until a receipt or a transport failure comes back.
 
 ## Add a human decision during qualification
 
@@ -227,10 +267,10 @@ carry the local evidence image. The remote task names a custom entity class
 only if it is in the reviewed remote-safe vocabulary; otherwise it uses the
 signed neutral `record` or `item` fallback.
 
-The primary screen is intentionally short: one question, the delivery and risk
-signals, one retained application frame, and what OpenAdapt will check next.
-The resolution ladder, evidence counts, expiry, and full action consequences
-remain available under **Technical details and action effects**. A terminal
+The primary screen is intentionally short: one question, the risk signal, one
+retained application frame, what OpenAdapt will check next, and the answers.
+The resolution ladder, evidence counts, exact expiry, and full action
+consequences remain available under **Details**, after the answers. A terminal
 receipt replaces the request with a visually distinct result screen. A
 non-terminal refusal leaves the request in place so the operator can correct
 the live application and answer again.
@@ -251,11 +291,16 @@ repeat-the-step button.
 
 **What each answer does.** The actions differ in whether the saved workflow
 changes and in what becomes of the run, and neither is inferable from their
-names. Each button carries its consequence, and the card states it in full:
-*check and continue* is this run only and the same drift stops the next run;
-*stop — this is wrong* ends this run and it cannot be resumed; *teach the
-correction* changes future runs and continues nothing now; *needs more help*
-leaves the run paused and untouched.
+names. Each button carries its consequence:
+
+| Signed action | Button | One-line consequence |
+| --- | --- | --- |
+| `verify_and_resume` | I fixed it. Check and continue | Checks the live screen first. This run only. |
+| `skip` | Skip this step | Only offered for a declared optional step. |
+| `reject` | Stop this run | Ends this run. Nothing else is touched. |
+| `teach` | Show OpenAdapt the right way | Changes future runs. The run stays paused. |
+| `escalate` | Hand this to someone else | The run stays paused where it is. |
+| `reconcile` | Check what happened | Looks for the saved result. Never sends it again. |
 
 **Reconcile is not retry.** A signed `reconcile` action is shown only when
 Flow records that an earlier action was delivered or may have been delivered.
@@ -275,17 +320,21 @@ Without one, an operator who looks at the live application and concludes the
 engine was right to stop has no answer that says so, and the only one-tap
 resolution on the screen is the agreeable one.
 
-**No answer is the recommended one, including this one.** The accent used to
+**One answer may be emphasised, under one narrow rule.** The emphasis used to
 follow `allowed_actions[0]`, which Flow sets from a predicate about what it can
-re-verify rather than about what the operator should do. Emphasising the
-disagreement answer instead would be the same mistake pointed the other way.
-Nothing on the task means "recommended", so nothing is emphasised.
+re-verify rather than about what the operator should do, and it was removed for
+that reason. It is back with a rule that does not read order: the filled button
+goes to the answer that continues the run under a live recheck
+(`verify_and_resume`, `skip`, or `reconcile`) *only* when exactly one such
+answer is allowed and the step is not irreversible. Otherwise nothing is
+emphasised. This matches Desktop's Needs you list. Reverting is one constant
+(`EMPHASIS_ENABLED` in `app.js`). Business choices are never emphasised; for a
+save approval, "Approve and save" is.
 
-**Four buttons is the ordinary bar, and five is reachable.** Measured in
-headless Chromium at 360x640, the tightest device that still ships: three
-buttons 207px, four 248px, five 286px, against a 44px touch-target floor that
-is not crossed. The page reserves the bar's *measured* height, never a
-constant, so the outcome line is never left underneath it.
+**Answers sit in the page, not a fixed bar.** The fixed bar covered up to half
+of a 390x844 screen once four answers were present. The answers now follow the
+evidence in the reading order; on the identity request the first answer is on
+the first screen.
 
 **What came back.** Flow returns `HumanDecisionReceiptV1`: a `state` and a
 `reason_code` from fixed enums, and no message. The shell maps every
@@ -300,24 +349,10 @@ drives the shipped `app.js` in a DOM and pins each of those outcomes.
 
 Use the deterministic fixture generator when a document or demo needs current
 phone screens. It contains synthetic labels and closed receipt results only. It
-does not start a runner and does not read customer evidence:
-
-```bash
-uv run --extra build python scripts/capture_portal_scenarios.py \
-  --out /tmp/openadapt-desktop-phone-fixtures
-```
-
-The command writes one pre-action and one result image for each of the six
-operator request types: identity, ambiguity, human step, saved-result check,
-delivery uncertainty, and a declared optional-step halt. The set covers each
-portable action result. The files
-include `/tmp/openadapt-desktop-phone-fixtures/delivery-uncertain.png` and
-`/tmp/openadapt-desktop-phone-fixtures/delivery-uncertain-reconcile-result.png`.
-The generator requires `--out` so generated images do not enter the Desktop
-package or source tree by accident.
-
-To show the retained application context inside the phone, provide a raster
-frame from a public reference run:
+does not start a runner and does not read customer evidence. It runs the real
+shell against a stubbed transport, a fixed clock (2026-07-29 12:14 UTC,
+rendered in America/Toronto) and reduced motion, at 390x844, in both color
+schemes:
 
 ```bash
 uv run --extra build python scripts/capture_portal_scenarios.py \
@@ -325,14 +360,23 @@ uv run --extra build python scripts/capture_portal_scenarios.py \
   --frame /path/to/public-reference-run-frame.png
 ```
 
-The retained frame is visible in each request image. Use only a public
-reference frame with synthetic data. The portal labels the frame as historical
-and tells the operator to use the live application before answering.
+It writes `light/` and `dark/` folders and an `index.json`: pairing (scan,
+code, not approved, failed), the list, nothing waiting, each request kind
+(identity, ambiguity, not found, human step, saved-result check, delivery
+uncertainty, optional step, irreversible, expired), the zoomed frame,
+submitting, offline during a decision, unreachable runner, every receipt the
+shell can show (checks passed or failed, paused again, expired, superseded,
+rejected, escalated, teach, skipped, reconciled and its two incomplete forms,
+not accepted, unknown, network lost, pending), and the labelled business and
+save-approval previews. `--out` is required so generated images do not enter
+the package or source tree by accident.
 
-The repository keeps two reviewed reference captures under
-`docs/assets/mobile-decision/`: one request and one result. Their provenance
-records the exact Desktop commit, generator, source frame, dimensions, and
-SHA-256 values. Regenerate and review them when the shipped phone shell changes.
+Add `--docs` to refresh the reviewed set under `docs/assets/mobile-decision/`
+(light `name.png`, dark `name-dark.png`). It requires the public reference
+frame, and `provenance.json` records the Desktop commit, clock, timezone, kind,
+color scheme, dimensions, and SHA-256 of every file.
+`tests/test_portal/test_phone_captures.py` fails if a receipt the shell can
+show is not captured or if an asset does not match its provenance.
 
 ## Notifications
 

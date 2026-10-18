@@ -622,13 +622,14 @@ describe("expiry is shown before a tap, not discovered after it", () => {
   it("closes the answers when the request expires while it is open", async () => {
     detail = {
       ...RESOLUTION_HALT,
-      task: { ...RESOLUTION_HALT.task, expires_at: new Date(NOW.getTime() + 30).toISOString() },
+      task: { ...RESOLUTION_HALT.task, expires_at: new Date(NOW.getTime() + 1500).toISOString() },
     };
     await boot();
     await openTask();
     expect(document.querySelectorAll("[data-action]")).toHaveLength(4);
+    // The close is a real timer for the time left; the clock moves with it.
     vi.setSystemTime(new Date(NOW.getTime() + 60_000));
-    await new Promise((r) => setTimeout(r, 60));
+    await new Promise((r) => setTimeout(r, 1700));
     expect(document.querySelectorAll("[data-action]")).toHaveLength(0);
   });
 

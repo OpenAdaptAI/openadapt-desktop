@@ -1,16 +1,17 @@
 {
   "schema_version": "openadapt.desktop-phone-capture-provenance/v1",
-  "generated_at": "2026-08-27",
   "desktop": {
     "repository": "https://github.com/OpenAdaptAI/openadapt-desktop",
-    "commit": "b6599e728a67efcf79a7f8a1d5cbaa9c5858c6c5",
+    "commit": "aef6aa7c21c27ff94e15855e031adf9312464f2a",
     "generator": "scripts/capture_portal_scenarios.py",
-    "command": "uv run --extra build python scripts/capture_portal_scenarios.py --out /tmp/openadapt-desktop-phone-current --frame <public-openemr-poster>",
+    "command": "uv run --extra build python scripts/capture_portal_scenarios.py --out /tmp/openadapt-desktop-phone-current --frame <public-openemr-poster> --docs",
     "viewport": {
       "css_width": 390,
       "css_height": 844,
       "device_scale_factor": 2
-    }
+    },
+    "fixed_clock": "2026-07-29T12:14:00Z",
+    "timezone": "America/Toronto"
   },
   "source_frame": {
     "repository": "https://github.com/OpenAdaptAI/openadapt-web",
@@ -22,20 +23,224 @@
   "captures": [
     {
       "file": "request.png",
-      "source_output": "identity.png",
-      "state": "Identity decision request before an operator action",
+      "source_output": "light/request-identity.png",
+      "state": "Halt request: record identity, before an answer",
+      "color_scheme": "light",
+      "kind": "shell",
       "width": 780,
       "height": 1688,
-      "sha256": "1a4954f123104d7fb8aa4195a6363c75f838f5c05061d9aa871bac2b04f29d88"
+      "sha256": "9e8f860734e002c07000b3f0e5a98c47042d79d86ffac667f80c5a55b384952c"
+    },
+    {
+      "file": "request-dark.png",
+      "source_output": "dark/request-identity.png",
+      "state": "Halt request: record identity, before an answer",
+      "color_scheme": "dark",
+      "kind": "shell",
+      "width": 780,
+      "height": 1688,
+      "sha256": "e454e8c12080748fc1722fd7846e934fbf7193c461ed36dc6901079d9633f98f"
+    },
+    {
+      "file": "request-irreversible.png",
+      "source_output": "light/request-irreversible.png",
+      "state": "Halt request before a step that cannot be undone: no answer is emphasised",
+      "color_scheme": "light",
+      "kind": "shell",
+      "width": 780,
+      "height": 1688,
+      "sha256": "de7ea8272e00426b4c30d2310c57a25a1720b5e24dadf03541543fd47973bd5a"
+    },
+    {
+      "file": "request-irreversible-dark.png",
+      "source_output": "dark/request-irreversible.png",
+      "state": "Halt request before a step that cannot be undone: no answer is emphasised",
+      "color_scheme": "dark",
+      "kind": "shell",
+      "width": 780,
+      "height": 1688,
+      "sha256": "28095747f3601b720323eedcfe60213c4630faaaff51a928b0758d651e44ce92"
+    },
+    {
+      "file": "submitting.png",
+      "source_output": "light/submitting.png",
+      "state": "Answer sent, waiting for the runner",
+      "color_scheme": "light",
+      "kind": "shell",
+      "width": 780,
+      "height": 1688,
+      "sha256": "4f1d7a242d34aea342f8296924db7b379d34bec5d8db663099117034c6de092a"
+    },
+    {
+      "file": "submitting-dark.png",
+      "source_output": "dark/submitting.png",
+      "state": "Answer sent, waiting for the runner",
+      "color_scheme": "dark",
+      "kind": "shell",
+      "width": 780,
+      "height": 1688,
+      "sha256": "5b8a90f3f98c433b684bf69ec6a01c71260cc9aa3ad58f1fef0377b475b5b304"
     },
     {
       "file": "result-checks-passed.png",
-      "source_output": "identity-verify_and_resume-result.png",
-      "state": "Runner result after the permitted check-and-continue request",
+      "source_output": "light/result-checks-passed.png",
+      "state": "Runner receipt after the live re-check passed",
+      "color_scheme": "light",
+      "kind": "shell",
       "width": 780,
       "height": 1688,
-      "sha256": "7899cbb28feda25162f139613ec57099bd31fbccf8cfc3a8c2accf6de164255a"
+      "sha256": "d46ca3bad1e0758bde42fb49db657069178603f428a578b51840124a89eafbec"
+    },
+    {
+      "file": "result-checks-passed-dark.png",
+      "source_output": "dark/result-checks-passed.png",
+      "state": "Runner receipt after the live re-check passed",
+      "color_scheme": "dark",
+      "kind": "shell",
+      "width": 780,
+      "height": 1688,
+      "sha256": "4d034d31d7c89a85cc9e8ca8f21cb634825e19b3492e4c8822d62a1103af2be1"
+    },
+    {
+      "file": "result-checks-failed.png",
+      "source_output": "light/result-checks-failed.png",
+      "state": "Live re-check did not pass; the request stays answerable",
+      "color_scheme": "light",
+      "kind": "shell",
+      "width": 780,
+      "height": 1688,
+      "sha256": "2db7b73abfbab0a1b15a6b74ab1b90a69659b7b89c9ae276183d07cb45153977"
+    },
+    {
+      "file": "result-checks-failed-dark.png",
+      "source_output": "dark/result-checks-failed.png",
+      "state": "Live re-check did not pass; the request stays answerable",
+      "color_scheme": "dark",
+      "kind": "shell",
+      "width": 780,
+      "height": 1688,
+      "sha256": "c9c071caf25f7721aeb985839861783d509ac302c89841d68cd3cb9ee0d4b978"
+    },
+    {
+      "file": "result-expired.png",
+      "source_output": "light/request-expired-request.png",
+      "state": "The request expired before an answer",
+      "color_scheme": "light",
+      "kind": "shell",
+      "width": 780,
+      "height": 1688,
+      "sha256": "9ff7e8158e6bfe9fdf225e61103403e4643192da75d5d5b070174419d419560e"
+    },
+    {
+      "file": "result-expired-dark.png",
+      "source_output": "dark/request-expired-request.png",
+      "state": "The request expired before an answer",
+      "color_scheme": "dark",
+      "kind": "shell",
+      "width": 780,
+      "height": 1688,
+      "sha256": "92246409ef451ddb9ac9e28b5ca1141cf60345a7b03292eda275d013039dbbe9"
+    },
+    {
+      "file": "result-superseded.png",
+      "source_output": "light/result-superseded.png",
+      "state": "The decision was answered elsewhere or the run moved on",
+      "color_scheme": "light",
+      "kind": "shell",
+      "width": 780,
+      "height": 1688,
+      "sha256": "9972fa03584a5a95cb5abf9166b8e837dd84224bae5f98325589fbdccabb6666"
+    },
+    {
+      "file": "result-superseded-dark.png",
+      "source_output": "dark/result-superseded.png",
+      "state": "The decision was answered elsewhere or the run moved on",
+      "color_scheme": "dark",
+      "kind": "shell",
+      "width": 780,
+      "height": 1688,
+      "sha256": "27a931b31c109da27272bbb26a25b4ad1a0fffe6cb5e55e8912bbc2588f89993"
+    },
+    {
+      "file": "pairing.png",
+      "source_output": "light/pair-code.png",
+      "state": "Pairing: the confirmation code only this phone can see",
+      "color_scheme": "light",
+      "kind": "shell",
+      "width": 780,
+      "height": 1688,
+      "sha256": "a75c3dd4d3a82655aac33e56bdebb88845d0fdab12284ec68ed86e8dc1a06df9"
+    },
+    {
+      "file": "pairing-dark.png",
+      "source_output": "dark/pair-code.png",
+      "state": "Pairing: the confirmation code only this phone can see",
+      "color_scheme": "dark",
+      "kind": "shell",
+      "width": 780,
+      "height": 1688,
+      "sha256": "8ea6dbf64e80d601ef5d720a92fd9556593ef06e52c9e5baeaba77187e44af0b"
+    },
+    {
+      "file": "offline.png",
+      "source_output": "light/offline-during-decision.png",
+      "state": "Connection lost: answers are off and nothing is queued",
+      "color_scheme": "light",
+      "kind": "shell",
+      "width": 780,
+      "height": 1688,
+      "sha256": "21988cd9f1282cfe786e5ed4d6e8614ccc9d477fb2eca43e7e9a1cdd01e380ab"
+    },
+    {
+      "file": "offline-dark.png",
+      "source_output": "dark/offline-during-decision.png",
+      "state": "Connection lost: answers are off and nothing is queued",
+      "color_scheme": "dark",
+      "kind": "shell",
+      "width": 780,
+      "height": 1688,
+      "sha256": "9298760f13aefb9d2bcb997cbba9594a423ce39bf3cb8cf095d5b89243ab20dd"
+    },
+    {
+      "file": "business-decision.png",
+      "source_output": "light/preview-business-request.png",
+      "state": "Card preview: a business-decision choice (served by Cloud today)",
+      "color_scheme": "light",
+      "kind": "preview",
+      "width": 780,
+      "height": 1688,
+      "sha256": "279362a010465e3cb4dbcb0916044a3ac1c2b59f31c0a926c8e93991f3a570c4"
+    },
+    {
+      "file": "business-decision-dark.png",
+      "source_output": "dark/preview-business-request.png",
+      "state": "Card preview: a business-decision choice (served by Cloud today)",
+      "color_scheme": "dark",
+      "kind": "preview",
+      "width": 780,
+      "height": 1688,
+      "sha256": "fab4a49c6e6eec0a2b8e13a380bc9b80612155b229a23db230964047141291fc"
+    },
+    {
+      "file": "save-approval.png",
+      "source_output": "light/preview-save-request.png",
+      "state": "Card preview: a save approval (served by Cloud today)",
+      "color_scheme": "light",
+      "kind": "preview",
+      "width": 780,
+      "height": 1688,
+      "sha256": "f33cc0cb8353afd0d856a970a7981a8d7b29ad68aa4295965739d4b7ffb901c9"
+    },
+    {
+      "file": "save-approval-dark.png",
+      "source_output": "dark/preview-save-request.png",
+      "state": "Card preview: a save approval (served by Cloud today)",
+      "color_scheme": "dark",
+      "kind": "preview",
+      "width": 780,
+      "height": 1688,
+      "sha256": "be567e5dffb11229d47e35e05bcf449ee0e267759bf782531ef8ef469d90fa85"
     }
   ],
-  "semantic_scope": "Deterministic presentation fixture for the Desktop phone shell. It is not a customer run or a complete workflow effect-verification result."
+  "semantic_scope": "Deterministic presentation fixtures for the Desktop phone shell. They are not a customer run or a complete workflow effect-verification result. Captures marked kind=preview draw a decision kind the Desktop portal does not serve yet with the shell's own card markup."
 }

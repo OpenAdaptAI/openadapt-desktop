@@ -129,14 +129,16 @@ def test_motion_only_runs_when_the_reader_has_not_asked_for_less() -> None:
     guarded = guarded[: guarded.index("@keyframes")]
     outside = CSS.replace(guarded, "")
     assert re.search(r"animation\s*:", guarded)
-    assert not re.search(r"animation\s*:", outside), "an animation runs regardless of reduced motion"
+    assert not re.search(r"animation\s*:", outside), "an animation ignores reduced motion"
 
 
 def test_focus_is_always_visible() -> None:
     assert ":focus-visible" in CSS
-    assert "outline: none" not in CSS.replace("[tabindex=\"-1\"]:focus { outline: none; }", "").replace(
-        ".main:focus { outline: none; }", ""
-    )
+    allowed = ('[tabindex="-1"]:focus { outline: none; }', ".main:focus { outline: none; }")
+    rest = CSS
+    for rule in allowed:
+        rest = rest.replace(rule, "")
+    assert "outline: none" not in rest
 
 
 def test_answers_are_in_the_document_flow_not_a_fixed_bar() -> None:

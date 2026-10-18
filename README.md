@@ -162,7 +162,7 @@ which checks the live app again before it acts. If that check fails, the run
 stays paused.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/OpenAdaptAI/openadapt-desktop/main/docs/assets/mobile-decision/request.png" width="260" alt="OpenAdapt Desktop phone page with synthetic data: an identity check, the stopped screen, and four allowed actions">
+  <img src="https://raw.githubusercontent.com/OpenAdaptAI/openadapt-desktop/main/docs/assets/mobile-decision/request.png" width="260" alt="OpenAdapt Desktop phone page with synthetic data: one decision card with the question, the stopped screen, what happens next, and the allowed answers">
 </p>
 
 [docs/DECISION_PORTAL.md](https://github.com/OpenAdaptAI/openadapt-desktop/blob/main/docs/DECISION_PORTAL.md)
