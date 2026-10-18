@@ -23,6 +23,7 @@ const ACTION_WIRE = {
     wire: "continue",
     // Desktop's Needs you uses the same words for the same answer.
     label: "I fixed it. Check and continue",
+    short: "Check and continue",
     brief: "Checks the live screen first. This run only.",
     next: "OpenAdapt re-reads the live screen and continues only if it can",
     consequence:
@@ -779,17 +780,16 @@ function nextBlock(halt, task, actions) {
   if (!lead) {
     return nextMarkup({ lead: "Nothing continues until you answer. Each answer says what it does." });
   }
-  const opening = `If you choose “${esc(lead.label)}”, ${esc(lead.next)}`;
+  const opening = `If you choose “${esc(lead.short || lead.label)}”, ${esc(lead.next)}`;
   if (!items) {
     return nextMarkup({
-      lead: `${opening} confirm the live state.`,
-      after: "Otherwise it stops again and changes nothing.",
+      lead: `${opening} confirm the live state. If not, it stops again and changes nothing.`,
     });
   }
   return nextMarkup({
     lead: `${opening}:`,
     items,
-    after: "If any of these fail, it stops again and changes nothing.",
+    after: "If not, it stops again and changes nothing.",
   });
 }
 
@@ -870,10 +870,9 @@ function frameBlock(task, presentation) {
               aria-label="Enlarge the screen OpenAdapt kept when it stopped">
         <img id="frame" alt="The screen OpenAdapt kept when it stopped, ${esc(when)}. Not live."
              data-artifact="${esc(frameId)}">
+        <span class="evidence-age" aria-hidden="true">Kept ${esc(when.replace(/^about /, ""))} · not live</span>
         <span class="evidence-hint" aria-hidden="true">Tap to zoom</span>
       </button>
-      <figcaption>The screen when OpenAdapt stopped, ${esc(when)}. It is not
-      live: answer from the application itself.</figcaption>
     </figure>`;
 }
 
@@ -957,9 +956,11 @@ function permittedActions(task) {
 function cardMarkup({ eyebrow = [], stakes = "", question, why, evidence = "", next = "" }) {
   const crumbs = eyebrow.filter(Boolean).map((part) => `<span>${esc(part)}</span>`).join("");
   return `
-    <button class="back" id="back" type="button">← All decisions</button>
     <div id="decision">
-      <p class="eyebrow">${crumbs}</p>
+      <div class="crumbs">
+        <p class="eyebrow">${crumbs}</p>
+        <button class="back" id="back" type="button">All decisions</button>
+      </div>
       ${stakes}
       <h1 class="question" tabindex="-1">${esc(question)}</h1>
       ${why ? `<p class="why">${esc(why)}</p>` : ""}

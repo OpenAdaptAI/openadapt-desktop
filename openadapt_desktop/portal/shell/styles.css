@@ -81,7 +81,7 @@ html, body {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: calc(env(safe-area-inset-top) + 14px) 24px 14px;
+  padding: calc(env(safe-area-inset-top) + 12px) 24px 6px;
   max-width: 560px;
   margin: 0 auto;
 }
@@ -103,26 +103,28 @@ html, body {
 
 h1, h2 { font-family: var(--font-display); }
 
+.crumbs { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 6px; }
 .eyebrow {
+  flex: 1 1 auto; min-width: 0;
   display: flex;
   flex-wrap: wrap;
-  gap: 4px 14px;
-  margin: 12px 0 14px;
+  gap: 4px 8px;
+  margin: 0;
   color: var(--muted);
   font-size: 14px;
   font-weight: 500;
 }
-.eyebrow span + span::before { content: "·"; margin-right: 14px; color: var(--line-strong); }
+.eyebrow span + span::before { content: "·"; margin-right: 8px; color: var(--line-strong); }
 
 .question {
-  margin: 0 0 14px;
-  font-size: 27px;
+  margin: 0 0 12px;
+  font-size: 26px;
   line-height: 1.22;
   font-weight: 600;
   letter-spacing: -0.012em;
-  text-wrap: balance;
+  text-wrap: pretty;
 }
-.why { margin: 0 0 24px; color: var(--muted); font-size: 17px; line-height: 1.5; text-wrap: pretty; }
+.why { margin: 0 0 20px; color: var(--muted); font-size: 17px; line-height: 1.5; text-wrap: pretty; }
 
 .page-title { font-size: 27px; line-height: 1.2; font-weight: 600; letter-spacing: -0.012em; margin: 14px 0 8px; }
 .lede { margin: 0 0 24px; color: var(--muted); }
@@ -135,7 +137,7 @@ h1, h2 { font-family: var(--font-display); }
 
 /* ---------------------------------------------------------------- evidence */
 
-.evidence { margin: 0 0 24px; }
+.evidence { margin: 0 0 20px; }
 .evidence-open {
   display: block;
   width: 100%;
@@ -147,14 +149,16 @@ h1, h2 { font-family: var(--font-display); }
   cursor: zoom-in;
   position: relative;
 }
-.evidence img { display: block; width: 100%; height: auto; aspect-ratio: 16 / 10; object-fit: contain; background: var(--panel); }
-.evidence-hint {
-  position: absolute; right: 10px; bottom: 10px;
+.evidence img { display: block; width: 100%; height: auto; aspect-ratio: 16 / 9; object-fit: cover; object-position: top center; background: var(--panel); }
+.evidence-age, .evidence-hint {
+  position: absolute; bottom: 10px;
   padding: 5px 10px; border-radius: 999px;
-  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
   color: var(--text); font-size: 13px; font-weight: 500;
 }
-.evidence figcaption { margin-top: 10px; color: var(--muted); font-size: 15px; line-height: 1.45; }
+.evidence-hint { right: 10px; }
+.evidence-age { left: 10px; }
 
 /* The enlarged view: the same image element, at its own pixel width, in a
    scroller the operator can pan and pinch. No second copy of the crop. */
@@ -172,16 +176,15 @@ h1, h2 { font-family: var(--font-display); }
 }
 .evidence.zoomed .evidence-open { border-radius: 0; border-inline: 0; overflow: auto; cursor: zoom-out; touch-action: pan-x pan-y pinch-zoom; }
 .evidence.zoomed img { width: auto; max-width: none; height: auto; aspect-ratio: auto; min-width: 100%; }
-.evidence.zoomed .evidence-hint { display: none; }
-.evidence.zoomed figcaption { padding: 0 20px; }
+.evidence.zoomed .evidence-hint, .evidence.zoomed .evidence-age { display: none; }
 
 /* --------------------------------------------------------- what happens next */
 
-.next { margin: 0 0 20px; padding: 18px 18px 16px; border-radius: 14px; background: var(--panel-2); }
-.next h2 { margin: 0 0 6px; font-size: 15px; font-weight: 600; letter-spacing: 0.01em; }
-.next p { margin: 0; font-size: 16px; }
-.next ul { margin: 10px 0 10px; padding: 0; list-style: none; }
-.next li { position: relative; padding-left: 22px; margin: 6px 0; font-size: 16px; }
+.next { margin: 0 0 12px; padding: 16px 18px 14px; border-radius: 14px; background: var(--panel-2); }
+.next h2 { margin: 0 0 4px; font-size: 15px; font-weight: 600; letter-spacing: 0.01em; }
+.next p { margin: 0; font-size: 16px; line-height: 1.45; }
+.next ul { margin: 6px 0 6px; padding: 0; list-style: none; }
+.next li { position: relative; padding-left: 22px; margin: 3px 0; font-size: 16px; line-height: 1.4; }
 .next li::before { content: ""; position: absolute; left: 4px; top: 0.6em; width: 7px; height: 7px; border-radius: 50%; border: 1.5px solid var(--muted); }
 .next .after { color: var(--muted); font-size: 15px; }
 
@@ -212,7 +215,7 @@ h1, h2 { font-family: var(--font-display); }
 .answers {
   display: grid;
   gap: 12px;
-  padding: 8px 24px calc(env(safe-area-inset-bottom) + 32px);
+  padding: 4px 24px calc(env(safe-area-inset-bottom) + 32px);
   max-width: 560px;
   margin: 0 auto;
 }
@@ -253,9 +256,10 @@ h1, h2 { font-family: var(--font-display); }
 }
 .quiet.wide { width: 100%; }
 .back {
-  min-height: 44px; margin: 4px 0 0 -10px; padding: 8px 10px;
+  flex: none; min-height: 44px; margin-right: -10px; padding: 8px 10px;
   border: 0; background: transparent; color: var(--muted);
   font: 500 15px/1 var(--font-body); cursor: pointer;
+  text-decoration: underline; text-decoration-color: var(--line-strong); text-underline-offset: 4px;
 }
 
 /* ------------------------------------------------- notices and the result */

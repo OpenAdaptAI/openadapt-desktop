@@ -487,10 +487,11 @@ describe("the retained frame is named as history, not as the live screen", () =>
     await openTask();
     const figure = document.querySelector("figure.evidence")!;
     expect(figure.querySelector("img[data-artifact]")).not.toBeNull();
-    const caption = figure.querySelector("figcaption")!.textContent ?? "";
-    expect(caption).toContain("about 14 minutes ago");
-    expect(caption).toContain("not");
-    expect(caption).toContain("live");
+    // Said twice: on the picture, and to a screen reader in its description.
+    expect(figure.textContent).toContain("Kept 14 minutes ago · not live");
+    const alt = figure.querySelector("img")!.getAttribute("alt") ?? "";
+    expect(alt).toContain("about 14 minutes ago");
+    expect(alt).toContain("Not live");
   });
 
   it("zooms the same picture without asking the runner for it again", async () => {
@@ -600,9 +601,9 @@ describe("the answers are at the end of the reading path", () => {
     await boot();
     await openTask();
     const next = document.querySelector(".next")!.textContent ?? "";
-    expect(next).toContain("I fixed it. Check and continue");
+    expect(next).toContain("Check and continue");
     expect(next).toContain("find the target again on the live screen");
-    expect(next).toContain("stops again and changes nothing");
+    expect(next).toContain("it stops again and changes nothing");
   });
 });
 

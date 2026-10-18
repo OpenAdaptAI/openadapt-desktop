@@ -408,8 +408,8 @@ window.__preview = function (kind, phase) {
     ? frameBlock({ created_at: '2026-07-29T12:13:00+00:00' }, { after_artifact_id: 'preview-frame' })
     : context;
   render(cardMarkup({ eyebrow: P.eyebrow, question: P.question, why: P.why, evidence, next: nextMarkup({ lead: esc(P.next) }) }));
-  const caption = document.querySelector('.evidence figcaption');
-  if (caption) caption.textContent = 'The filled form, exactly as it will be saved. Compare it with the source before you approve.';
+  const age = document.querySelector('.evidence-age');
+  if (age) age.textContent = 'The form as it will be saved';
   const image = document.getElementById('frame');
   if (image) loadFrame('fixture-run', image);
   wireEvidence();
