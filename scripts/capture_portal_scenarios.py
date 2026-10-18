@@ -8,11 +8,13 @@ directory, and never uses customer evidence. It serves the shipped phone shell
 synthetic replies, and photographs every state at 390 CSS pixels in light and
 dark mode.
 
-Two screens are *card previews*: a business-decision choice and a save
-approval. The Desktop portal does not serve those decision kinds yet (Cloud
-answers them today). They are drawn with the shell's own ``cardMarkup``,
-``answerMarkup`` and ``resultMarkup`` so every surface can be compared with one
-card, and provenance marks them ``preview``.
+Save approvals are real shell states, served by the same synthetic transport
+as paused runs (Flow's ``save_approval`` task over ``/api/portal/save-approvals``).
+
+One screen is a *card preview*: a business-decision choice. The Desktop portal
+does not serve that decision kind (Cloud answers it). It is drawn with the
+shell's own ``cardMarkup``, ``answerMarkup`` and ``resultMarkup`` so every
+surface can be compared with one card, and provenance marks it ``preview``.
 
 Examples:
     uv run --extra build python scripts/capture_portal_scenarios.py \
@@ -232,6 +234,58 @@ SCENARIOS: dict[str, dict[str, Any]] = {
 }
 
 
+_SAVE_ID = "5a7e" * 8
+_SAVE_ID_2 = "9c1d" * 8
+
+
+def _save(risk: str = "consequential", reasons: tuple[str, ...] = ("wrong_values", "wrong_record", "screen_problem"), expires: str = "2026-07-29T13:00:00+00:00") -> dict[str, Any]:
+    """Flow's save-approval detail: a signed PHI-free task plus local presentation."""
+    return {
+        "task": {
+            "schema_version": "openadapt.human-decision-task/v1",
+            "task_kind": "save_approval",
+            "capability_digest": _digest("e"),
+            "signature": "hmac-sha256:" + "f" * 64,
+            "delivery_state": "not_delivered",
+            "risk_class": risk,
+            "question": {"template": "approve_save", "safe_slots": {}},
+            "evidence": {"frame_available_locally": True, "sensitive_evidence_local_only": True},
+            "allowed_actions": ["verify_and_resume", "reject"],
+            "required_authn": "local_session",
+            "created_at": "2026-07-29T12:13:00+00:00",
+            "expires_at": expires,
+        },
+        "task_digest": _digest("9"),
+        "presentation": {
+            "question": "Save this?",
+            "step_intent": "Save the new patient registration",
+            "step_index": 4,
+            "step_class": risk,
+            "explanation": "This is exactly what OpenAdapt will save. Before it saves, it reads the form again; if anything changed, it stops and asks again.",
+            "screenshot_route": f"/api/save-approvals/{_SAVE_ID}/frame",
+            "screenshot_sha256": "0" * 64,
+            "decline_reasons": list(reasons),
+            "expires_at": expires,
+        },
+    }
+
+
+SAVES: dict[str, dict[str, Any]] = {
+    "save": _save(),
+    "save-irreversible": _save(risk="irreversible"),
+    "save-expired": _save(expires="2026-07-29T12:10:00+00:00"),
+}
+
+SAVE_RESULTS: dict[str, dict[str, Any]] = {
+    "approved": {"status": 200, "body": {"state": "accepted_pending_runner", "reason_code": "pending_runner", "action": "verify_and_resume", "decision_digest": _digest("7"), "report_success": False}},
+    "declined": {"status": 200, "body": {"state": "rejected", "reason_code": "rejected_by_operator", "action": "reject", "decision_digest": _digest("8"), "report_success": False}},
+    "gone": {"status": 409, "body": {"detail": "request_not_waiting"}},
+    "changed": {"status": 409, "body": {"detail": "task_changed"}},
+    "not-accepted": {"status": 409, "body": {"detail": "answer_fields_invalid"}},
+    "network-lost": {"status": 0, "body": None},
+}
+
+
 def _receipt(state: str, reason: str, action: str = "verify_and_resume", **extra: Any) -> dict[str, Any]:
     return {"state": state, "reason_code": reason, "action": action, **extra}
 
@@ -292,7 +346,7 @@ LIST = [
     {"id": "fixture-run-3", "headline": "The application needs a person before the workflow can continue.", "category": "human_required"},
 ]
 
-SHELL_STATES = ["pair-scan", "pair-code", "pair-failed", "pair-not-approved", "empty", "list", "unavailable", "offline"]
+SHELL_STATES = ["pair-scan", "pair-code", "pair-failed", "pair-not-approved", "empty", "list", "list-with-save", "unavailable", "offline"]
 
 # The synthetic transport. It answers exactly the routes the shell calls.
 _STUB = r"""<script>
@@ -317,6 +371,27 @@ window.__fx = %FIXTURES%;
       status, ok: status >= 200 && status < 300,
       json: async () => { if (body === undefined) throw new Error('no body'); return body; },
     });
+    if (url.startsWith('/api/portal/save-approvals')) {
+      if (state === 'offline') throw new TypeError('Failed to fetch');
+      if (url === '/api/portal/save-approvals') {
+        if (state === 'list-with-save') return reply(200, [{ request_id: __fx.save_id, step_class: 'consequential', created_at: '2026-07-29T12:13:00+00:00', expires_at: '2026-07-29T13:00:00+00:00' }]);
+        if (state === 'save') return reply(200, [{ request_id: __fx.save_id, step_class: 'consequential', created_at: '2026-07-29T12:13:00+00:00', expires_at: __fx.saves[scenario].task.expires_at }]);
+        return reply(404, { detail: 'Not Found' });
+      }
+      if (url.endsWith('/frame')) {
+        if (!window.__frame || p.get('picture') === 'none') return reply(404, { detail: 'frame_unreadable' });
+        return nativeFetch('/' + window.__frame);
+      }
+      if (url.includes('/actions/')) {
+        if (p.get('pending') === '1') return new Promise(() => {});
+        const r = __fx.save_results[result];
+        if (result === 'gone') gone = true;
+        if (r.status === 0) throw new TypeError('Failed to fetch');
+        return reply(r.status, r.body);
+      }
+      if (gone) return reply(404, { detail: 'request_not_waiting' });
+      return reply(200, __fx.saves[scenario] || __fx.saves.save);
+    }
     if (url.includes('/evidence?')) {
       if (!window.__frame) return reply(404, null);
       return nativeFetch('/' + window.__frame);
@@ -332,7 +407,8 @@ window.__fx = %FIXTURES%;
       return reply(200, { device_label: 'Phone' });
     }
     if (url === '/api/portal/tasks') {
-      if (state === 'empty' || state === 'preview') return reply(200, []);
+      if (state === 'empty' || state === 'preview' || state === 'save') return reply(200, []);
+      if (state === 'list-with-save') return reply(200, __fx.list.slice(0, 2));
       if (state === 'unavailable') return reply(503, { message: 'The local OpenAdapt decision service is not reachable.' });
       if (state === 'list') return reply(200, __fx.list);
       const d = __fx.scenarios[scenario];
@@ -379,23 +455,6 @@ window.__preview = function (kind, phase) {
         rows: [['Your answer', 'Priority review'], ['Answered', 'On this phone · 8:14 AM'], ['Role', 'Operations lead']],
       },
     },
-    save: {
-      eyebrow: ['Approve a save', 'Step 5 of 6'],
-      question: 'Save this form?',
-      why: 'OpenAdapt filled the form and is waiting before it saves. It saves exactly what is shown here, once.',
-      frame: true,
-      next: 'If you approve, OpenAdapt reads the form again and saves only if nothing changed. Then it checks the record.',
-      options: [
-        ['approve', 'Approve and save', 'Saves exactly this form, once.'],
-        ['decline', "Don't save", 'Stops this item before the save.'],
-      ],
-      primary: 'approve',
-      result: {
-        tone: 'success', label: 'Approved', title: 'Approved. Saving now',
-        text: 'OpenAdapt reads the form again before it saves. If anything changed while you looked, it stops and saves nothing.',
-        rows: [['Your answer', 'Approve and save'], ['Decided by', 'You, on this phone'], ['Sign-in', 'Two-factor'], ['Answered', '8:14 AM']],
-      },
-    },
   }[kind];
   if (phase === 'result') {
     render(`<section class="result ${P.result.tone} terminal" id="outcome">${resultMarkup(P.result)}</section>`);
@@ -408,8 +467,6 @@ window.__preview = function (kind, phase) {
     ? frameBlock({ created_at: '2026-07-29T12:13:00+00:00' }, { after_artifact_id: 'preview-frame' })
     : context;
   render(cardMarkup({ eyebrow: P.eyebrow, question: P.question, why: P.why, evidence, next: nextMarkup({ lead: esc(P.next) }) }));
-  const age = document.querySelector('.evidence-age');
-  if (age) age.textContent = 'The form as it will be saved';
   const image = document.getElementById('frame');
   if (image) loadFrame('fixture-run', image);
   wireEvidence();
@@ -421,11 +478,13 @@ window.__preview = function (kind, phase) {
 };
 """
 
-PREVIEWS = ["business", "save"]
+PREVIEWS = ["business"]
 
 
 def all_fixtures() -> dict[str, Any]:
-    return copy.deepcopy({"scenarios": SCENARIOS, "results": RESULTS, "list": LIST})
+    return copy.deepcopy(
+        {"scenarios": SCENARIOS, "results": RESULTS, "list": LIST, "saves": SAVES, "save_results": SAVE_RESULTS, "save_id": _SAVE_ID}
+    )
 
 
 def _write_fixture_site(site: Path, frame: Path | None) -> None:
@@ -504,11 +563,14 @@ def _capture(out: Path, frame: Path | None, schemes: list[str]) -> list[dict[str
                         _p.goto(f"{origin}/?{query}", wait_until="networkidle")
                         _p.wait_for_timeout(120)
 
-                    def settle(_p: Any = page) -> None:
+                    def settle(_p: Any = page, *, picture: bool = True) -> None:
                         row = _p.locator("[data-run]")
                         if row.count():
                             row.first.click()
                         _p.wait_for_timeout(120)
+                        if not picture:
+                            _p.wait_for_selector("#outcome:not([hidden])")
+                            return
                         _p.wait_for_function(
                             "() => { const f = document.querySelector('#frame'); return !f || (f.complete && f.naturalWidth > 0); }"
                         )
@@ -558,13 +620,42 @@ def _capture(out: Path, frame: Path | None, schemes: list[str]) -> list[dict[str
                         answer("data-action", action)
                         frame_result()
                         shot(f"result-{result}", f"Result: {result} after {action}")
+                    for name in SAVES:
+                        go(f"state=save&scenario={name}")
+                        settle()
+                        shot(f"save-request{name[4:]}", f"Save approval: {name}")
+                        if name == "save":
+                            shot("save-request-full", "Save approval, whole page", full=True)
+                    go("state=save&scenario=save&picture=none")
+                    settle(picture=False)
+                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    shot("save-no-picture", "Save approval whose screenshot could not be shown: no approve answer")
+                    go("state=save&scenario=save&result=declined")
+                    settle()
+                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    answer("data-save-action", "reject")
+                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    shot("save-decline-reasons", "Don't save: pick one closed reason")
+                    answer("data-decline", "wrong_values")
+                    shot("save-result-declined", "Save declined: nothing was saved")
+                    go("state=save&scenario=save&pending=1")
+                    settle()
+                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    answer("data-save-action", "verify_and_resume")
+                    shot("save-submitting", "Approve and save sent, waiting for the runner")
+                    for result in ("approved", "gone", "changed", "not-accepted", "network-lost"):
+                        go(f"state=save&scenario=save&result={result}")
+                        settle()
+                        answer("data-save-action", "verify_and_resume")
+                        frame_result()
+                        shot(f"save-result-{result}", f"Save approval result: {result}")
                     for kind in PREVIEWS:
                         for phase in ("request", "result"):
                             go("state=preview")
                             page.evaluate(f"window.__preview('{kind}', '{phase}')")
                             page.wait_for_timeout(150)
                             settle()
-                            shot(f"preview-{kind}-{phase}", f"Card preview ({kind}, {phase}); not served by the Desktop portal yet")
+                            shot(f"preview-{kind}-{phase}", f"Card preview ({kind}, {phase}); not served by the Desktop portal")
                     context.close()
                 browser.close()
         finally:
@@ -585,8 +676,9 @@ DOCS_SET: dict[str, tuple[str, str]] = {
     "result-superseded": ("result-superseded", "The decision was answered elsewhere or the run moved on"),
     "pairing": ("pair-code", "Pairing: the confirmation code only this phone can see"),
     "offline": ("offline-during-decision", "Connection lost: answers are off and nothing is queued"),
-    "business-decision": ("preview-business-request", "Card preview: a business-decision choice (served by Cloud today)"),
-    "save-approval": ("preview-save-request", "Card preview: a save approval (served by Cloud today)"),
+    "business-decision": ("preview-business-request", "Card preview: a business-decision choice (served by Cloud)"),
+    "save-approval": ("save-request", "Save approval: one tap approves exactly the form shown"),
+    "save-approved": ("save-result-approved", "Save approved: the run re-reads the form before it saves"),
 }
 
 
@@ -647,7 +739,7 @@ def _write_docs(out: Path, schemes: list[str]) -> None:
         "semantic_scope": (
             "Deterministic presentation fixtures for the Desktop phone shell. They are not a customer run "
             "or a complete workflow effect-verification result. Captures marked kind=preview draw a decision "
-            "kind the Desktop portal does not serve yet with the shell's own card markup."
+            "kind the Desktop portal does not serve with the shell's own card markup."
         ),
     }
     (DOCS_ASSETS / "provenance.json").write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")

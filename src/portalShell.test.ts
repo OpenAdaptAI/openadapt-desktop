@@ -100,6 +100,37 @@ type Reply = { status: number; body: unknown };
 let decisionReply: Reply = { status: 200, body: null };
 let detail: unknown = RESOLUTION_HALT;
 
+// A save waiting for approval, exactly as Flow's console serves it.
+const SAVE_ID = "5a7e".repeat(8);
+const SAVE_APPROVAL = {
+  task: {
+    task_kind: "save_approval",
+    capability_digest: "sha256:" + "e".repeat(64),
+    signature: "hmac-sha256:" + "f".repeat(64),
+    delivery_state: "not_delivered",
+    risk_class: "consequential",
+    question: { template: "approve_save", safe_slots: {} },
+    created_at: "2026-07-27T21:13:00+00:00",
+    expires_at: "2026-07-27T22:00:00+00:00",
+    allowed_actions: ["verify_and_resume", "reject"],
+    evidence: { frame_available_locally: true, sensitive_evidence_local_only: true },
+  },
+  task_digest: "sha256:" + "9".repeat(64),
+  presentation: {
+    question: "Save this?",
+    step_intent: "Save the new patient registration",
+    step_index: 4,
+    step_class: "consequential",
+    explanation: "This is exactly what OpenAdapt will save.",
+    decline_reasons: ["wrong_values", "wrong_record", "screen_problem"],
+    expires_at: "2026-07-27T22:00:00+00:00",
+  },
+};
+let saves: unknown[] | null = null;
+let saveDetail: Reply = { status: 200, body: SAVE_APPROVAL };
+let saveFrame = true;
+let saveReply: Reply = { status: 200, body: null };
+
 function stubTransport() {
   const fetchStub = vi.fn(async (url: string) => {
     let reply: Reply = { status: 404, body: null };
@@ -108,12 +139,31 @@ function stubTransport() {
     } else if (url === "/api/portal/tasks") {
       reply = {
         status: 200,
-        body: [{ id: "run1", headline: "The compiled target could not be resolved uniquely.", category: "resolution" }],
+        body: saves
+          ? []
+          : [{ id: "run1", headline: "The compiled target could not be resolved uniquely.", category: "resolution" }],
       };
     } else if (url === "/api/portal/tasks/run1") {
       reply = { status: 200, body: detail };
+    } else if (url === "/api/portal/save-approvals") {
+      reply = saves ? { status: 200, body: saves } : { status: 404, body: { detail: "Not Found" } };
+    } else if (url === `/api/portal/save-approvals/${SAVE_ID}/frame`) {
+      return saveFrame
+        ? {
+            status: 200,
+            ok: true,
+            headers: { get: () => "image/png" },
+            blob: async () => new Blob(["png"], { type: "image/png" }),
+          }
+        : { status: 404, ok: false, headers: { get: () => "application/json" }, json: async () => ({}) };
+    } else if (url.startsWith(`/api/portal/save-approvals/${SAVE_ID}/actions/`)) {
+      reply = saveReply;
+    } else if (url === `/api/portal/save-approvals/${SAVE_ID}`) {
+      reply = saveDetail;
     } else if (url.includes("/actions/")) {
       reply = decisionReply;
+    } else if (url === "/api/portal/tasks/none") {
+      reply = { status: 404, body: null };
     }
     return {
       status: reply.status,
@@ -184,6 +234,12 @@ beforeEach(() => {
   vi.unstubAllGlobals();
   detail = RESOLUTION_HALT;
   decisionReply = { status: 200, body: null };
+  saves = null;
+  saveDetail = { status: 200, body: SAVE_APPROVAL };
+  saveFrame = true;
+  saveReply = { status: 200, body: null };
+  URL.createObjectURL = vi.fn(() => "blob:frame");
+  URL.revokeObjectURL = vi.fn();
   window.sessionStorage.clear();
   if (!globalThis.crypto?.randomUUID) {
     vi.stubGlobal("crypto", { randomUUID: () => "00000000-0000-4000-8000-000000000000" });
@@ -744,5 +800,153 @@ describe("navigation", () => {
     (document.getElementById("back") as HTMLButtonElement).click();
     await flush();
     expect(document.querySelectorAll("[data-run]")).toHaveLength(1);
+  });
+});
+
+describe("a save waiting for approval", () => {
+  const WAITING = [{ request_id: SAVE_ID, step_class: "consequential", created_at: "", expires_at: "2026-07-27T22:00:00+00:00" }];
+
+  function lastPost() {
+    const call = posts().pop()!;
+    return { url: call[0] as string, body: JSON.parse((call[1] as { body: string }).body) };
+  }
+
+  async function tap(selector: string) {
+    (document.querySelector(selector) as HTMLButtonElement).click();
+    await flush();
+  }
+
+  it("opens by itself and asks one question with the exact form", async () => {
+    saves = WAITING;
+    await boot();
+    expect(document.querySelector("#decision h1")!.textContent).toBe("Save this form?");
+    expect((document.getElementById("frame") as HTMLImageElement).src).toBe("blob:frame");
+    expect(document.getElementById("main")!.textContent).toContain("Save the new patient registration");
+    expect(document.querySelector(".stakes")!.textContent).toContain("system of record");
+  });
+
+  it("approves with one tap, sending only the task it showed", async () => {
+    saves = WAITING;
+    saveReply = {
+      status: 200,
+      body: { state: "accepted_pending_runner", reason_code: "pending_runner", action: "verify_and_resume", decision_digest: "sha256:" + "7".repeat(64) },
+    };
+    await boot();
+    const approve = document.querySelector('[data-save-action="verify_and_resume"]')!;
+    expect(approve.classList).toContain("primary");
+    await tap('[data-save-action="verify_and_resume"]');
+    const { url, body } = lastPost();
+    expect(url).toBe(`/api/portal/save-approvals/${SAVE_ID}/actions/verify_and_resume`);
+    // Flow forbids extra fields, and the phone sends none.
+    expect(body).toEqual({
+      action: "verify_and_resume",
+      task_digest: SAVE_APPROVAL.task_digest,
+      task_signature: SAVE_APPROVAL.task.signature,
+    });
+    expect(outcomeText()).toContain("Approved");
+    expect(outcomeText()).toContain("Saving after one more check");
+    expect(outcomeText()).toContain("777777777777");
+  });
+
+  it("declines only with one closed reason, and says nothing was saved", async () => {
+    saves = WAITING;
+    saveReply = { status: 200, body: { state: "rejected", reason_code: "rejected_by_operator", action: "reject" } };
+    await boot();
+    await tap('[data-save-action="reject"]');
+    expect(posts()).toHaveLength(0);
+    const reasons = Array.from(document.querySelectorAll("[data-decline]")).map((b) => (b as HTMLElement).dataset.decline);
+    expect(reasons).toEqual(["wrong_values", "wrong_record", "screen_problem"]);
+    await tap('[data-decline="wrong_record"]');
+    const { body } = lastPost();
+    expect(body).toEqual({
+      action: "reject",
+      task_digest: SAVE_APPROVAL.task_digest,
+      task_signature: SAVE_APPROVAL.task.signature,
+      decline_reason: "wrong_record",
+    });
+    expect(outcomeText()).toContain("Nothing was saved");
+    expect(outcomeText()).toContain("It's the wrong record");
+  });
+
+  it("offers no reason it cannot name", async () => {
+    saves = WAITING;
+    saveDetail = {
+      status: 200,
+      body: { ...SAVE_APPROVAL, presentation: { ...SAVE_APPROVAL.presentation, decline_reasons: ["wrong_values", "free_text"] } },
+    };
+    await boot();
+    await tap('[data-save-action="reject"]');
+    expect(Array.from(document.querySelectorAll("[data-decline]")).map((b) => (b as HTMLElement).dataset.decline)).toEqual([
+      "wrong_values",
+    ]);
+  });
+
+  it("cannot approve a save whose picture did not load", async () => {
+    saves = WAITING;
+    saveFrame = false;
+    await boot();
+    expect(document.querySelector('[data-save-action="verify_and_resume"]')).toBeNull();
+    expect(document.querySelector('[data-save-action="reject"]')).not.toBeNull();
+    expect(document.getElementById("evidence")).toBeNull();
+    expect(outcomeText()).toContain("cannot approve");
+  });
+
+  it("gives two equal answers when the save cannot be undone", async () => {
+    saves = WAITING;
+    saveDetail = { status: 200, body: { ...SAVE_APPROVAL, task: { ...SAVE_APPROVAL.task, risk_class: "irreversible" } } };
+    await boot();
+    expect(document.querySelectorAll(".answer.primary")).toHaveLength(0);
+    expect(document.querySelector(".stakes")!.textContent).toContain("cannot be undone");
+  });
+
+  it("says a save answered elsewhere is no longer waiting", async () => {
+    saves = WAITING;
+    saveReply = { status: 409, body: { detail: "request_not_waiting" } };
+    await boot();
+    await tap('[data-save-action="verify_and_resume"]');
+    expect(document.getElementById("main")!.textContent).toContain("This save is no longer waiting");
+  });
+
+  it("asks to look again when the save changed", async () => {
+    saves = WAITING;
+    saveReply = { status: 409, body: { detail: "task_changed" } };
+    await boot();
+    await tap('[data-save-action="verify_and_resume"]');
+    expect(document.getElementById("main")!.textContent).toContain("This save changed");
+    await tap("#done");
+    expect(document.querySelector("#decision h1")!.textContent).toBe("Save this form?");
+  });
+
+  it("opens an expired save as expired, with no answers", async () => {
+    saves = WAITING;
+    saveDetail = { status: 200, body: { ...SAVE_APPROVAL, task: { ...SAVE_APPROVAL.task, expires_at: "2026-07-27T21:00:00+00:00" } } };
+    await boot();
+    expect(document.querySelectorAll("[data-save-action]")).toHaveLength(0);
+    expect(document.getElementById("main")!.textContent).toContain("This request expired");
+  });
+
+  it("sends nothing while offline", async () => {
+    saves = WAITING;
+    await boot();
+    Object.defineProperty(window.navigator, "onLine", { configurable: true, get: () => false });
+    window.dispatchEvent(new Event("offline"));
+    const approve = document.querySelector('[data-save-action="verify_and_resume"]') as HTMLButtonElement;
+    expect(approve.disabled).toBe(true);
+    approve.click();
+    await flush();
+    expect(posts()).toHaveLength(0);
+  });
+
+  it("does not show a task that is not a save approval as one", async () => {
+    saves = WAITING;
+    saveDetail = { status: 200, body: { ...SAVE_APPROVAL, task: { ...SAVE_APPROVAL.task, task_kind: "identity" } } };
+    await boot();
+    expect(document.querySelectorAll("[data-save-action]")).toHaveLength(0);
+  });
+
+  it("lists saves with paused runs, and an older runner without saves still lists runs", async () => {
+    await boot();
+    // No save route (404): the paused run still opens.
+    expect(document.querySelector("#decision h1")!.textContent).toContain("unambiguous target");
   });
 });

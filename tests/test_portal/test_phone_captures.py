@@ -60,3 +60,26 @@ def test_previews_are_labelled_as_previews() -> None:
         if entry["source_output"].split("/", 1)[1].startswith("preview-"):
             assert entry["kind"] == "preview"
             assert "preview" in entry["state"].lower()
+
+
+def test_save_fixtures_are_what_flow_serves() -> None:
+    """A save approval is Flow's signed task with exactly its two answers."""
+    for name, detail in capture.SAVES.items():
+        task = detail["task"]
+        assert task["task_kind"] == "save_approval", name
+        assert task["allowed_actions"] == ["verify_and_resume", "reject"], name
+        assert set(detail["presentation"]["decline_reasons"]) <= {
+            "wrong_values",
+            "wrong_record",
+            "screen_problem",
+        }
+    for result in capture.SAVE_RESULTS.values():
+        assert "message" not in (result["body"] or {})
+
+
+def test_save_approval_screens_are_real_shell_states() -> None:
+    """Saves are served by the portal now: no screen of them is a preview."""
+    provenance = json.loads((ASSETS / "provenance.json").read_text(encoding="utf-8"))
+    for entry in provenance["captures"]:
+        if entry["file"].startswith("save-"):
+            assert entry["kind"] == "shell", entry["file"]

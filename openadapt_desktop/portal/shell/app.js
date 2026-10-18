@@ -398,6 +398,42 @@ const LIMIT_COPY =
   "cannot check whether you actually looked. Answer from the live " +
   "application, not from this page.";
 
+// ------------------------------------------------------------- save approvals
+//
+// Admission is done once, by a person or by a delegate under a grant a person
+// signed; after that a run stops only on a problem. The strictest setting
+// still stops before every save. Flow signs that wait as a decision task
+// (`task_kind: save_approval`, actions `verify_and_resume` and `reject`) and
+// serves the exact screenshot of the filled form. Approving is one tap.
+// Declining asks for one closed reason and then sends.
+
+const SAVE_ANSWER = {
+  verify_and_resume: { label: "Approve and save", brief: "Saves exactly this form, once." },
+  reject: { label: "Don't save", brief: "Stops this save. You pick why next." },
+};
+
+// Flow's closed decline reasons. A reason the phone has no wording for is not
+// offered: the phone never sends a code it cannot name to the person.
+const DECLINE_REASON = {
+  wrong_values: "The values are wrong",
+  wrong_record: "It's the wrong record",
+  screen_problem: "Something on the screen is wrong",
+};
+
+const SAVE_RISK_COPY = {
+  irreversible: {
+    title: "This save cannot be undone",
+    body: "Once it saves, it cannot be taken back. If you are not sure, don't save.",
+  },
+  consequential: {
+    title: "This writes to the system of record",
+    body: "OpenAdapt checks the record after it saves.",
+  },
+};
+
+// Flow's closed refusal codes for a save that is no longer the one shown.
+const SAVE_GONE = new Set(["request_not_waiting", "request_unknown", "already_answered"]);
+
 const ICON = {
   success: '<path d="M5 12.5l4.5 4.5L19 7.5"/>',
   halted: '<rect x="7" y="7" width="10" height="10" rx="1.5"/>',
@@ -486,7 +522,7 @@ function syncConnection() {
   const offline = isOffline();
   if (linkStatus) linkStatus.textContent = offline ? "Offline" : "";
   document.body.classList.toggle("offline", offline);
-  actionBar.querySelectorAll("[data-action]").forEach((button) => {
+  actionBar.querySelectorAll("[data-action], [data-save-action], [data-decline]").forEach((button) => {
     if (button.dataset.locked === "true") return;
     button.disabled = offline;
   });
@@ -607,25 +643,44 @@ function unavailable(body, status) {
 
 let autoOpened = false;
 
+// Saves waiting for approval. An older runner has no such route (404): that is
+// "none", not an outage, so paused runs still show.
+async function waitingSaves() {
+  const { status, body } = await api("/api/portal/save-approvals");
+  if (status !== 200 || !Array.isArray(body)) return [];
+  return body.filter((item) => item && /^[0-9a-f]{32}$/.test(String(item.request_id || "")));
+}
+
 async function showList() {
-  const { status, body } = await api("/api/portal/tasks");
+  const [{ status, body }, saves] = await Promise.all([api("/api/portal/tasks"), waitingSaves()]);
   if (status === 401 || status === 202) return startPairing();
   if (status !== 200 || !Array.isArray(body)) return unavailable(body, status);
-  if (body.length === 0) {
+  const total = body.length + saves.length;
+  if (total === 0) {
     screen(`<h1 class="page-title" tabindex="-1">Nothing needs you</h1>
-      <p class="lede">OpenAdapt has no open decisions on this computer. When a
-      run stops and asks, the question appears here.</p>
+      <p class="lede">Runs stop here only when something needs a person, or
+      before a save if you asked to approve each one.</p>
       <button class="quiet wide" id="retry" type="button">Check again</button>`);
     document.getElementById("retry").addEventListener("click", showList);
     return;
   }
   // One open decision: go straight to it. The back link still reaches the list.
-  if (body.length === 1 && !autoOpened) {
+  if (total === 1 && !autoOpened) {
     autoOpened = true;
-    return showTask(body[0].id);
+    return saves.length ? showSave(saves[0].request_id) : showTask(body[0].id);
   }
   autoOpened = true;
-  const rows = body
+  const saveRows = saves
+    .map((item) => {
+      const at = expiryOf(item);
+      const left = at != null && at > Date.now() ? ` · closes in ${describeRemaining(at)}` : "";
+      return `<li><button class="row" type="button" data-save="${esc(item.request_id)}">
+        <span class="row-title">Approve a save</span>
+        <span class="row-meta">Waiting before it saves${esc(left)}</span>
+      </button></li>`;
+    })
+    .join("");
+  const taskRows = body
     .map(
       (item) => `<li><button class="row" type="button" data-run="${esc(item.id)}">
         <span class="row-title">${esc(item.headline || "OpenAdapt needs a decision")}</span>
@@ -634,10 +689,13 @@ async function showList() {
     )
     .join("");
   render(`<h1 class="page-title" tabindex="-1">Needs you</h1>
-    <p class="lede">${body.length} open decisions. Each one is answered on its own.</p>
-    <ul class="rows">${rows}</ul>`);
+    <p class="lede">${total} open decisions. Each one is answered on its own.</p>
+    <ul class="rows">${saveRows}${taskRows}</ul>`);
   main.querySelectorAll("[data-run]").forEach((node) => {
     node.addEventListener("click", () => showTask(node.dataset.run));
+  });
+  main.querySelectorAll("[data-save]").forEach((node) => {
+    node.addEventListener("click", () => showSave(node.dataset.save));
   });
 }
 
@@ -1354,6 +1412,324 @@ async function decide(runId, detail, portableAction) {
   if (typeof outcome.scrollIntoView === "function") {
     outcome.scrollIntoView({ block: "nearest" });
   }
+}
+
+// ------------------------------------------------------------ approve a save
+
+function saveActions(task) {
+  if (!task || task.task_kind !== "save_approval" || !Array.isArray(task.allowed_actions)) return [];
+  return task.allowed_actions.filter((action) => SAVE_ANSWER[action]);
+}
+
+function declineReasons(presentation) {
+  const offered = Array.isArray(presentation.decline_reasons) ? presentation.decline_reasons : [];
+  return offered.filter((reason) => DECLINE_REASON[reason]);
+}
+
+// The same one rule as a paused run: emphasis only where the step can be taken
+// back. A save that cannot be undone gets two equal answers.
+function primarySave(task, actions) {
+  if (!EMPHASIS_ENABLED || task.risk_class === "irreversible") return null;
+  return actions.includes("verify_and_resume") ? "verify_and_resume" : null;
+}
+
+function saveFrameBlock() {
+  return `<figure class="evidence" id="evidence">
+      <button class="evidence-close" type="button" id="evidence-close">Close</button>
+      <button class="evidence-open" type="button" id="evidence-open" aria-expanded="false"
+              aria-label="Enlarge the filled form">
+        <img id="frame" alt="The filled form, exactly as OpenAdapt will save it.">
+        <span class="evidence-age" aria-hidden="true">Exactly what will be saved</span>
+        <span class="evidence-hint" aria-hidden="true">Tap to zoom</span>
+      </button>
+    </figure>`;
+}
+
+async function loadSaveFrame(requestId, image) {
+  const { token } = session();
+  let response;
+  try {
+    response = await fetch(`/api/portal/save-approvals/${encodeURIComponent(requestId)}/frame`, {
+      headers: { Authorization: `Bearer ${token}` },
+      cache: "no-store",
+      credentials: "omit",
+    });
+  } catch (error) {
+    return false;
+  }
+  if (!response.ok || !image.isConnected) return false;
+  const type = (response.headers && response.headers.get && response.headers.get("content-type")) || "";
+  if (type && !type.startsWith("image/png")) return false;
+  releaseFrame();
+  frameUrl = URL.createObjectURL(await response.blob());
+  image.src = frameUrl;
+  return true;
+}
+
+async function showSave(requestId) {
+  const { status, body } = await api(`/api/portal/save-approvals/${encodeURIComponent(requestId)}`);
+  if (status === 401 || status === 202) return startPairing();
+  if (status === 404) return showSaveGone();
+  if (status !== 200 || !body || !body.task) return unavailable(body, status);
+  const task = body.task;
+  const presentation = body.presentation || {};
+  const actions = saveActions(task);
+  if (actions.length === 0) return unavailable({ message: "This phone cannot show that request. Answer it on the computer running OpenAdapt." }, 409);
+  const expiresAt = expiryOf(task);
+  if (expiresAt != null && expiresAt <= Date.now()) return showExpiredRequest(task);
+  const step = Number.isInteger(presentation.step_index) ? `Step ${presentation.step_index + 1}` : "";
+  const intent = String(presentation.step_intent || "").trim();
+  const risk = SAVE_RISK_COPY[task.risk_class];
+  current = { kind: "save", requestId, detail: body, actions, frameReady: false };
+  render(
+    cardMarkup({
+      eyebrow: ["Approve a save", step],
+      stakes: risk ? `<p class="stakes"><strong>${esc(risk.title)}</strong><span>${esc(risk.body)}</span></p>` : "",
+      question: "Save this form?",
+      why: "OpenAdapt filled the form and stopped before saving. Nothing is saved until you answer.",
+      evidence: saveFrameBlock(),
+      next: nextMarkup({
+        lead:
+          "If you approve, OpenAdapt reads the form again and saves only if " +
+          "nothing changed. If something changed, it stops and asks again.",
+      }),
+    }),
+  );
+  if (intent) {
+    const why = main.querySelector(".why");
+    if (why) why.insertAdjacentHTML("afterend", `<p class="why step-intent">This step: ${esc(intent)}</p>`);
+  }
+  document.getElementById("back").addEventListener("click", showList);
+  wireEvidence();
+  renderSaveAnswers();
+  const image = document.getElementById("frame");
+  // No picture, no approval: the person must see exactly what will be saved.
+  const ready = image ? await loadSaveFrame(requestId, image) : false;
+  if (!current || current.requestId !== requestId) return;
+  current.frameReady = ready;
+  if (!ready) {
+    // Nothing to look at is shown as nothing, not as a broken picture.
+    const figure = document.getElementById("evidence");
+    if (figure) figure.remove();
+    const outcome = document.getElementById("outcome");
+    if (outcome) {
+      renderNotice(outcome, {
+        label: "No picture",
+        tone: "halted",
+        text: "The filled form could not be shown, so this phone cannot approve the save. You can still choose Don't save, or answer on the computer.",
+      });
+    }
+  }
+  renderSaveAnswers();
+  if (expiresAt != null) {
+    const wait = Math.min(expiresAt - Date.now(), 2147483000);
+    expiryTimer = setTimeout(() => showExpiredRequest(task), wait);
+  }
+}
+
+function renderSaveAnswers() {
+  const { detail, actions, frameReady } = current;
+  const primary = frameReady ? primarySave(detail.task, actions) : null;
+  const shown = actions.filter((action) => action !== "verify_and_resume" || frameReady);
+  actionBar.innerHTML = answerMarkup(
+    shown.map((action) => ({
+      attr: "data-save-action",
+      id: action,
+      label: SAVE_ANSWER[action].label,
+      brief: SAVE_ANSWER[action].brief,
+      primary: action === primary,
+    })),
+    {
+      heading: `Your answer${expiryNote(detail.task)}`,
+      details: `<details class="more"><summary>Details</summary>
+        <p>${esc(detail.presentation && detail.presentation.explanation ? detail.presentation.explanation : "")}</p>
+        <h3>Who is recorded</h3>
+        <p>A paired phone proves a device, not a person. Your answer is recorded as a person on this phone, without a name.</p>
+        ${
+          expiryOf(detail.task) != null
+            ? `<h3>Expiry</h3><p>This request is valid until ${esc(clockTime(expiryOf(detail.task)))} (${esc(detail.task.expires_at)}).</p>`
+            : ""
+        }
+      </details>`,
+    },
+  );
+  actionBar.setAttribute("aria-labelledby", "answers-h");
+  actionBar.hidden = false;
+  actionBar.querySelectorAll("[data-save-action]").forEach((node) => {
+    node.addEventListener("click", () => {
+      if (node.dataset.saveAction === "reject") return askDeclineReason();
+      return submitSave("verify_and_resume", null);
+    });
+  });
+  syncConnection();
+}
+
+function askDeclineReason() {
+  const reasons = declineReasons(current.detail.presentation || {});
+  if (reasons.length === 0) {
+    const outcome = document.getElementById("outcome");
+    return renderNotice(outcome, {
+      label: "Answer on the computer",
+      tone: "halted",
+      text: "This phone has no reason it can send for Don't save. Answer it on the computer running OpenAdapt.",
+    });
+  }
+  actionBar.innerHTML =
+    `<h2 class="answers-label" id="answers-h">Why shouldn't it save?</h2>` +
+    `<p class="notice pending" id="offline-note" hidden><strong>Offline</strong>` +
+    `<span>Answers are off until this phone reconnects. Nothing is queued.</span></p>` +
+    reasons
+      .map(
+        (reason) =>
+          `<button type="button" class="answer" data-decline="${esc(reason)}"><span class="label">${esc(DECLINE_REASON[reason])}</span></button>`,
+      )
+      .join("") +
+    `<button type="button" class="quiet wide" id="decline-back">Back</button>`;
+  actionBar.querySelectorAll("[data-decline]").forEach((node) => {
+    node.addEventListener("click", () => submitSave("reject", node.dataset.decline));
+  });
+  document.getElementById("decline-back").addEventListener("click", renderSaveAnswers);
+  const heading = document.getElementById("answers-h");
+  heading.setAttribute("tabindex", "-1");
+  heading.focus({ preventScroll: false });
+  announce("Why shouldn't it save?");
+  syncConnection();
+}
+
+function interpretSaveReply(status, body, action) {
+  if (status === 0 || status >= 500) return interpretReply(status, body, action);
+  const code = body && typeof body.detail === "string" ? body.detail : "";
+  if (status === 404 || (status === 409 && SAVE_GONE.has(code))) return { gone: true };
+  if (status === 409 && code === "task_changed") return { changed: true };
+  if (status === 409 && /expired/.test(code)) return { expired: true };
+  const state = body && body.state;
+  const reason = body && body.reason_code;
+  if (status === 200 && state === "accepted_pending_runner" && reason === "pending_runner" && action === "verify_and_resume") {
+    return {
+      label: "Approved",
+      title: "Saving after one more check",
+      tone: "success",
+      icon: "success",
+      text: "OpenAdapt reads the form again and saves only if nothing changed. If something changed, it stops and asks again.",
+      terminal: true,
+    };
+  }
+  if (status === 200 && state === "rejected" && reason === "rejected_by_operator" && action === "reject") {
+    return {
+      label: "Not saved",
+      title: "Nothing was saved",
+      tone: "neutral",
+      icon: "neutral",
+      text: "This save is stopped. OpenAdapt does not save this item.",
+      terminal: true,
+    };
+  }
+  if (status === 200 && state && reason) return interpretReply(status, body, action);
+  return {
+    label: "Not accepted",
+    tone: "halted",
+    text: "OpenAdapt did not accept that answer and saved nothing. Review the form and answer again.",
+    detail: code,
+    terminal: false,
+  };
+}
+
+async function submitSave(action, reason) {
+  if (isOffline()) return syncConnection();
+  const { requestId, detail } = current;
+  const outcome = document.getElementById("outcome");
+  const buttons = Array.from(actionBar.querySelectorAll("button"));
+  const chosen = reason
+    ? actionBar.querySelector(`[data-decline="${reason}"]`)
+    : actionBar.querySelector(`[data-save-action="${action}"]`);
+  buttons.forEach((button) => {
+    button.disabled = true;
+    button.dataset.locked = "true";
+  });
+  if (chosen) {
+    chosen.classList.add("chosen");
+    chosen.setAttribute("aria-busy", "true");
+    let brief = chosen.querySelector(".brief");
+    if (!brief) {
+      chosen.insertAdjacentHTML("beforeend", `<span class="brief"></span>`);
+      brief = chosen.querySelector(".brief");
+    }
+    brief.innerHTML = `<span class="working">Sending to the computer…</span>`;
+  }
+  announce("Sending your answer to the computer.");
+  // Exactly the fields Flow accepts: the task it showed, and one answer.
+  const payload = { action, task_digest: detail.task_digest, task_signature: detail.task.signature };
+  if (action === "reject") payload.decline_reason = reason;
+  const { status, body } = await api(
+    `/api/portal/save-approvals/${encodeURIComponent(requestId)}/actions/${encodeURIComponent(action)}`,
+    { method: "POST", body: JSON.stringify(payload) },
+  );
+  const reply = interpretSaveReply(status, body, action);
+  if (reply.gone) return showSaveGone();
+  if (reply.changed) return showSaveChanged(requestId);
+  if (reply.expired) return showExpiredRequest(detail.task);
+  if (reply.terminal) {
+    const decision = document.getElementById("decision");
+    if (decision) decision.hidden = true;
+    const figure = document.getElementById("evidence");
+    if (figure) figure.classList.remove("zoomed");
+    releaseFrame();
+    hideActions();
+    const digest = body && typeof body.decision_digest === "string" && /^sha256:[0-9a-f]{64}$/.test(body.decision_digest)
+      ? body.decision_digest
+      : "";
+    const rows = [
+      ["Your answer", esc(SAVE_ANSWER[action].label)],
+      reason ? ["Reason", esc(DECLINE_REASON[reason])] : null,
+      ["Answered", `On this phone · ${esc(clockTime(Date.now()))}`],
+      digest ? ["Receipt", `<code>${esc(digest.slice(7, 19))}</code>`] : null,
+    ].filter(Boolean);
+    outcome.hidden = false;
+    outcome.removeAttribute("role");
+    outcome.className = `result ${reply.tone || "neutral"} terminal`;
+    outcome.innerHTML = resultMarkup({ tone: reply.tone, mark: reply.icon, label: reply.label, title: reply.title, text: reply.text, rows });
+    document.getElementById("done").addEventListener("click", () => {
+      autoOpened = true;
+      showList();
+    });
+    const scroller = document.scrollingElement || document.documentElement;
+    if (scroller) scroller.scrollTop = 0;
+    outcome.querySelector("h1").focus({ preventScroll: true });
+    announce(`${reply.label}. ${reply.title || ""}`);
+    return;
+  }
+  renderNotice(outcome, reply);
+  renderSaveAnswers();
+  announce(`${reply.label}. ${reply.text}`);
+  if (typeof outcome.scrollIntoView === "function") outcome.scrollIntoView({ block: "nearest" });
+}
+
+function showSaveGone() {
+  render(
+    `<section class="result neutral terminal" id="outcome">${resultMarkup({
+      mark: "superseded",
+      label: "No longer waiting",
+      title: "This save is no longer waiting",
+      text: "It was answered elsewhere, already used, or it expired. Nothing was sent from this phone.",
+    })}</section>`,
+  );
+  document.getElementById("done").addEventListener("click", () => {
+    autoOpened = true;
+    showList();
+  });
+}
+
+function showSaveChanged(requestId) {
+  render(
+    `<section class="result neutral terminal" id="outcome">${resultMarkup({
+      mark: "superseded",
+      label: "Changed",
+      title: "This save changed",
+      text: "The form or the request changed after this phone showed it. Nothing was sent. Look at it again before answering.",
+      done: "Look at it again",
+    })}</section>`,
+  );
+  document.getElementById("done").addEventListener("click", () => showSave(requestId));
 }
 
 // ------------------------------------------------------------------- routing

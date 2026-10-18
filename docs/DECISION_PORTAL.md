@@ -79,9 +79,10 @@ commit recorded in
 [`assets/mobile-decision/provenance.json`](assets/mobile-decision/provenance.json).
 They use synthetic data and a public OpenEMR reference frame. They are not a
 customer run and do not claim that the complete workflow reached `VERIFIED`.
-The `business-decision` and `save-approval` images are labelled previews of the
-same card components: this portal does not serve those decisions (Cloud does),
-and provenance marks them `kind: preview`.
+The `save-approval` and `save-approved` images are the real shell answering a
+save (see **Approving a save**). The `business-decision` image is a labelled
+preview of the same card components: this portal does not serve business
+choices (Cloud does), and provenance marks it `kind: preview`.
 
 ### When the answer cannot be given
 
@@ -264,6 +265,38 @@ second tap gets `409 request_not_waiting`. The receipt is
 `accepted_pending_runner` for an approval (the run re-reads the form before it
 saves and stops if anything changed) or `rejected` for a decline.
 
+### What the phone shows
+
+A waiting save is the same card as a paused run, and it appears in the same
+**Needs you** list (an older runner without the save routes answers 404, which
+the phone treats as "no saves", so paused runs still show):
+
+- **Approve a save · Step 5**, the stakes line from `risk_class`, the question
+  "Save this form?", and the workflow's own step name.
+- The exact screenshot from `.../frame`, labelled "Exactly what will be saved",
+  with the same zoom. **No picture, no approval:** if the frame does not load,
+  or is not a PNG, the picture is removed, "Approve and save" is not shown, and
+  only "Don't save" remains.
+- What happens next: the run reads the form again and saves only if nothing
+  changed.
+- **Approve and save** is one tap. It is filled under the same rule as a
+  paused run: not when `risk_class` is `irreversible`, where both answers are
+  equal.
+- **Don't save** asks "Why shouldn't it save?" and offers only the closed
+  `decline_reasons` the phone has words for (The values are wrong / It's the
+  wrong record / Something on the screen is wrong). A code it cannot name is
+  not offered. There is no free text.
+- The POST body is exactly `action`, `task_digest`, `task_signature`, and for a
+  decline `decline_reason`. Flow forbids extra fields.
+- Receipts: **Approved — Saving after one more check** for
+  `accepted_pending_runner/pending_runner`, and **Not saved — Nothing was
+  saved** for `rejected/rejected_by_operator`. Both show the answer, the
+  reason, "On this phone" with the time, and the `decision_digest` prefix.
+  `409 request_not_waiting`, `request_unknown` and `already_answered` show
+  "This save is no longer waiting". `task_changed` shows "This save changed"
+  and offers to look again. An expired task opens as expired. Offline, nothing
+  is sent.
+
 As with every portal decision, pairing proves a device, not a person: Flow
 records a save answered here as an unauthenticated person on the
 `decision_portal` route. Save approvals stay on the runner. The hosted lane
@@ -401,11 +434,12 @@ It writes `light/` and `dark/` folders and an `index.json`: pairing (scan,
 code, not approved, failed), the list, nothing waiting, each request kind
 (identity, ambiguity, not found, human step, saved-result check, delivery
 uncertainty, optional step, irreversible, expired), the zoomed frame,
-submitting, offline during a decision, unreachable runner, every receipt the
-shell can show (checks passed or failed, paused again, expired, superseded,
+submitting, offline during a decision, unreachable runner, a save approval
+(request, cannot-be-undone, no picture, decline reasons, sending, approved,
+declined, no longer waiting, changed, not accepted, connection lost), every
+receipt the shell can show (checks passed or failed, paused again, expired, superseded,
 rejected, escalated, teach, skipped, reconciled and its two incomplete forms,
-not accepted, unknown, network lost, pending), and the labelled business and
-save-approval previews. `--out` is required so generated images do not enter
+not accepted, unknown, network lost, pending), and the labelled business-decision preview. `--out` is required so generated images do not enter
 the package or source tree by accident.
 
 Add `--docs` to refresh the reviewed set under `docs/assets/mobile-decision/`

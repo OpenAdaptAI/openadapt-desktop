@@ -342,3 +342,6 @@ h1, h2 { font-family: var(--font-display); }
   .answer.primary { border: 3px solid ButtonText; }
   .brand-mark, .link::before { forced-color-adjust: none; }
 }
+
+/* The workflow's own name for a step waiting on a save, under the why line. */
+.why + .step-intent { margin-top: -12px; font-size: 15px; }
