@@ -1,5 +1,7 @@
 # OpenAdapt Desktop
 
+> **Now part of OpenAdapt.** This code lives in [`packages/desktop`](https://github.com/OpenAdaptAI/OpenAdapt/tree/main/packages/desktop) in the [OpenAdapt repository](https://github.com/OpenAdaptAI/OpenAdapt). This repository is archived; open issues and pull requests there.
+
 [![Tests](https://github.com/OpenAdaptAI/openadapt-desktop/actions/workflows/test.yml/badge.svg)](https://github.com/OpenAdaptAI/openadapt-desktop/actions/workflows/test.yml)
 [![Python 3.11 | 3.12](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/OpenAdaptAI/openadapt-desktop/blob/main/LICENSE)
